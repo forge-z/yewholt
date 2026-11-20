@@ -1,1 +1,164 @@
-# yewholt
+# Yewholt
+
+**Yewholt: durable agents on Buzz.**
+
+Yewholt is a headless daemon that runs durable coding agents behind [Buzz](https://github.com/block/buzz). It is not a Buzz fork and it has no UI. The stock Buzz relay runs unmodified on the same host. The stock Buzz app (Mac or iOS, in [block/buzz-app](https://github.com/block/buzz-app)) talks only to that relay. Each bot is a Nostr member of a channel, the same way a person is.
+
+Calendar, email, MCP, cron, memory, kanban, and browser tools are out of core. They belong in later Buzz plugins.
+
+## Architecture
+
+```text
+Buzz app (Mac/iOS) ──WebSocket──► stock buzz-relay (unmodified)
+                                       ▲
+yewholt daemon ──NIP-42 client─────────┘
+      │
+      └─ one @earendil-works/pi-durable harness
+            SQLite store, one conversation per bot
+```
+
+- **Relay.** The official single-node bundle from Buzz `deploy/compose/` (`ghcr.io/block/buzz:0.3.0`, Postgres, Redis, MinIO). `relay/compose.yml` is a verbatim copy of that file. See `relay/SOURCE.md`.
+- **Daemon.** A Node process. It opens one pi-durable `Harness` on a SQLite file and calls `resume()` after every start, so a crashed run continues from the last committed step.
+- **Bot.** One ownerless pi-durable conversation (its own instructions, model, and transcript) plus its own Nostr key. The Onboarding Specialist is the first bot, not a router.
+- **Bridge.** The daemon authenticates to the relay with NIP-42, like any other client. It reads kind 9 channel messages and publishes kind 9 replies, kind 0 profiles, and the membership events below. It does not embed the relay.
+
+### What the wire uses
+
+| Event | Role |
+|---|---|
+| kind 22242 | NIP-42 AUTH. Agents also send a NIP-OA `auth` tag so NIP-AA can admit them while membership is required. |
+| kind 9007 | Create the `yewholt` stream channel (`h`, `name`, `visibility=open`, `channel_type=stream`), matching `buzz-sdk` `build_create_channel`. |
+| kind 9030 | Relay owner adds the bot's pubkey to the NIP-43 member list. |
+| kind 9000 | Add the bot to the channel with `role=bot`, matching `build_add_members`. |
+| kind 0 | Profile (`display_name`) with one NIP-OA `auth` tag `kind=0`, which is how Buzz treats the pubkey as an agent. |
+| kind 9 | Channel chat. Replies carry an `h` tag and a NIP-OA `auth` tag `kind=9`. |
+| kind 30175 | Owner-signed persona (`d` slug, `display_name`, `runtime=yewholt`, model, provider). |
+| kind 30177 | Owner-signed managed agent (`d` = agent pubkey, `persona_id`, `name`, `respond_to`). |
+
+Kind 10100 is named `KIND_AGENT_PROFILE` in `buzz-core` but no NIP in the repo documents its content, so Yewholt does not emit it.
+
+The information-flow broker in `docs/practical-information-flow-for-buzz-agents.md` is a draft. The relay does not implement it. Yewholt holds each bot key on disk and signs as that bot, which is what a normal client does today.
+
+## Requirements
+
+- Node.js 22.19 or newer (pi-durable's engine).
+- Docker with Compose v2, only for `yewholt start` (the relay). Tests do not need it.
+- No API key is required. Keys are optional and are read from the environment only when a session calls a model.
+
+## Run
+
+```bash
+npm install
+npm run build
+npm link          # optional, puts `yewholt` on PATH
+yewholt install   # ~/.yewholt, owner key, relay .env
+yewholt start     # official compose, then the daemon
+yewholt status
+```
+
+`install` writes `~/.yewholt` (override with `--home` or `YEWHOLT_HOME`):
+
+- `secrets/owner.key` and `secrets/bots/<pubkey>.key`, mode `0600`
+- `relay/.env`, mode `0600`, and a copy of the official compose file
+- `state/sessions.sqlite`, the pi-durable store
+
+Open the Buzz app on `ws://127.0.0.1:3000` (or whatever `--port` you set). The daemon creates a channel named `yewholt` and puts the Onboarding Specialist in it. Your owner key is the relay owner (`RELAY_OWNER_PUBKEY`). Import that secret into a Nostr client, or add your existing pubkey with `buzz-admin add-member` inside the relay container, then talk in the channel.
+
+### Chat
+
+The Onboarding Specialist answers these without a model. It posts a summary and does nothing until you approve.
+
+```text
+crie um novo bot e coloque o GPT-6.2 Astra como modelo
+approve
+```
+
+Also:
+
+```text
+create bot name: Alpha model: openai/gpt-6-sol scope: this permissions: post,read
+change model of Alpha to anthropic/claude-sonnet-5
+change scope of Alpha to this
+change permissions of Alpha to post,read
+stop bot Alpha
+start bot Alpha
+reject
+```
+
+`approve`, `sim`, and `aprovo` apply the pending proposal. `reject` drops it. Scope `this` is the channel the message was posted in. Permissions that the daemon honors are `post` (publish kind 9) and `read` (the message is shown to that session). Other tokens are stored on the proposal and shown back; they do not grant extra tools.
+
+A display name such as `GPT-6.2 Astra` is stored as requested and mapped to `openai/gpt-6.2-astra`. pi-ai will call it only when that provider and id exist in the catalog and the matching API key is set. Until then the session still exists, keeps its history, and says so when mentioned.
+
+Mention another bot by name or pubkey. The Onboarding Specialist listens to the whole channel. Other bots answer only when mentioned, and only while they are `active`.
+
+### Keys
+
+Back up `secrets/` and `relay/.env` and keep them offline. Buzz has no key rotation: the pubkey is the identity, and a lost secret cannot be recovered or swapped in place. NIP-OA credentials are capabilities the owner key can reissue; they do not replace the agent secret. To retire a leaked bot key, `stop bot <name>` (it stops answering) and create a new bot. The old pubkey remains a Nostr identity until you remove it from the channel.
+
+### Environment
+
+See `.env.example`. None of these are required.
+
+| Variable | Use |
+|---|---|
+| `OPENAI_API_KEY` | OpenAI provider, registered only when set |
+| `ANTHROPIC_API_KEY` | Anthropic API key. Not a Claude subscription OAuth token |
+| `GEMINI_API_KEY` or `GOOGLE_API_KEY` | Google provider |
+| `OPENROUTER_API_KEY` | OpenRouter provider |
+| `YEWHOLT_MODEL` | Default `provider/modelId` for the Onboarding Specialist |
+| `YEWHOLT_TURN_TOKENS` | Tokens charged for one interpreter turn (default 1000) |
+| `YEWHOLT_BUDGET_TOKENS` | Per-session cap (default 100000) |
+| `YEWHOLT_HOME` | State directory |
+
+Model turns also add pi-durable `pi.usage` token totals, and the session is charged the larger of that delta and one interpreter turn. Approval and rejection do not spend the budget. A session over its cap refuses new work and still accepts `approve` on a proposal it already posted.
+
+`yewholt admin budget <name> <tokens>` changes a cap while the daemon is stopped. `admin keys`, `admin bots`, and `admin channel` are safe while it is up. Do not open the SQLite file from a second process; pi-durable allows one writer.
+
+`yewholt stop` sends the daemon SIGTERM and runs `docker compose stop`. Volumes are kept.
+
+## kill -9 resume
+
+This is the durability proof. A task has three steps. Each step writes `effects/<n>` with `O_EXCL` and records a pi-durable memo, then commits the next checkpoint. Step 2 writes its effect and then waits. `kill -9` lands after that effect and before the checkpoint. pi-durable reruns an unfinished phase from the top (`@earendil-works/pi-durable` README, Persist and Resume; the same shape as example 12). The exclusive file is already there, so the effect is not applied again. Step 1's checkpoint was stored, so step 1 does not run again.
+
+Automated:
+
+```bash
+npm test
+```
+
+Manual:
+
+```bash
+bash scripts/kill9-resume.sh
+```
+
+The script prints the phase trace. Step 2 appears twice. `effects/1`, `effects/2`, and `effects/3` each exist once.
+
+SQLite is opened with pi-durable's Node adapter (WAL, `synchronous=NORMAL`). The package documents that those commits survive a process crash. A power loss can still drop the newest commit.
+
+## Tests
+
+`npm test` builds and runs:
+
+- NIP-OA test vector from `docs/nips/NIP-OA.md`
+- key files mode `0600` and signed kind 9 events
+- the Portuguese create example, approval, a second session, model change, and stop
+- a budget that blocks a second create and still allows `approve`
+- the kill -9 resume above
+
+Relay bring-up is not part of `npm test`. It needs Docker.
+
+## Roadmap
+
+**v0.5.** Git and repo access, with an approval before push or opening a PR. A sandbox per session. Claude Code and Codex as workers. Still no reuse of Claude subscription OAuth tokens inside Yewholt itself.
+
+**v1.** Buzz plugins for the UI-rich modules (calendar, email, MCP, and the rest). Mac personal mode. Key backup. A hosted paid version.
+
+## Known gaps
+
+- Kind 10100 has no content schema in Buzz's NIP docs, so it is not published. Discovery uses kind 0 plus a NIP-OA tag, which `desktop/src-tauri/src/nostr_convert/oa_profile_tests.rs` treats as an agent.
+- The trusted information-flow broker is a proposal, not relay behavior. Yewholt signs with the bot key.
+- `GPT-6.2 Astra` is stored as `openai/gpt-6.2-astra`. Generation waits until pi-ai's catalog has that id. The create/approve path does not call a model.
+- Free text that is not one of the commands above is answered by pi-ai only when `YEWHOLT_MODEL` (or the bot's `provider/modelId`) resolves in the catalog and a provider key is set. Otherwise the bot replies with the command list.
+- NIP-AA kind filters are not enforced per event by every relay. Yewholt sends a fresh `auth` tag whose `kind=` matches the event, and an unconstrained tag on the AUTH event so the agent can connect. See NIP-AA's credential-scope warning.
+- One writer for the SQLite file. `admin budget` refuses to run while the daemon is up.
