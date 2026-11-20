@@ -4,11 +4,12 @@ import { chmodSync, mkdirSync, openSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { loadConfig, saveConfig } from "./config.js";
+import { ensureEnvFile, loadEnvFile } from "./env-file.js";
 import { readPid, runDaemon } from "./daemon.js";
 import { ensureOwnerKey } from "./session.js";
 import { pubkeyOf } from "./nostr.js";
 import { readKey } from "./keys.js";
-import { logPath, ownerKeyPath, pidPath, secretsDir, sqlitePath, statusPath, yewholtHome } from "./paths.js";
+import { envFilePath, logPath, ownerKeyPath, pidPath, secretsDir, sqlitePath, statusPath, yewholtHome } from "./paths.js";
 import { compose, newRelaySecret, relayHealthy, waitForRelay, writeRelayEnv } from "./relay.js";
 import { Yewholt } from "./session.js";
 
@@ -22,6 +23,7 @@ main().catch((error: unknown) => {
 
 async function main(): Promise<void> {
   const home = flag("--home") ?? yewholtHome();
+  loadEnvFile(home);
   if (command === "install") return install(home);
   if (command === "start") return start(home);
   if (command === "stop") return stop(home);
@@ -67,7 +69,9 @@ async function install(home: string): Promise<void> {
   console.log(`Installed Yewholt in ${home}`);
   console.log(`Owner pubkey: ${ownerPubkey}`);
   console.log("Relay: stock Buzz compose (ghcr.io/block/buzz:0.3.0) with Postgres, Redis, and MinIO.");
+  const envFile = ensureEnvFile(home);
   console.log("Back up secrets/ and relay/.env. Buzz has no key rotation; a lost secret is a lost identity.");
+  console.log(`Provider keys: ${envFile} (mode 0600). Paste a key, then yewholt start. Restart after changes.`);
   console.log("Next: yewholt start");
 }
 

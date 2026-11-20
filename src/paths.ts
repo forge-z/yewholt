@@ -41,3 +41,8 @@ export function logPath(home: string): string {
 export function relayDir(home: string): string {
   return join(home, "relay");
 }
+
+/** Provider keys for the daemon. Not the relay's compose env. */
+export function envFilePath(home: string): string {
+  return join(home, ".env");
+}

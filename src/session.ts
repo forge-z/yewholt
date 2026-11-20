@@ -42,7 +42,7 @@ export class Yewholt {
   ) {}
 
   static async open(storage: Storage, options: SessionOptions): Promise<Yewholt> {
-    const models = options.models ?? loadModels();
+    const models = options.models ?? (await loadModels());
     const registry = createRegistry();
     const harness = await Harness.open(
       storage,
