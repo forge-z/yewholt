@@ -303,6 +303,37 @@ test("external bot link forwards its auth record, tracks DM changes, and reconne
   assert.equal(clients[2]?.closed, true);
 });
 
+test("a hosted agent discovers a DM stored after its initial members request without reconnecting", async (t) => {
+  let now = 0;
+  t.mock.method(performance, "now", () => now);
+  const h = harness();
+  const bot: LinkBot = { ...coderBot, external: true, scope: [] };
+  await h.links.sync([onboardingBot]);
+  await h.links.sync([onboardingBot, bot]);
+  const client = h.latest(CODER);
+  assert.deepEqual(client.wire, ["REQ members"]);
+  assert.deepEqual(h.links.channels(CODER), []);
+
+  // The new DM is available to subsequent REQs, but the original REQ gets no live event.
+  const dm = { ...byKind(39002, PRIVATE), tags: [["d", PRIVATE], ["p", CODER], ["p", OWNER]] };
+  now = 9_999;
+  await h.links.sync([onboardingBot, bot]);
+  assert.deepEqual(client.wire, ["REQ members"]);
+  now = 10_000;
+  await h.links.sync([onboardingBot, bot]);
+  assert.equal(h.latest(CODER), client);
+  assert.deepEqual(client.wire, ["REQ members", "REQ members"]);
+  assert.deepEqual(client.sub("members")?.filters, [{ kinds: [39002], "#p": [CODER] }]);
+
+  client.emit("members", dm);
+  assert.deepEqual(h.links.channels(CODER), [PRIVATE]);
+  assert.deepEqual(client.sub(`chat:${PRIVATE}`)?.filters, [{ kinds: [9], "#h": [PRIVATE], since: 1_795_231_700 }]);
+  assert.deepEqual(client.sub("members-d")?.filters, [{ kinds: [39002], "#d": [PRIVATE] }]);
+  client.emit(client.id(`chat:${PRIVATE}`)!, byKind(9));
+  assert.equal(h.messages[0]?.channelId, PRIVATE);
+  assert.equal(h.latest(onboardingBot.pubkey).wire.filter((frame) => frame === "REQ members").length, 1);
+});
+
 test("publishAll: each event goes out on its signer's own connection, owner first, temporary links closed", async () => {
   const owner = new FakeClient(OWNER);
   const coder = new FakeClient(CODER);
