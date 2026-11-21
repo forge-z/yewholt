@@ -107,7 +107,7 @@ export class WorkspaceEnv extends NodeExecutionEnv {
 }
 
 export type PathVerdict = { kind: "allow" } | { kind: "approve"; reason: string } | { kind: "refuse"; reason: string };
-export type Roots = { home: string; workspace: string };
+export type Roots = { home: string; workspace: string; credentialFile?: string };
 
 /**
  * What a `read`, `write` or `edit` call on `rawPath` may do:
@@ -125,6 +125,12 @@ export function judgePath(tool: "read" | "write" | "edit", rawPath: string, root
   try {
     lexical = tool === "read" ? resolveReadPath(requested) : requested;
     physical = physicalPath(lexical);
+    if (roots.credentialFile) {
+      const credentialFile = resolve(roots.credentialFile);
+      if (requested === credentialFile || physical === physicalPath(credentialFile)) {
+        return { kind: "refuse", reason: "Pi's credential file is private" };
+      }
+    }
     home = physicalPath(resolve(roots.home));
     workspace = physicalPath(resolve(roots.workspace));
   } catch (error) {

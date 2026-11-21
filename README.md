@@ -25,7 +25,7 @@ Yewholt calls the public `main()` export of `@earendil-works/pi-coding-agent`, t
 
 Yewholt adds two defaults and nothing else:
 
-- `$YEWHOLT_HOME/.env` (default `~/.yewholt/.env`) is loaded first, so the provider keys the bots use also work in the harness. A variable set in the shell wins.
+- `$YEWHOLT_HOME/.env` (default `~/.yewholt/.env`) is loaded before Pi starts. A variable already set in the shell wins over the file. API keys saved by Pi login also work in the daemon (see [Provider keys on the host](#provider-keys-on-the-host)).
 - If `YEWHOLT_MODEL` is set and you pass no `--model`, Yewholt passes `--model $YEWHOLT_MODEL`. A `--model` on the command line wins. Pi subcommands such as `install` or `config` get no default model.
 
 `--home` is not read in harness mode; set `YEWHOLT_HOME` to point at another state directory.
@@ -634,7 +634,7 @@ Code-bot commands run as the dedicated, unprivileged bot account through `sudo -
 
 Yewholt checks isolation at startup and before code-bot tool calls, and caches a successful check for at most 60 seconds. If the account, sudo access, group membership, workspace root, or daemon HOME fails validation, the tools return a refusal with the failed check and the setup command. The daemon logs the first failure and exposes the check result in `status.json` and `yewholt status`. For local development only, `YEWHOLT_UNSAFE_SHARED_USER=1` runs shell commands as the daemon user, with workspaces still outside the state directory. Every daemon start in this mode logs a warning.
 
-`read`, `write`, and `edit` run in the daemon with group access. They refuse paths into `$YEWHOLT_HOME` and other bots' workspaces, including through symlinks. Reads elsewhere use the daemon's permissions, including in its login HOME. Writes or edits outside the workspace need approval. The path check and the filesystem operation are separate, so concurrent symlink changes can race the check.
+`read`, `write`, and `edit` run in the daemon with group access. They refuse paths into `$YEWHOLT_HOME`, other bots' workspaces, and Pi's `auth.json`, including through symlinks. Reads elsewhere use the daemon's permissions, including in its login HOME. Writes or edits outside the workspace need approval. The path check and the filesystem operation are separate, so concurrent symlink changes can race the check.
 
 The bot shell can reach the network and access files available to the bot account. All code bots share one Unix user, so shell commands can read or modify each other's workspaces. Package code runs inside the daemon with access to its environment and permissions. Install only packages you trust.
 
@@ -656,29 +656,21 @@ Back up `secrets/` and `relay/.env` and keep them offline. Buzz has no key rotat
 
 ### Provider keys on the host
 
-The daemon reads keys from the environment of the process that runs it. `yewholt start` loads `$YEWHOLT_HOME/.env` (default `~/.yewholt/.env`) before it spawns the daemon, and the daemon loads that same file again when it starts. `yewholt install` creates the file if it is missing and sets mode `0600`. A later start tightens the mode to `0600` if the file was created world-readable.
-
-Paste a key over SSH, then restart so the process picks it up:
+Run `/login` inside `yewholt`, or log in with an API key from the terminal. For example:
 
 ```bash
-umask 077
-install -m 600 -d ~/.yewholt
-cat >> ~/.yewholt/.env <<'EOF'
-OPENCODE_API_KEY=sk-...
-YEWHOLT_MODEL=opencode/big-pickle
-EOF
-chmod 600 ~/.yewholt/.env
-yewholt stop
-yewholt start
+yewholt code auth login deepseek --api-key
 ```
 
-A variable already set in the shell wins over the file. The file is not the relay's `relay/.env` (that one holds Postgres, Redis, and the relay key). `YEWHOLT_HOME` is read from the shell before the file, so put it in the service environment if the state directory is not `~/.yewholt`.
+The daemon reads the API key from the same Pi `auth.json`; there is nothing to copy. Log in on the machine running the daemon, with the same Unix user and HOME it uses. Pi defaults to `~/.pi/agent/auth.json`; if you set `PI_CODING_AGENT_DIR`, use the same absolute directory for login and the daemon. The daemon's `--home` changes Yewholt's state directory, not Pi's. Keep the auth file private to the daemon user. Restart the daemon after logging in, changing a key, or logging out so it rebuilds its model catalog.
+
+You can also supply provider keys in the daemon's environment or `$YEWHOLT_HOME/.env` (default `~/.yewholt/.env`, mode `0600`). For the daemon, a usable environment credential takes precedence over a saved Pi key; shell variables win over the `.env` file. This is not the relay's `relay/.env`. `YEWHOLT_HOME` is read before its `.env`, so set it in the service environment if needed.
 
 `YEWHOLT_MODEL` is `provider/modelId`. OpenCode Zen free models are catalog ids with a zero cost, for example `opencode/big-pickle` or `opencode/deepseek-v4.1-flash-free`. `OPENCODE_API_KEY` registers both `opencode` and `opencode-go`.
 
 ### Environment
 
-None of these are required. A provider is registered only when its own credential resolves from the environment. The set is `builtinProviders()` from `@earendil-works/pi-ai` 1.6.0, the same list [pi-bot](https://github.com/forge-z/pi-bot) registers in `src/native-providers.ts`, minus subscription OAuth.
+None of these are required. A built-in provider is registered when its credential resolves from the environment or a saved Pi API key. The set is `builtinProviders()` from `@earendil-works/pi-ai` 1.6.0, the same list [pi-bot](https://github.com/forge-z/pi-bot) registers in `src/native-providers.ts`, minus subscription OAuth.
 
 | Provider | Env | Notes |
 |---|---|---|
@@ -730,7 +722,7 @@ None of these are required. A provider is registered only when its own credentia
 | `YEWHOLT_MODEL` | Default `provider/modelId`, for example `opencode/big-pickle`. Used for a create request that names no model, and as the harness default when no `--model` is given |
 | `YEWHOLT_TURN_TOKENS` | Tokens charged for one interpreter turn (default 1000) |
 | `YEWHOLT_BUDGET_TOKENS` | Per-session cap (default 100000) |
-| `YEWHOLT_HOME` | State directory. The key file is `$YEWHOLT_HOME/.env` |
+| `YEWHOLT_HOME` | State directory. Host configuration and optional provider variables are in `$YEWHOLT_HOME/.env` |
 | `YEWHOLT_BOT_USER` | Unprivileged Unix account for code-bot commands (default `yewholt-bot`) |
 | `YEWHOLT_BOT_GROUP` | Workspace group shared by the bot account and the daemon (default `yewholt-ws`) |
 | `YEWHOLT_WORKSPACES` | Workspace root, outside `$YEWHOLT_HOME` (default `/srv/yewholt/workspaces`) |
@@ -779,7 +771,7 @@ SQLite is opened with pi-durable's Node adapter (WAL, `synchronous=NORMAL`). The
 - a budget that blocks a second create and still allows `approve`
 - the kill -9 resume above
 - code bots: the approval classifier (every dangerous form, combined flags, quoting, `cd x && rm -rf y`, safe look-alikes); the workspace folder and its minimal env; a bash call cannot see a variable set in the daemon's `process.env`; `$YEWHOLT_HOME` reads refused, also through symlinks; tools only with `code`, never for the Onboarding Specialist, and grant/revoke on the next turn; the approval flow end to end on pi-ai's faux provider (park, request message, `aprovo` runs once, `rejeito` refuses, ambiguity asks, reply targets one request, a non-owner's `aprovo` runs nothing and leaves the request queued, an admin from `YEWHOLT_ADMINS` and the install owner can answer); a model error on the faux provider reaches the chat with its reason and provider text, with a fake key masked, for plain and code bots; a kill -9 while parked, then `aprovo` after reopen runs the command exactly once; the Pi package loader with a fixture `pi.durable` package and a broken one that is skipped
-- every pi-ai built-in provider registers only when its env credential resolves, including OpenCode Zen (`opencode/big-pickle`), and Claude/Codex subscription tokens do not
+- pi-ai built-in providers register from environment credentials or saved Pi API keys, including OpenCode Zen (`opencode/big-pickle`); Claude/Codex subscription tokens do not register
 - `~/.yewholt/.env` loads at start, does not override the shell, and is mode `0600`
 - CLI routing: `yewholt` and `yewholt code ...` reach the harness with arguments unchanged, `YEWHOLT_MODEL` is added only without `--model`, help flags exit 0, daemon commands route to themselves, unknown commands exit 1. The tests do not start the TUI or call a model
 
