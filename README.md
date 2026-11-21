@@ -95,20 +95,85 @@ Mention another bot by name or pubkey. The Onboarding Specialist listens to the 
 
 Back up `secrets/` and `relay/.env` and keep them offline. Buzz has no key rotation: the pubkey is the identity, and a lost secret cannot be recovered or swapped in place. NIP-OA credentials are capabilities the owner key can reissue; they do not replace the agent secret. To retire a leaked bot key, `stop bot <name>` (it stops answering) and create a new bot. The old pubkey remains a Nostr identity until you remove it from the channel.
 
+### Provider keys on the host
+
+The daemon reads keys from the environment of the process that runs it. `yewholt start` loads `$YEWHOLT_HOME/.env` (default `~/.yewholt/.env`) before it spawns the daemon, and the daemon loads that same file again when it starts. `yewholt install` creates the file if it is missing and sets mode `0600`. A later start tightens the mode to `0600` if the file was created world-readable.
+
+Paste a key over SSH, then restart so the process picks it up:
+
+```bash
+umask 077
+install -m 600 -d ~/.yewholt
+cat >> ~/.yewholt/.env <<'EOF'
+OPENCODE_API_KEY=sk-...
+YEWHOLT_MODEL=opencode/big-pickle
+EOF
+chmod 600 ~/.yewholt/.env
+yewholt stop
+yewholt start
+```
+
+A variable already set in the shell wins over the file. The file is not the relay's `relay/.env` (that one holds Postgres, Redis, and the relay key). `YEWHOLT_HOME` is read from the shell before the file, so put it in the service environment if the state directory is not `~/.yewholt`.
+
+`YEWHOLT_MODEL` is `provider/modelId`. OpenCode Zen free models are catalog ids with a zero cost, for example `opencode/big-pickle` or `opencode/deepseek-v4.1-flash-free`. `OPENCODE_API_KEY` registers both `opencode` and `opencode-go`.
+
 ### Environment
 
-See `.env.example`. None of these are required.
+None of these are required. A provider is registered only when its own credential resolves from the environment. The set is `builtinProviders()` from `@earendil-works/pi-ai` 1.6.0, the same list [pi-bot](https://github.com/forge-z/pi-bot) registers in `src/native-providers.ts`, minus subscription OAuth.
+
+| Provider | Env | Notes |
+|---|---|---|
+| `amazon-bedrock` | `AWS_BEARER_TOKEN_BEDROCK`, or `AWS_PROFILE`, or `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`, or `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`, or `AWS_CONTAINER_CREDENTIALS_FULL_URI`, or `AWS_WEB_IDENTITY_TOKEN_FILE` | Any one source |
+| `ant-ling` | `ANT_LING_API_KEY` | |
+| `anthropic` | `ANTHROPIC_API_KEY` | API key only. A value containing `sk-ant-oat` is ignored. `ANTHROPIC_OAUTH_TOKEN` is not read |
+| `azure` | `AZURE_OPENAI_API_KEY` | |
+| `baseten` | `BASETEN_API_KEY` | |
+| `cerebras` | `CEREBRAS_API_KEY` | |
+| `cloudflare-ai-gateway` | `CLOUDFLARE_API_KEY`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_GATEWAY_ID` | All three |
+| `cloudflare-workers-ai` | `CLOUDFLARE_API_KEY`, `CLOUDFLARE_ACCOUNT_ID` | Both |
+| `deepseek` | `DEEPSEEK_API_KEY` | |
+| `fireworks` | `FIREWORKS_API_KEY` | |
+| `github-copilot` | `COPILOT_GITHUB_TOKEN` | |
+| `google` | `GEMINI_API_KEY` | `GOOGLE_API_KEY` is not the Gemini key |
+| `google-vertex` | `GOOGLE_CLOUD_API_KEY`, or `GOOGLE_APPLICATION_CREDENTIALS` + `GOOGLE_CLOUD_PROJECT` (or `GCLOUD_PROJECT`) + `GOOGLE_CLOUD_LOCATION` | The credentials path must exist |
+| `groq` | `GROQ_API_KEY` | |
+| `huggingface` | `HF_TOKEN` | |
+| `kimi-coding` | `KIMI_API_KEY` | |
+| `meta` | `META_API_KEY` | |
+| `minimax` | `MINIMAX_API_KEY` | |
+| `minimax-cn` | `MINIMAX_CN_API_KEY` | |
+| `mistral` | `MISTRAL_API_KEY` | |
+| `moonshotai`, `moonshotai-cn` | `MOONSHOT_API_KEY` | Shared |
+| `nvidia` | `NVIDIA_API_KEY` | |
+| `openai` | `OPENAI_API_KEY` | |
+| `opencode` | `OPENCODE_API_KEY` | OpenCode Zen, including free models |
+| `opencode-go` | `OPENCODE_API_KEY` | Same key as Zen |
+| `openrouter` | `OPENROUTER_API_KEY` | |
+| `qwen-token-plan` | `QWEN_TOKEN_PLAN_TEAM_API_KEY` or `QWEN_TOKEN_PLAN_API_KEY` | Either |
+| `qwen-token-plan-cn` | `QWEN_TOKEN_PLAN_TEAM_CN_API_KEY` or `QWEN_TOKEN_PLAN_CN_API_KEY` | Either |
+| `qwen-token-plan-individual` | `QWEN_TOKEN_PLAN_INDIVIDUAL_API_KEY` or `QWEN_TOKEN_PLAN_API_KEY` | Either |
+| `qwen-token-plan-individual-cn` | `QWEN_TOKEN_PLAN_INDIVIDUAL_CN_API_KEY` or `QWEN_TOKEN_PLAN_CN_API_KEY` | Either |
+| `radius` | `RADIUS_API_KEY` | |
+| `together` | `TOGETHER_API_KEY` | |
+| `typesafe` | `TYPESAFE_API_KEY` | |
+| `vercel-ai-gateway` | `AI_GATEWAY_API_KEY` | |
+| `xai` | `XAI_API_KEY` | |
+| `xiaomi` | `XIAOMI_API_KEY` | |
+| `xiaomi-token-plan-ams` | `XIAOMI_TOKEN_PLAN_AMS_API_KEY` | |
+| `xiaomi-token-plan-cn` | `XIAOMI_TOKEN_PLAN_CN_API_KEY` | |
+| `xiaomi-token-plan-sgp` | `XIAOMI_TOKEN_PLAN_SGP_API_KEY` | |
+| `zai` | `ZAI_API_KEY` | |
+| `zai-coding-cn` | `ZAI_CODING_CN_API_KEY` | |
+| `openai-codex` | none | Not registered. ChatGPT/Codex subscription OAuth |
 
 | Variable | Use |
 |---|---|
-| `OPENAI_API_KEY` | OpenAI provider, registered only when set |
-| `ANTHROPIC_API_KEY` | Anthropic API key. Not a Claude subscription OAuth token |
-| `GEMINI_API_KEY` or `GOOGLE_API_KEY` | Google provider |
-| `OPENROUTER_API_KEY` | OpenRouter provider |
-| `YEWHOLT_MODEL` | Default `provider/modelId` for the Onboarding Specialist |
+| `YEWHOLT_MODEL` | Default `provider/modelId`, for example `opencode/big-pickle` |
 | `YEWHOLT_TURN_TOKENS` | Tokens charged for one interpreter turn (default 1000) |
 | `YEWHOLT_BUDGET_TOKENS` | Per-session cap (default 100000) |
-| `YEWHOLT_HOME` | State directory |
+| `YEWHOLT_HOME` | State directory. The key file is `$YEWHOLT_HOME/.env` |
+
+The full commented list is in `.env.example`. No dependency was added for this; the file parser is a few lines in `src/env-file.ts`.
 
 Model turns also add pi-durable `pi.usage` token totals, and the session is charged the larger of that delta and one interpreter turn. Approval and rejection do not spend the budget. A session over its cap refuses new work and still accepts `approve` on a proposal it already posted.
 
@@ -145,6 +210,8 @@ SQLite is opened with pi-durable's Node adapter (WAL, `synchronous=NORMAL`). The
 - the Portuguese create example, approval, a second session, model change, and stop
 - a budget that blocks a second create and still allows `approve`
 - the kill -9 resume above
+- every pi-ai built-in provider registers only when its env credential resolves, including OpenCode Zen (`opencode/big-pickle`), and Claude/Codex subscription tokens do not
+- `~/.yewholt/.env` loads at start, does not override the shell, and is mode `0600`
 
 Relay bring-up is not part of `npm test`. It needs Docker.
 
