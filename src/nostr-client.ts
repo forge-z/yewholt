@@ -18,6 +18,8 @@ export class RelayClient {
   /** One handler per subscription id. EVENT frames go only to the id they name. */
   private readonly subscriptions = new Map<string, Subscription>();
   private readonly closedLogged = new Set<string>();
+  /** Ids this client sent CLOSE for; the relay's answer to those is not a relay close. */
+  private readonly selfClosed = new Set<string>();
   private challenge: ((value: string) => void) | undefined;
   private authed: Promise<void> | undefined;
 
@@ -74,6 +76,7 @@ export class RelayClient {
   /** CLOSE `id` and drop its handler. Late EVENT frames for it are ignored. */
   unsubscribe(id: string): void {
     if (!this.subscriptions.delete(id)) return;
+    this.selfClosed.add(id);
     this.send(["CLOSE", id]);
   }
 
@@ -112,6 +115,7 @@ export class RelayClient {
     if (type === "CLOSED" && typeof rest[0] === "string") {
       const id = rest[0];
       const reason = typeof rest[1] === "string" ? rest[1] : "";
+      if (this.selfClosed.delete(id)) return;
       const subscription = this.subscriptions.get(id);
       this.subscriptions.delete(id);
       const key = `${id}\n${reason}`;

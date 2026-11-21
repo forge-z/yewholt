@@ -37,6 +37,17 @@ class FakeClient implements ChatClient {
   emit(id: string, event: NostrEvent): void {
     this.subs.get(id)?.onEvent(event);
   }
+  /** Subscription id for `prefix`, whether bare or counter-suffixed ("members-d#2"). */
+  id(prefix: string): string | undefined {
+    return [...this.subs.keys()].find((key) => key === prefix || key.startsWith(`${prefix}#`));
+  }
+  has(prefix: string): boolean {
+    return this.id(prefix) !== undefined;
+  }
+  sub(prefix: string): Sub | undefined {
+    const id = this.id(prefix);
+    return id === undefined ? undefined : this.subs.get(id);
+  }
   relayClosed(id: string, reason: string): void {
     const sub = this.subs.get(id);
     this.subs.delete(id);
@@ -104,31 +115,37 @@ test("bot link: own 39002 #p subscription, kind 9 per effective channel, re-subs
   await h.links.sync([onboardingBot, coderBot]);
   const coder = h.latest(CODER);
   assert.deepEqual(coder.subs.get("members")?.filters, [{ kinds: [39002], "#p": [CODER] }]);
-  assert.deepEqual(coder.subs.get(`chat:${INSTALL}`)?.filters, [{ kinds: [9], "#h": [INSTALL], since: 1_795_231_700 }]);
-  assert.equal(coder.subs.has(`chat:${PRIVATE}`), false);
+  assert.deepEqual(coder.sub(`chat:${INSTALL}`)?.filters, [{ kinds: [9], "#h": [INSTALL], since: 1_795_231_700 }]);
+  assert.equal(coder.has(`chat:${PRIVATE}`), false);
   assert.equal(h.links.client(CODER), coder);
 
   // The relay replays the stored 39002s that list Coder.
   for (const event of botEvents()) coder.emit("members", event);
   assert.deepEqual(h.membership.get(CODER), [PRIVATE, INSTALL].sort());
-  assert.deepEqual(coder.subs.get(`chat:${PRIVATE}`)?.filters, [{ kinds: [9], "#h": [PRIVATE], since: 1_795_231_700 }]);
+  assert.deepEqual(coder.sub(`chat:${PRIVATE}`)?.filters, [{ kinds: [9], "#h": [PRIVATE], since: 1_795_231_700 }]);
   assert.deepEqual(h.links.channels(CODER), [INSTALL, PRIVATE]);
   // Removal detection: the newest list per member channel, whether or not it still names Coder.
-  assert.deepEqual(coder.subs.get("members-d")?.filters, [{ kinds: [39002], "#d": [INSTALL, PRIVATE] }]);
+  assert.deepEqual(coder.sub("members-d")?.filters, [{ kinds: [39002], "#d": [INSTALL, PRIVATE] }]);
 
   // The fixture message reaches the inbox through Coder's own connection, channel from h.
-  coder.emit(`chat:${PRIVATE}`, byKind(9));
+  const chatId = coder.id(`chat:${PRIVATE}`);
+  assert.ok(chatId);
+  coder.emit(chatId, byKind(9));
   assert.equal(h.messages.length, 1);
   assert.equal(h.messages[0]!.channelId, PRIVATE);
 
   // Removed in the app: newer list without Coder. Unsubscribe that channel and re-issue members-d.
   const before = coder.wire.length;
-  coder.emit("members-d", privateListWithoutCoder());
+  const oldChat = coder.id(`chat:${PRIVATE}`);
+  const oldD = coder.id("members-d");
+  assert.ok(oldChat && oldD);
+  coder.emit(oldD, privateListWithoutCoder());
   assert.deepEqual(h.membership.get(CODER), [INSTALL]);
-  assert.equal(coder.subs.has(`chat:${PRIVATE}`), false);
-  assert.ok(coder.subs.has(`chat:${INSTALL}`), "stored scope stays subscribed");
-  assert.deepEqual(coder.wire.slice(before), [`CLOSE chat:${PRIVATE}`, "CLOSE members-d", "REQ members-d"]);
-  assert.deepEqual(coder.subs.get("members-d")?.filters, [{ kinds: [39002], "#d": [INSTALL] }]);
+  assert.equal(coder.has(`chat:${PRIVATE}`), false);
+  assert.ok(coder.has(`chat:${INSTALL}`), "stored scope stays subscribed");
+  const newD = coder.id("members-d");
+  assert.deepEqual(coder.wire.slice(before), [`CLOSE ${oldChat}`, `CLOSE ${oldD}`, `REQ ${newD}`]);
+  assert.deepEqual(coder.sub("members-d")?.filters, [{ kinds: [39002], "#d": [INSTALL] }]);
 
   // A forged list (not the relay key) changes nothing and causes no wire traffic.
   const forged = signEvent(generateKeyPair().secret, 39002, "", byKind(39002, PRIVATE).tags, privateListWithoutCoder().created_at + 10);
@@ -147,10 +164,44 @@ test("bot link: no relay key means no 39002 subscription and only the stored sco
   const h = harness(null);
   await h.links.sync([coderBot]);
   const coder = h.latest(CODER);
-  assert.equal(coder.subs.has("members"), false);
-  assert.deepEqual([...coder.subs.keys()], [`chat:${INSTALL}`]);
+  assert.equal(coder.has("members"), false);
+  assert.deepEqual([...coder.subs.keys()], [coder.id(`chat:${INSTALL}`)]);
   coder.emit("members", byKind(39002, PRIVATE));
   assert.equal(coder.subs.has(`chat:${PRIVATE}`), false);
+});
+
+test("bot link: each members-d subscription gets a fresh id, so a stale CLOSED cannot cancel the live one", async (t) => {
+  t.mock.method(console, "error", () => undefined);
+  const h = harness();
+  await h.links.sync([coderBot]);
+  const coder = h.latest(CODER);
+  for (const event of botEvents()) coder.emit("members", event);
+  const firstId = coder.id("members-d");
+  assert.ok(firstId);
+  const staleClosed = coder.sub("members-d")?.onClosed;
+  assert.ok(staleClosed);
+  // Two consecutive refreshes with different member channels: removal in the app.
+  const before = coder.wire.length;
+  const oldChat = coder.id(`chat:${PRIVATE}`);
+  assert.ok(oldChat);
+  coder.emit(firstId, privateListWithoutCoder());
+  const secondId = coder.id("members-d");
+  assert.ok(secondId);
+  assert.notEqual(secondId, firstId);
+  assert.deepEqual(coder.wire.slice(before), [`CLOSE ${oldChat}`, `CLOSE ${firstId}`, `REQ ${secondId}`]);
+
+  // The relay's CLOSED for the id we already closed arrives late, after REQ secondId.
+  staleClosed(firstId, "");
+  assert.ok(coder.has(secondId), "the live members-d subscription survives");
+  assert.deepEqual(coder.sub(secondId)?.filters, [{ kinds: [39002], "#d": [INSTALL] }]);
+
+  // The surviving subscription still delivers: a newer list re-adds Coder.
+  coder.emit(secondId, { ...byKind(39002, PRIVATE), created_at: byKind(39002, PRIVATE).created_at + 120 });
+  assert.deepEqual(h.membership.get(CODER), [PRIVATE, INSTALL].sort());
+  assert.equal([...coder.subs.keys()].filter((id) => id.startsWith("members-d")).length, 1);
+  const thirdId = coder.id("members-d");
+  assert.ok(thirdId);
+  assert.notEqual(thirdId, firstId, "a closed id is never reused");
 });
 
 test("bot link: a CLOSED channel is not retried until the relay lists the bot there", async (t) => {
@@ -159,12 +210,14 @@ test("bot link: a CLOSED channel is not retried until the relay lists the bot th
   await h.links.sync([{ ...coderBot, scope: [INSTALL, PRIVATE] }]);
   const coder = h.latest(CODER);
   const [, , reason] = capture().owner_req_private_channel_closed;
-  coder.relayClosed(`chat:${PRIVATE}`, reason);
+  const privateId = coder.id(`chat:${PRIVATE}`);
+  assert.ok(privateId);
+  coder.relayClosed(privateId, reason);
   await h.links.sync([{ ...coderBot, scope: [INSTALL, PRIVATE] }]);
-  assert.equal(coder.subs.has(`chat:${PRIVATE}`), false);
-  assert.ok(coder.subs.has(`chat:${INSTALL}`));
+  assert.equal(coder.has(`chat:${PRIVATE}`), false);
+  assert.ok(coder.has(`chat:${INSTALL}`));
   coder.emit("members", byKind(39002, PRIVATE));
-  assert.ok(coder.subs.has(`chat:${PRIVATE}`));
+  assert.ok(coder.has(`chat:${PRIVATE}`));
 });
 
 test("bot link lifecycle: approved create/start opens a connection, stop closes it, scope change re-subscribes", async () => {
@@ -187,9 +240,9 @@ test("bot link lifecycle: approved create/start opens a connection, stop closes 
   assert.notEqual(second, first);
   const elsewhere = "44444444-4444-4444-8444-444444444444";
   await h.links.sync([onboardingBot, { ...coderBot, scope: [INSTALL, elsewhere] }]);
-  assert.ok(second.subs.has(`chat:${elsewhere}`));
+  assert.ok(second.has(`chat:${elsewhere}`));
   await h.links.sync([onboardingBot, coderBot]);
-  assert.equal(second.subs.has(`chat:${elsewhere}`), false);
+  assert.equal(second.has(`chat:${elsewhere}`), false);
 
   await h.links.closeAll();
   assert.equal(second.closed, true);
