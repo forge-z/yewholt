@@ -316,8 +316,8 @@ test("owner shutdown is durable, requires newer provisioning, and cannot be repl
     assert.deepEqual(state.bots[0]?.shutdownEventIds, [stop.eventId]);
     assert.deepEqual(state.outbox.map(({ kind, content, tags }) => ({ kind, content, tags })), [{ kind: 20001, content: "offline", tags: [] }]);
     await session.ackOutbox(state.outbox.map((event) => event.id));
-    tick(1000);
-    f.write({ channelId: PRIVATE }, start + 1000);
+    tick(2000);
+    f.write({ channelId: PRIVATE }, start + 2000);
     await reconcile(f, session);
     // The ordinary inbox history is bounded. Shutdown replay protection must survive it.
     await session.harness.commit(async (tx) => { (await tx.doc(RegistryDoc)).processed = []; }, BACKGROUND_CONTEXT);
@@ -357,27 +357,5 @@ test("stranger shutdown is ignored and logged once", async (t) => {
     assert.equal(state.outbox.length, 0);
     assert.equal(log.mock.callCount(), 1);
     assert.equal(JSON.stringify(log.mock.calls[0]?.arguments).includes(f.agent.secret), false);
-  });
-});
-
-test("daemon-created member bots still publish identity and require a mention in DMs", async () => {
-  await withAgent(async (f, session) => {
-    ensureOwnerKey(f.home);
-    await session.ensureOnboarding(INSTALL);
-    await session.handleHuman(say("create", "create bot name: Local model: test/offline", OWNER, INSTALL));
-    await session.handleHuman(say("approve", "approve", OWNER, INSTALL));
-    const before = await session.snapshot();
-    const local = before.bots.find((bot) => bot.name === "Local");
-    assert.ok(local);
-    assert.deepEqual(before.outbox.filter((event) => [0, 30175, 30177, 9030, 9000].includes(event.kind)).map((event) => event.kind),
-      [0, 30175, 30177, 9030, 9000, 0, 30175, 30177, 9030, 9000]);
-    session.setMemberChannels(local.pubkey, [PRIVATE], [PRIVATE]);
-    await session.handleHuman(say("no-mention"));
-    await session.refreshAgentRuntime([local.pubkey]);
-    assert.equal((await session.snapshot()).outbox.length, before.outbox.length);
-    await session.handleHuman(say("mention", "@Local hello"));
-    const reply = (await session.snapshot()).outbox.at(-1);
-    assert.equal(reply?.pubkey, local.pubkey);
-    assert.equal(reply?.tags[1]?.[2], "kind=9");
   });
 });

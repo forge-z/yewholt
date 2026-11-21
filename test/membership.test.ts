@@ -5,8 +5,6 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { effectiveScope, memberChannels, newestMemberLists } from "../src/membership.js";
 import { generateKeyPair, signEvent } from "../src/nostr.js";
-import { relayDir } from "../src/paths.js";
-import { readRelayPubkey, writeRelayEnv } from "../src/relay.js";
 import { ADMIN, botEvents, byKind, CODER, INSTALL, OWNER, PRIVATE, privateListWithoutCoder, RELAY } from "./helpers/fixture.js";
 
 test("membership: Coder is in the install channel and the private channel from the relay-signed 39002s", () => {
@@ -63,42 +61,4 @@ test("effective scope is the stored scope plus member channels, stored order fir
   assert.deepEqual(effectiveScope([INSTALL], new Set([PRIVATE, INSTALL])), [INSTALL, PRIVATE]);
   assert.deepEqual(effectiveScope([INSTALL], new Set()), [INSTALL]);
   assert.deepEqual(effectiveScope([], undefined), []);
-});
-
-test("relay key: derived from BUZZ_RELAY_PRIVATE_KEY in relay/.env, secret never returned", () => {
-  const home = mkdtempSync(join(tmpdir(), "yewholt-relaykey-"));
-  try {
-    const missingDir = readRelayPubkey(home);
-    assert.equal(missingDir.ok, false);
-    const fake = generateKeyPair();
-    writeRelayEnv(home, { port: 3999, relayUrl: "ws://127.0.0.1:3999", ownerPubkey: "ab".repeat(32) }, fake.secret);
-    assert.ok(readdirSync(relayDir(home)).includes(".env"));
-    const found = readRelayPubkey(home);
-    assert.deepEqual(found, { ok: true, pubkey: fake.pubkey });
-    assert.ok(!JSON.stringify(found).includes(fake.secret));
-
-    writeFileSync(join(relayDir(home), ".env"), "RELAY_URL=ws://127.0.0.1:3999\nBUZZ_RELAY_PRIVATE_KEY=\n", { mode: 0o600 });
-    const empty = readRelayPubkey(home);
-    assert.equal(empty.ok, false);
-
-    const notHex = "zz".repeat(32);
-    writeFileSync(join(relayDir(home), ".env"), `BUZZ_RELAY_PRIVATE_KEY=${notHex}\n`, { mode: 0o600 });
-    const invalid = readRelayPubkey(home);
-    assert.equal(invalid.ok, false);
-    assert.ok(!JSON.stringify(invalid).includes(notHex));
-  } finally {
-    rmSync(home, { recursive: true, force: true });
-  }
-});
-
-test("relay key: a home with no relay dir at all reports missing", () => {
-  const home = mkdtempSync(join(tmpdir(), "yewholt-relaykey-"));
-  try {
-    mkdirSync(join(home, "state"));
-    const result = readRelayPubkey(home);
-    assert.equal(result.ok, false);
-    if (!result.ok) assert.match(result.reason, /relay\/\.env|BUZZ_RELAY_PRIVATE_KEY/);
-  } finally {
-    rmSync(home, { recursive: true, force: true });
-  }
 });

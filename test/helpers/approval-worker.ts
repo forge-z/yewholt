@@ -10,7 +10,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { workspaceDir } from "../../src/workspace.js";
-import { chatFrom, createBot, human, openSession, testWorkspaces, waitUntil } from "./coding.js";
+import { chatFrom, createBot, human, openSession, reconcileHome, testWorkspaces, waitUntil } from "./coding.js";
 
 export const DANGEROUS = "mkdir -p junk && rm -rf junk && echo ran >> ran.txt";
 
@@ -22,7 +22,6 @@ async function main(mode: string, dir: string): Promise<void> {
   if (!existsSync(join(piDir, "settings.json"))) writeFileSync(join(piDir, "settings.json"), "{}\n");
   const session = await openSession(await openNodeSqliteStorage(join(dir, "sessions.sqlite")), home, piDir);
   if (mode === "park") {
-    await session.ensureOnboarding("22222222-2222-4222-8222-222222222222");
     const coder = await createBot(session, "Coder", "post,read,code");
     void session.handleHuman(human("k1", `@Coder run: ${DANGEROUS}`)).catch(() => undefined);
     const approvals = await waitUntil(async () => {
@@ -35,6 +34,7 @@ async function main(mode: string, dir: string): Promise<void> {
     setInterval(() => undefined, 1000);
     return;
   }
+  await reconcileHome(session);
   const resumed = session.resumeTurns();
   if (mode === "approve") {
     await waitUntil(async () => ((await session.snapshot()).approvals ?? []).length > 0, "the stored approval after reopen");

@@ -26,7 +26,6 @@ async function withCoding(
   const piDir = emptyPiDir();
   const session = await openSession(new MemoryStorage(), home, piDir, opts.models, isolationFor?.(home), opts.admins);
   try {
-    await session.ensureOnboarding(CHANNEL);
     await fn(session, home);
   } finally {
     await session.close();
@@ -49,12 +48,11 @@ async function approvals(session: Yewholt) {
   return (await session.snapshot()).approvals ?? [];
 }
 
-test("permissions: only a bot whose stored permissions include code gets tools; the Onboarding Specialist never", async () => {
+test("permissions: only a bot whose stored permissions include code gets tools", async () => {
   await withCoding(async (session, home) => {
     const plain = await createBot(session, "Plain", "post,read");
     const coder = await createBot(session, "Coder", "post,read,code");
     assert.deepEqual(coder.permissions, ["post", "read", "code"]);
-    const onboarding = (await session.snapshot()).bots.find((bot) => bot.role === "onboarding")!;
 
     await session.handleHuman(human("p1", "@Plain run: echo hi > plain.txt"));
     assert.deepEqual(await toolNames(session, plain), []);
@@ -65,29 +63,20 @@ test("permissions: only a bot whose stored permissions include code gets tools; 
     assert.deepEqual(await toolNames(session, coder), ["bash", "edit", "read", "tool_search", "write"]);
     assert.match(await lastReply(session, coder), /done\[ok\]/);
     assert.equal(readFileSync(join(workspaceDir(testWorkspaces(home), coder.pubkey), "hello.txt"), "utf8"), "hi\n");
-
-    assert.deepEqual(await toolNames(session, onboarding), []);
-    await session.handleHuman(human("o1", "change permissions of Onboarding Specialist to post,read,code"));
-    assert.equal((await session.snapshot()).pending, null);
-    assert.match(await lastReply(session, onboarding), /never gets coding tools/);
-    assert.deepEqual((await session.snapshot()).bots.find((bot) => bot.role === "onboarding")?.permissions, ["post", "read"]);
   });
 });
 
-test("permissions: granting and revoking code through a proposal applies on the next turn", async () => {
+test("permissions: granting and revoking code in the agent file applies on the next turn", async () => {
   await withCoding(async (session, home) => {
     const plain = await createBot(session, "Plain", "post,read");
-    await session.handleHuman(human("g1", "change permissions of Plain to post,read,code"));
-    assert.match((await session.snapshot()).pending?.summary ?? "", /permissions: post, read, code/);
-    await session.handleHuman(human("g2", "approve"));
+    await createBot(session, "Plain", "post,read,code");
     assertWorkspace(testWorkspaces(home), plain.pubkey);
     await session.handleHuman(human("g3", "@Plain run: echo granted > granted.txt"));
     assert.match(await lastReply(session, plain), /done\[ok\]/);
     assert.equal(readFileSync(join(workspaceDir(testWorkspaces(home), plain.pubkey), "granted.txt"), "utf8"), "granted\n");
     assert.ok((await toolNames(session, plain)).includes("bash"));
 
-    await session.handleHuman(human("r1", "change permissions of Plain to post,read"));
-    await session.handleHuman(human("r2", "approve"));
+    await createBot(session, "Plain", "post,read");
     assert.deepEqual(await toolNames(session, plain), []);
     await session.handleHuman(human("r3", "@Plain run: echo revoked > revoked.txt"));
     assert.match(await lastReply(session, plain), /done\[error\]/);
@@ -119,8 +108,6 @@ test("instructions: a code bot is told about its workspace, tools and approvals;
   assert.match(coder, /approv/);
   assert.match(coder, /git push/);
   assert.doesNotMatch(coder, /repo access are out of scope/);
-  const onboarding = instructionsFor({ ...base, role: "onboarding", permissions: ["post", "read", "code"] });
-  assert.doesNotMatch(onboarding, /workspace/);
 });
 
 test("secrets: a bash call cannot see a variable set in the daemon's process.env", async () => {
@@ -225,35 +212,9 @@ test("approval: writing outside the workspace asks first; the request names the 
   });
 });
 
-test("approval: with a proposal and a command approval pending, a plain aprovo asks which one", async () => {
-  await withCoding(async (session, home) => {
-    const coder = await createBot(session, "Coder", "post,read,code");
-    const onboarding = (await session.snapshot()).bots.find((bot) => bot.role === "onboarding")!;
-    const turn = session.handleHuman(human("b1", "@Coder run: sudo true; echo ran >> both.txt"));
-    await waitUntil(async () => (await approvals(session)).length === 1, "the approval request");
-    await session.handleHuman(human("b2", "create bot name: Later model: faux/faux-1"));
-    assert.equal((await session.snapshot()).pending?.name, "Later");
-
-    await session.handleHuman(human("b3", "aprovo"));
-    assert.equal((await approvals(session)).length, 1);
-    assert.equal((await session.snapshot()).pending?.name, "Later");
-    assert.match(await lastReply(session, onboarding), /@Coder aprovo/);
-    assert.match(await lastReply(session, onboarding), /@Onboarding Specialist aprovo/);
-
-    await session.handleHuman(human("b4", "@Coder aprovo"));
-    await turn;
-    assert.equal(readFileSync(join(workspaceDir(testWorkspaces(home), coder.pubkey), "both.txt"), "utf8"), "ran\n");
-    assert.equal((await session.snapshot()).pending?.name, "Later");
-
-    await session.handleHuman(human("b5", "@Onboarding Specialist aprovo"));
-    assert.ok((await session.snapshot()).bots.some((bot) => bot.name === "Later"));
-  });
-});
-
 test("approval: a reply to the request message resolves that request", async () => {
   await withCoding(async (session, home) => {
     const coder = await createBot(session, "Coder", "post,read,code");
-    await session.handleHuman(human("x0", "create bot name: Later model: faux/faux-1"));
     const turn = session.handleHuman(human("x1", "@Coder run: git push origin main; echo ran >> pushed.txt"));
     const [request] = await waitUntil(async () => {
       const list = await approvals(session);
@@ -261,9 +222,8 @@ test("approval: a reply to the request message resolves that request", async () 
     }, "the approval request");
     await session.handleHuman(human("x2", "sim", { replyTo: [request!.eventId] }));
     await turn;
-    // git push fails offline (no repo); what matters is that the call ran once and the proposal stayed.
+    // git push fails offline (no repo); what matters is that the call ran once.
     assert.equal(readFileSync(join(workspaceDir(testWorkspaces(home), coder.pubkey), "pushed.txt"), "utf8"), "ran\n");
-    assert.equal((await session.snapshot()).pending?.name, "Later");
   });
 });
 
@@ -305,7 +265,7 @@ function secureFixture(home: string): WorkspaceIsolation {
   return new WorkspaceIsolation(home, { YEWHOLT_WORKSPACES: root }, probe);
 }
 
-test("isolation: approving a Buzz code proposal creates the setgid workspace immediately", async () => {
+test("isolation: provisioning a code agent creates the setgid workspace immediately", async () => {
   await withCoding(async (session, home) => {
     const root = testWorkspaces(home);
     const coder = await createBot(session, "New Coder", "post,read,code");
@@ -313,8 +273,7 @@ test("isolation: approving a Buzz code proposal creates the setgid workspace imm
     assertWorkspace(root, coder.pubkey);
     const plain = await createBot(session, "New Plain", "post,read");
     assert.equal(existsSync(workspaceDir(root, plain.pubkey)), false);
-    await session.handleHuman(human("isolation-grant", "change permissions of New Plain to post,read,code"));
-    await session.handleHuman(human("isolation-grant-approve", "approve"));
+    await createBot(session, "New Plain", "post,read,code");
     assertWorkspace(root, plain.pubkey);
   }, secureFixture);
 });

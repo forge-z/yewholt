@@ -46,7 +46,9 @@ async function main() {
   };
   const env = { PATH: process.env.PATH, HOME: home, YEWHOLT_HOME: home, YEWHOLT_MODEL: "test/offline" };
   writeKey(ownerKeyPath(home), ownerSecret);
-  saveConfig(home, { port: Number(url.port), relayUrl: relay, channelId: null, channelName: `Phase 1 integration ${randomUUID()}` });
+  const relayPubkey = process.env.YEWHOLT_RELAY_PUBKEY;
+  assert.ok(relayPubkey, "Set YEWHOLT_RELAY_PUBKEY to the disposable relay's public key");
+  saveConfig(home, { relayUrl: relay, externalRelayPubkey: relayPubkey });
   const runCli = (...args: string[]) => {
     const result = spawnSync(process.execPath, [cli, ...args], { env, encoding: "utf8", timeout: 15_000 });
     assert.equal(result.status, 0, `CLI failed: ${args.slice(0, 2).join(" ")}`);

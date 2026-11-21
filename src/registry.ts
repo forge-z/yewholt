@@ -28,18 +28,6 @@ export type BotRecord = {
   shutdownEventIds?: string[];
 };
 
-export type Proposal = {
-  id: string;
-  action: string;
-  name: string;
-  modelLabel: string;
-  provider: string;
-  modelId: string;
-  scope: string[];
-  permissions: string[];
-  summary: string;
-};
-
 /** A chat message a `code` bot is answering. Kept until its reply is stored, so a restart re-attaches to it. */
 export type CodeTurn = {
   requestId: string;
@@ -69,7 +57,6 @@ export type ApprovalRequest = {
 
 export type RegistryState = {
   bots: BotRecord[];
-  pending: Proposal | null;
   processed: string[];
   outbox: NostrEvent[];
   highWater: number;
@@ -82,10 +69,10 @@ export const RegistryDoc = defineDoc<RegistryState>({
   kind: "yewholt.registry",
   version: 1,
   scope: "session",
-  initial: () => ({ bots: [], pending: null, processed: [], outbox: [], highWater: 0 }),
+  initial: () => ({ bots: [], processed: [], outbox: [], highWater: 0 }),
   checkpointWhen: () => true,
 });
 
 export function emptyRegistry(): RegistryState {
-  return { bots: [], pending: null, processed: [], outbox: [], highWater: 0 };
+  return { bots: [], processed: [], outbox: [], highWater: 0 };
 }

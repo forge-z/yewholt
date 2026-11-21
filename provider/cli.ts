@@ -2,7 +2,7 @@ import { unlinkSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { writePrivateJson } from "../src/control-files.js";
 import { pubkeyOf } from "../src/nostr.js";
-import { discoverableId, installEngine, installProvider, installShim, removeShim, verifyShim } from "./install.js";
+import { discoverableId, installProvider } from "./install.js";
 import { ProviderSecrets } from "./secrets.js";
 import { InvalidTargetRelay, targetFile, validateTarget } from "./target.js";
 import { doctorTargets, listTargets } from "./status.js";
@@ -17,7 +17,7 @@ function printPairing(): void {
 }
 
 function parseTarget(id: string, args: string[]) {
-  const usage = "Usage: targets add <id> (--relay <url> --daemon <pubkey> | --local) [--label <label>] " +
+  const usage = "Usage: targets add <id> --relay <url> --daemon <pubkey> [--label <label>] " +
     "[--wake command --cmd <command> | --wake instabox --account <id> --machine <id>]";
   if (!discoverableId(id)) throw new CliError("Invalid target id (use lowercase letters, numbers, hyphens or underscores)");
   let values;
@@ -25,7 +25,7 @@ function parseTarget(id: string, args: string[]) {
     const parsed = parseArgs({
       args, options: {
         relay: { type: "string", multiple: true }, daemon: { type: "string", multiple: true },
-        label: { type: "string", multiple: true }, local: { type: "boolean", multiple: true },
+        label: { type: "string", multiple: true },
         wake: { type: "string", multiple: true }, cmd: { type: "string", multiple: true },
         account: { type: "string", multiple: true }, machine: { type: "string", multiple: true },
       },
@@ -42,10 +42,7 @@ function parseTarget(id: string, args: string[]) {
   if (kind === "command" && cmd && !accountId && !machineId) wake = { kind, cmd };
   else if (kind === "instabox" && accountId && machineId && !cmd) wake = { kind, accountId, machineId };
   else if (kind !== undefined || cmd !== undefined || accountId !== undefined || machineId !== undefined) throw new CliError(usage);
-  if (values.local && (values.relay || values.daemon || wake)) throw new CliError(usage);
-  const raw = values.local ? { id, label, transport: "local" } : {
-    id, label, transport: "relay", relay: values.relay?.[0], daemonPubkey: values.daemon?.[0], wake,
-  };
+  const raw = { id, label, transport: "relay", relay: values.relay?.[0], daemonPubkey: values.daemon?.[0], wake };
   try {
     if (Buffer.byteLength(JSON.stringify(raw)) >= 32 * 1024) throw new Error();
     return validateTarget(id, raw);
@@ -67,15 +64,11 @@ export async function providerCommand(command: "provider" | "targets" | "pair", 
     const [sub, id, ...rest] = args;
     if (sub === "add") {
       const target = parseTarget(id, rest);
-      verifyShim(id);
-      installEngine();
       writePrivateJson(targetFile(id), { id, ...target });
-      installShim(id, target);
       console.log("Configured target " + id);
     } else if (sub === "list" && args.length === 1) {
       listTargets();
     } else if (sub === "remove" && args.length === 2 && discoverableId(id)) {
-      removeShim(id);
       try {
         unlinkSync(targetFile(id));
       } catch (error) {

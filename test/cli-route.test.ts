@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -126,11 +126,32 @@ test("external install preserves the daemon identity without installing or stopp
   const config = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
   assert.equal(config.relayUrl, "wss://buzz.example");
   assert.equal(config.externalRelayPubkey, key);
-  assert.equal(config.channelId, null);
   assert.equal(statSync(join(home, ".env")).mode & 0o777, 0o600);
   assert.equal(existsSync(join(home, "relay")), false);
   const stop = runCli(["stop"], home);
   assert.equal(stop.status, 0);
   assert.doesNotMatch(stop.stderr, /docker|compose/);
-  assert.match(runCli(["status"], home).stdout, /^relay: external wss:\/\/buzz\.example$/m);
+  assert.match(runCli(["status"], home).stdout, /^relay: wss:\/\/buzz\.example$/m);
+});
+
+test("install adopts a relay an earlier release started in the same home and leaves relay/ untouched", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "yewholt-adopt-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const relayKey = generateKeyPair();
+  mkdirSync(join(home, "relay"), { recursive: true });
+  const env = `RELAY_URL=ws://127.0.0.1:3000\nBUZZ_RELAY_PRIVATE_KEY=${relayKey.secret}\n`;
+  writeFileSync(join(home, "relay", ".env"), env, { mode: 0o600 });
+  writeFileSync(join(home, "relay", "compose.yml"), "services: {}\n");
+  writeFileSync(join(home, "config.json"), JSON.stringify({ port: 3000, relayUrl: "ws://127.0.0.1:3000", channelId: "c", channelName: "yewholt" }));
+  const before = runCli(["status"], home);
+  assert.equal(before.status, 1);
+  assert.match(before.stderr, /yh install --relay/);
+  const adopt = runCli(["install", "--relay", "wss://relay.example"], home);
+  assert.equal(adopt.status, 0, adopt.stderr);
+  assert.ok(!adopt.stdout.includes(relayKey.secret) && !adopt.stderr.includes(relayKey.secret));
+  const config = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
+  assert.deepEqual(config, { relayUrl: "wss://relay.example", externalRelayPubkey: relayKey.pubkey });
+  assert.equal(readFileSync(join(home, "relay", ".env"), "utf8"), env);
+  assert.equal(readFileSync(join(home, "relay", "compose.yml"), "utf8"), "services: {}\n");
+  assert.match(runCli(["status"], home).stdout, /^relay: wss:\/\/relay\.example$/m);
 });

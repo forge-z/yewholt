@@ -1,9 +1,11 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { record } from "../src/control-files.js";
-import { CONTROL_KIND, decryptControl, verifiedEnvelope } from "../src/control-protocol.js";
+import { CONTROL_KIND, controlEvent, decryptControl, verifiedEnvelope, type ControlType } from "../src/control-protocol.js";
 import { RelayClient, accepted } from "../src/nostr-client.js";
 import { pubkeyOf, type NostrEvent } from "../src/nostr.js";
-import type { Target } from "./target.js";
+import type { Target, Wake } from "./target.js";
+
+const WINDOW_MS = 120_000;
 
 export type RelayWait = (
   target: Extract<Target, { transport: "relay" }>, secret: string, event: NostrEvent,
@@ -66,3 +68,24 @@ export const waitForConfirmation: RelayWait = async (target, secret, event, requ
   }
   return "timeout";
 };
+
+/** Sends a control request, waits one window, wakes the target once on timeout, then waits again with the same event. */
+export async function sendControl(target: Extract<Target, { transport: "relay" }>, secret: string,
+  op: Exclude<ControlType, "confirmation">, requestId: string, agentPubkey: string, body: unknown,
+  services: { wait: RelayWait; wake: (config: Wake, requestId: string, timeoutMs: number) => Promise<void> }, event?: NostrEvent) {
+  event ??= controlEvent(secret, target.daemonPubkey, op, { requestId, agentPubkey }, body);
+  const wait = () => services.wait(target, secret, event!, requestId, agentPubkey, WINDOW_MS);
+  let result = await wait();
+  let wakeFailed = false;
+  if (result === "timeout") {
+    if (target.wake) {
+      try {
+        await services.wake(target.wake, requestId, WINDOW_MS);
+      } catch {
+        wakeFailed = true;
+      }
+    }
+    result = await wait();
+  }
+  return { result, wakeFailed };
+}

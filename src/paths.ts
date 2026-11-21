@@ -42,11 +42,7 @@ export function logPath(home: string): string {
   return join(home, "daemon.log");
 }
 
-export function relayDir(home: string): string {
-  return join(home, "relay");
-}
-
-/** Provider keys for the daemon. Not the relay's compose env. */
+/** Host configuration and provider keys for the daemon. */
 export function envFilePath(home: string): string {
   return join(home, ".env");
 }

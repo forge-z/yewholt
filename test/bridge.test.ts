@@ -55,7 +55,7 @@ class FakeClient implements ChatClient {
   }
 }
 
-const onboardingBot: LinkBot = { pubkey: "0b".repeat(32), name: "Onboarding Specialist", scope: [INSTALL], status: "active" };
+const reviewerBot: LinkBot = { pubkey: "0b".repeat(32), name: "Reviewer", scope: [INSTALL], status: "active" };
 const coderBot: LinkBot = { pubkey: CODER, name: "Coder", scope: [INSTALL], status: "active" };
 
 function harness(relayPubkey: string | null = RELAY) {
@@ -112,7 +112,7 @@ test("dedupe: the same event id arriving on two connections is handled exactly o
 
 test("bot link: own 39002 #p subscription, kind 9 per effective channel, re-subscribe on membership change", async () => {
   const h = harness();
-  await h.links.sync([onboardingBot, coderBot]);
+  await h.links.sync([reviewerBot, coderBot]);
   const coder = h.latest(CODER);
   assert.deepEqual(coder.subs.get("members")?.filters, [{ kinds: [39002], "#p": [CODER] }]);
   assert.deepEqual(coder.sub(`chat:${INSTALL}`)?.filters, [{ kinds: [9], "#h": [INSTALL], since: 1_795_231_700 }]);
@@ -222,26 +222,26 @@ test("bot link: a CLOSED channel is not retried until the relay lists the bot th
 
 test("bot link lifecycle: approved create/start opens a connection, stop closes it, scope change re-subscribes", async () => {
   const h = harness();
-  await h.links.sync([onboardingBot]);
+  await h.links.sync([reviewerBot]);
   assert.equal(h.clients.has(CODER), false);
-  await h.links.sync([onboardingBot, coderBot]);
+  await h.links.sync([reviewerBot, coderBot]);
   const first = h.latest(CODER);
   for (const event of botEvents()) first.emit("members", event);
   assert.deepEqual(h.membership.get(CODER), [PRIVATE, INSTALL].sort());
 
-  await h.links.sync([onboardingBot, { ...coderBot, status: "stopped" }]);
+  await h.links.sync([reviewerBot, { ...coderBot, status: "stopped" }]);
   assert.equal(first.closed, true);
   assert.equal(h.links.client(CODER), undefined);
   assert.deepEqual(h.membership.get(CODER), []);
-  assert.equal(h.latest(onboardingBot.pubkey).closed, false);
+  assert.equal(h.latest(reviewerBot.pubkey).closed, false);
 
-  await h.links.sync([onboardingBot, coderBot]);
+  await h.links.sync([reviewerBot, coderBot]);
   const second = h.latest(CODER);
   assert.notEqual(second, first);
   const elsewhere = "44444444-4444-4444-8444-444444444444";
-  await h.links.sync([onboardingBot, { ...coderBot, scope: [INSTALL, elsewhere] }]);
+  await h.links.sync([reviewerBot, { ...coderBot, scope: [INSTALL, elsewhere] }]);
   assert.ok(second.has(`chat:${elsewhere}`));
-  await h.links.sync([onboardingBot, coderBot]);
+  await h.links.sync([reviewerBot, coderBot]);
   assert.equal(second.has(`chat:${elsewhere}`), false);
 
   await h.links.closeAll();
@@ -249,13 +249,13 @@ test("bot link lifecycle: approved create/start opens a connection, stop closes 
   assert.deepEqual(h.membership.get(CODER), []);
   // A turn that finishes after serve ended must not open new connections.
   const opened = h.clients.get(CODER)!.length;
-  await h.links.sync([onboardingBot, coderBot]);
+  await h.links.sync([reviewerBot, coderBot]);
   assert.equal(h.clients.get(CODER)!.length, opened);
 });
 
 test("bot link: a dropped bot connection is reported so serve can restart", async () => {
   const h = harness();
-  await h.links.sync([onboardingBot, coderBot]);
+  await h.links.sync([reviewerBot, coderBot]);
   assert.equal(h.links.lost(), undefined);
   h.latest(CODER).open = false;
   assert.equal(h.links.lost()?.pubkey, CODER);
@@ -308,8 +308,8 @@ test("a hosted agent discovers a DM stored after its initial members request wit
   t.mock.method(performance, "now", () => now);
   const h = harness();
   const bot: LinkBot = { ...coderBot, external: true, scope: [] };
-  await h.links.sync([onboardingBot]);
-  await h.links.sync([onboardingBot, bot]);
+  await h.links.sync([reviewerBot]);
+  await h.links.sync([reviewerBot, bot]);
   const client = h.latest(CODER);
   assert.deepEqual(client.wire, ["REQ members"]);
   assert.deepEqual(h.links.channels(CODER), []);
@@ -317,10 +317,10 @@ test("a hosted agent discovers a DM stored after its initial members request wit
   // The new DM is available to subsequent REQs, but the original REQ gets no live event.
   const dm = { ...byKind(39002, PRIVATE), tags: [["d", PRIVATE], ["p", CODER], ["p", OWNER]] };
   now = 9_999;
-  await h.links.sync([onboardingBot, bot]);
+  await h.links.sync([reviewerBot, bot]);
   assert.deepEqual(client.wire, ["REQ members"]);
   now = 10_000;
-  await h.links.sync([onboardingBot, bot]);
+  await h.links.sync([reviewerBot, bot]);
   assert.equal(h.latest(CODER), client);
   assert.deepEqual(client.wire, ["REQ members", "REQ members"]);
   assert.deepEqual(client.sub("members")?.filters, [{ kinds: [39002], "#p": [CODER] }]);
@@ -331,7 +331,7 @@ test("a hosted agent discovers a DM stored after its initial members request wit
   assert.deepEqual(client.sub("members-d")?.filters, [{ kinds: [39002], "#d": [PRIVATE] }]);
   client.emit(client.id(`chat:${PRIVATE}`)!, byKind(9));
   assert.equal(h.messages[0]?.channelId, PRIVATE);
-  assert.equal(h.latest(onboardingBot.pubkey).wire.filter((frame) => frame === "REQ members").length, 1);
+  assert.equal(h.latest(reviewerBot.pubkey).wire.filter((frame) => frame === "REQ members").length, 1);
 });
 
 test("publishAll: each event goes out on its signer's own connection, owner first, temporary links closed", async () => {

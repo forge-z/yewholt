@@ -3,11 +3,10 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writeAtomic } from "../src/control-files.js";
-import { loadTarget, providerHome, validId, type Target } from "./target.js";
+import { providerHome, validId } from "./target.js";
 
 const marker = "#!/bin/sh\n# Managed by yewholt\n";
 const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
-const entryName = "yewholt-provider-engine";
 
 export function providerBin(): string {
   return resolve(process.env.YEWHOLT_PROVIDER_BIN_DIR ?? join(homedir(), ".local", "bin"));
@@ -27,15 +26,6 @@ export function targetIds(home = providerHome()): string[] {
   }
 }
 
-function entryPath(): string {
-  return join(providerBin(), entryName);
-}
-
-export function shimPath(id: string): string {
-  if (!discoverableId(id)) throw new Error("Invalid target id");
-  return join(providerBin(), "buzz-backend-yewholt-" + id);
-}
-
 function managed(path: string): boolean {
   const meta = lstatSync(path, { throwIfNoEntry: false });
   if (!meta) return false;
@@ -51,34 +41,27 @@ function install(path: string, lines: string[]): void {
   writeAtomic(path, payload, 0o700);
 }
 
-export function installEngine(): void {
-  const engine = fileURLToPath(new URL("./engine.js", import.meta.url));
-  install(entryPath(), [
-    "export YEWHOLT_PROVIDER_HOME=" + quote(resolve(providerHome())),
-    "exec " + [process.execPath, engine].map(quote).join(" ") + ' "$@"',
-  ]);
-}
-
-export function installShim(id: string, target: Target): void {
-  install(shimPath(id), [
-    "export YEWHOLT_PROVIDER_DISPLAY_NAME=" + quote(target.label),
-    "exec " + [entryPath(), id].map(quote).join(" "),
-  ]);
-}
-
-export function verifyShim(id: string): void {
-  managed(shimPath(id));
-}
-
-export function removeShim(id: string): void {
-  if (managed(shimPath(id))) unlinkSync(shimPath(id));
+/** Deletes the executables older releases installed for Buzz executable discovery. */
+export function removeLegacyEntries(): void {
+  let entries: string[];
+  try {
+    entries = readdirSync(providerBin());
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (entry !== "yewholt-provider-engine" && !entry.startsWith("buzz-backend-yewholt-")) continue;
+    const path = join(providerBin(), entry);
+    try {
+      if (managed(path)) unlinkSync(path);
+    } catch {
+      // Not ours; leave it.
+    }
+  }
 }
 
 export function installProvider(): string {
-  const targets = targetIds().map((id) => ({ id, target: loadTarget(id) }));
-  targets.forEach(({ id }) => verifyShim(id));
-  installEngine();
-  targets.forEach(({ id, target }) => installShim(id, target));
+  removeLegacyEntries();
   const bridge = fileURLToPath(new URL("./bridge.js", import.meta.url));
   install(join(providerBin(), "yewholt-buzz-bridge"), [
     "export YEWHOLT_PROVIDER_HOME=" + quote(resolve(providerHome())),

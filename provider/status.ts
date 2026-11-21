@@ -1,9 +1,8 @@
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { readdirSync } from "node:fs";
+import { join } from "node:path";
 import { record, writePrivateJson } from "../src/control-files.js";
 import { RelayClient } from "../src/nostr-client.js";
-import { pidPath, yewholtHome } from "../src/paths.js";
 import { targetIds } from "./install.js";
 import { InvalidTargetRelay, loadTarget, privateJson, providerHome, type Target } from "./target.js";
 import { ProviderSecrets } from "./secrets.js";
@@ -20,8 +19,7 @@ const failures = {
 type Outcome = { pubkey: string } | { failure: keyof typeof failures };
 
 function directory(id: string, target: Target): string {
-  const destination = target.transport === "relay" ? [target.relay, target.daemonPubkey] : [resolve(yewholtHome())];
-  const digest = createHash("sha256").update(JSON.stringify([target.transport, ...destination])).digest("hex");
+  const digest = createHash("sha256").update(JSON.stringify([target.transport, target.relay, target.daemonPubkey])).digest("hex");
   return join(providerHome(), "status", id, digest);
 }
 
@@ -76,36 +74,22 @@ function daemonEvidence(time: number | undefined): string {
   return age >= 0 && age <= RECENT_MS ? "recent confirmation" : "historical confirmation";
 }
 
-function localState(): string {
-  try {
-    const pid = Number(readFileSync(pidPath(yewholtHome()), "utf8").trim());
-    if (Number.isSafeInteger(pid) && pid > 1) {
-      process.kill(pid, 0);
-      return "local PID running";
-    }
-  } catch {
-    // Missing or stale PID file.
-  }
-  return "no running local PID";
-}
-
 export function listTargets(): void {
   console.log("TARGET\tRELAY\tDAEMON / REACHABILITY EVIDENCE\tLAST CONFIRMATION\tAGENTS DEPLOYED\tLAST DEPLOY\tLAST FAILURE");
   for (const id of targetIds()) {
     try {
       const target = loadTarget(id);
       const { agents, lastDeploy, lastFailure } = evidence(id, target);
-      const remote = target.transport === "relay";
-      const daemon = remote ? target.daemonPubkey + " (" + daemonEvidence(lastDeploy) + ")" : localState();
-      console.log([id + " (" + safeText(target.label) + ")", remote ? safeText(target.relay) : "—", daemon,
-        date(remote ? lastDeploy : undefined), agents, date(lastDeploy), lastFailure].join("\t"));
+      const daemon = target.daemonPubkey + " (" + daemonEvidence(lastDeploy) + ")";
+      console.log([id + " (" + safeText(target.label) + ")", safeText(target.relay), daemon,
+        date(lastDeploy), agents, date(lastDeploy), lastFailure].join("\t"));
     } catch (error) {
       console.log(id + "\t" + (error instanceof InvalidTargetRelay ? error.message : "invalid target configuration"));
     }
   }
 }
 
-async function probe(target: Extract<Target, { transport: "relay" }>, secret: string | undefined): Promise<string> {
+async function probe(target: Target, secret: string | undefined): Promise<string> {
   if (!secret) return "not tested (run yewholt provider install)";
   const client = new RelayClient(target.relay, secret, undefined, false);
   const start = performance.now();
@@ -135,14 +119,6 @@ export async function doctorTargets(id?: string): Promise<void> {
       throw new Error("Invalid or missing target configuration");
     }
     const { lastDeploy } = evidence(id, target);
-    if (target.transport === "local") return [
-      id + ":",
-      "  Relay: not required (local)",
-      "  Daemon: " + localState(),
-      "  Pairing: not required (local)",
-      "  Last local deploy: " + date(lastDeploy),
-      "  Daemon version: unavailable",
-    ];
     if (!identityLoaded) {
       identityLoaded = true;
       try {

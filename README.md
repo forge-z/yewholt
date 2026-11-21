@@ -16,7 +16,7 @@ the SSH aliases and Buzz relay for the VMs you want to use. The agent sets up
 `yh`, the Mac bridge, and a daemon on each VM. The relay administrator must
 admit the daemon and provider identities; approve the plugin in Buzz when
 prompted. Then use **Harness → Remote → Yewholt** to create an agent and choose
-a model. No Docker or Onboarding Specialist is needed for this path.
+a model.
 
 For the Mac coding CLI alone, build a checkout with Node.js 22.19+:
 
@@ -62,9 +62,9 @@ yewholt daemon ──NIP-42 client─────────┘
             SQLite store, one conversation per bot
 ```
 
-- **Relay.** The official single-node bundle from Buzz `deploy/compose/` (`ghcr.io/block/buzz:0.3.0`, Postgres, Redis, MinIO). `relay/compose.yml` is a verbatim copy of that file. See `relay/SOURCE.md`.
+- **Relay.** An existing, unmodified Buzz relay run by its administrator. Yewholt does not install, start, or stop it; `yh install` records its URL and public key.
 - **Daemon.** A Node process. It opens one pi-durable `Harness` on a SQLite file and calls `resume()` after every start, so a crashed run continues from the last committed step.
-- **Bot.** One ownerless pi-durable conversation (its own instructions, model, and transcript) plus its own Nostr key. The Onboarding Specialist is the first bot, not a router.
+- **Bot.** One ownerless pi-durable conversation (its own instructions, model, and transcript) plus its own Nostr key.
 - **Bridge.** The daemon authenticates to the relay with NIP-42, like any other client. It reads kind 9 channel messages and publishes kind 9 replies, kind 0 profiles, and the membership events below. It does not embed the relay.
 - **Buzz agent provisioning.** `src/agents.ts` reads and validates provider-written files for agents created in the Buzz desktop app. The daemon reconciles those files with the durable bot registry and publishes the agents' runtime profile and presence.
 
@@ -89,80 +89,64 @@ The information-flow broker in `docs/practical-information-flow-for-buzz-agents.
 ## Requirements
 
 - Node.js 22.19 or newer (pi-durable's engine).
-- Docker with Compose v2, only for `yewholt start` (the relay). Tests do not need it.
+- An existing Buzz relay that admits the daemon's pubkey. Tests do not need one.
 - No API key is required. Keys are optional and are read from the environment only when a session calls a model.
 
-## Legacy: run a bundled relay and chat onboarding
+## Daemon install
+
+On the Linux VM, with the relay URL and the relay's public key (the key it signs kind 39002 member lists with):
 
 ```bash
-npm install
+npm ci
 npm run build
-npm link          # optional, puts `yewholt` on PATH
-yewholt           # the coding harness, see Harness
-yewholt install   # ~/.yewholt, owner key, relay .env
-yewholt start     # official compose, then the daemon
-yewholt status
+npm link
+yh install --relay wss://relay.example --relay-pubkey <relay pubkey>
+yh start
+yh status
 ```
 
-`install` writes `~/.yewholt` (override with `--home` or `YEWHOLT_HOME`):
+`install` writes `~/.yewholt` (override with `--home` or `YEWHOLT_HOME`) and prints the daemon pubkey for the relay administrator to admit:
 
-- `secrets/owner.key` and `secrets/bots/<pubkey>.key`, mode `0600`
-- `relay/.env`, mode `0600`, and a copy of the official compose file
+- `config.json` with the relay URL and public key
+- `secrets/owner.key`, mode `0600`, the daemon's identity
+- `.env`, mode `0600`, for host configuration and provider keys
 - `state/sessions.sqlite`, the pi-durable store
 
-Open the Buzz app on `ws://127.0.0.1:3000` (or whatever `--port` you set). The daemon creates a channel named `yewholt` and puts the Onboarding Specialist in it. Your owner key is the relay owner (`RELAY_OWNER_PUBKEY`). Import that secret into a Nostr client, or add your existing pubkey with `buzz-admin add-member` inside the relay container, then talk in the channel.
+`start`, `stop`, and `status` manage only the daemon; the relay is run and upgraded by whoever administers it. Running `install` again on the same home with the same relay is a no-op; a different relay needs a different `--home`.
+
+### A relay that an earlier `yewholt install` started
+
+Earlier releases started a bundled Buzz relay next to the daemon and kept it in `$YEWHOLT_HOME/relay/` (its `.env`, a copy of its compose file, and the data volumes it names). Yewholt no longer starts or stops that relay, but leaves the directory alone, so an existing relay keeps running and keeps its data. To keep using the daemon in that home, record the relay as an external one:
+
+```bash
+yh install --home /data/home/.yewholt --relay wss://<public relay host>
+```
+
+Without `--relay-pubkey`, `install` derives the public key from `BUZZ_RELAY_PRIVATE_KEY` in `relay/.env`; the secret is never printed. Maintain that relay from its own directory, as a plain Buzz single-node deployment (for example `docker compose ps`, `docker compose pull && docker compose up -d`, run in `$YEWHOLT_HOME/relay`), following Buzz's `deploy/compose` README. Keep backing up `relay/.env` with `secrets/`: it holds the relay's identity. On an InstaBox VM that uses the Host-rewriting proxy, keep that layout as described in [InstaBox relay proxy](#instabox-relay-proxy).
 
 ### Chat
 
-The Onboarding Specialist answers these without a model. It posts a summary and does nothing until you approve.
+Agents are created in the Buzz desktop app (see [Buzz 1.0.6: Yewholt remote agents](#buzz-106-yewholt-remote-agents)) and provisioned to the daemon. Mention an agent by name or pubkey to talk to it; in a direct message it follows its `respondTo` setting.
 
-```text
-crie um novo bot e coloque o GPT-6.2 Astra como modelo
-approve
-```
+Permissions that the daemon honors are `post` (publish kind 9), `read` (the message is shown to that session), and `code` (the agent becomes a coding agent, see [Coding bots](#coding-bots-code)). Other tokens are stored and shown back; they do not grant extra tools.
 
-Also:
-
-```text
-@Onboarding Specialist crie um novo bot chamado Coder com o modelo opencode/deepseek-v4.1-flash
-@Onboarding Specialist aprovo
-crie um novo bot chamado Teste com modelo opencode/deepseek-v4.1-flash
-crie um novo bot chamado Teste usando o modelo opencode/deepseek-v4.1-flash
-create a bot named Coder with model opencode/deepseek-v4.1-flash
-create bot name: Alpha model: openai/gpt-6-sol scope: this permissions: post,read
-create bot name: Coder model: openai/gpt-6-sol scope: this permissions: post,read,code
-change model of Alpha to anthropic/claude-sonnet-5
-change scope of Alpha to this
-change permissions of Alpha to post,read
-change permissions of Alpha to post,read,code
-stop bot Alpha
-start bot Alpha
-reject
-```
-
-The model can be given as `coloque o X como modelo`, `com o modelo X`, `com modelo X`, `usando o modelo X`, `with model X`, or `model: X`. A create request without a model uses `YEWHOLT_MODEL` in the proposal and its summary; only when that is unset too does the Onboarding Specialist ask you to name one.
-
-Leading `@` mentions of Yewholt bots are stripped before the Onboarding Specialist parses a command, so `@Onboarding Specialist aprovo` is the same as `aprovo` (names with spaces and extra spaces are fine). A message that starts with another bot's mention, such as `@Coder sim`, is addressed to that bot and is not an approval.
-
-`approve`, `sim`, and `aprovo` apply the pending proposal. `reject` drops it. Scope `this` is the channel the message was posted in. Permissions that the daemon honors are `post` (publish kind 9), `read` (the message is shown to that session), and `code` (the bot becomes a coding agent, see [Coding bots](#coding-bots-code)). Other tokens are stored on the proposal and shown back; they do not grant extra tools.
-
-A display name such as `GPT-6.2 Astra` is stored as requested and mapped to `openai/gpt-6.2-astra`. pi-ai will call it only when that provider and id exist in the catalog and the matching API key is set. Until then the session still exists, keeps its history, and says so when mentioned.
+A model label is mapped to a pi-ai `provider/modelId`. pi-ai will call it only when that provider and id exist in the catalog and the matching API key is set. Until then the session still exists, keeps its history, and says so when mentioned.
 
 When a model turn ends without an answer, the bot says why instead of a bare failure, for example `I could not answer that (model_error: 429 FreeUsageLimitError: ...).` or `I could not answer that (no_model).` The reason is pi-durable's settlement reason, and the detail is the provider's error text, flattened to one line, cut at 300 characters, with token-like runs of 32+ characters shown as `[redacted]`. The daemon logs the same line with the bot name and model.
 
-Mention another bot by name or pubkey. The Onboarding Specialist listens to the whole install channel. Other bots answer only when mentioned, and only while they are `active`. This holds in every channel a bot is a member of, see below.
+Agents answer only when mentioned, and only while they are `active`. This holds in every channel an agent is a member of, see below.
 
 ### Channels and scope
 
-A bot answers in every channel it is currently a member of, including private channels. Adding the bot to a channel from the Buzz app is the approval; removing it there stops it in that channel. Nothing else changes: the mention rules above still apply, a stopped bot stays silent, and the `post`/`read` permissions still decide what it may do. In a channel it only joined from the app, the Onboarding Specialist answers only when mentioned (`@Onboarding Specialist aprovo`), so ordinary chatter that starts with `sim` is not taken as an approval.
+A bot answers in every channel it is currently a member of, including private channels. Adding the bot to a channel from the Buzz app is the approval; removing it there stops it in that channel. Nothing else changes: the mention rules above still apply, a stopped bot stays silent, and the `post`/`read` permissions still decide what it may do.
 
 How the daemon does it:
 
 - While the daemon runs, each active bot keeps its own connection, signed with its own key plus the owner's NIP-OA `auth` tag. The owner key cannot read private channels it is not in (the relay answers `CLOSED … restricted: not a channel member`), so each bot reads with its own key.
-- Each bot subscribes to kind 39002 with `#p` = its pubkey, plus `#d` = the channels it is in so the newer list that drops it is seen too. Only lists signed by the relay key count; that key is derived from `BUZZ_RELAY_PRIVATE_KEY` in `$YEWHOLT_HOME/relay/.env`. Per channel, only the newest list counts. Kind 9000/9001 events alone are not trusted. If the relay key is missing, the daemon logs it once and only the stored scope applies.
-- A bot's effective scope is its stored scope plus the channels those lists name. Stored records and proposals are not changed. `yewholt status` (`status.json`) shows both as `scope` and `channels`.
+- Each bot subscribes to kind 39002 with `#p` = its pubkey, plus `#d` = the channels it is in so the newer list that drops it is seen too. Only lists signed by the relay key count; that key is `externalRelayPubkey` in `$YEWHOLT_HOME/config.json`, set by `yh install`. Per channel, only the newest list counts. Kind 9000/9001 events alone are not trusted.
+- A bot's effective scope is its stored scope plus the channels those lists name. Stored records are not changed. `yewholt status` (`status.json`) shows both as `scope` and `channels`.
 - Each bot subscribes to kind 9 once per effective channel and re-subscribes when the set changes. A message seen on several connections is handled once. The channel is taken from the message's `h` tag. Replies go out on the replying bot's own connection, into that same channel.
-- Approving a create or start opens that bot's connection; approving a stop closes it. If a connection drops, the daemon restarts its relay loop and reopens every connection.
+- Provisioning or reactivating an agent opens its connection; `!shutdown` or removing its file closes it. If a connection drops, the daemon restarts its relay loop and reopens every connection.
 
 ### Agents created in the Buzz desktop app
 
@@ -219,29 +203,10 @@ prior request state. This is a relay carrier test, not a NIP-44/NIP-59 interoper
 or a production wire format. Replay was measured after client reconnect, not across relay
 restarts, at any particular retention interval, or against a production Buzz deployment.
 
-To rerun, use a disposable local relay. From the repository root (port 13000 must be free):
-
-```sh
-npm run build
-spike_home=$(mktemp -d "$HOME/yewholt-phase0.XXXXXX")
-node --input-type=module - "$spike_home" <<'JS'
-import { writeFileSync } from "node:fs";
-import { generateKeyPair } from "./dist/src/nostr.js";
-import { newRelaySecret, writeRelayEnv } from "./dist/src/relay.js";
-const home = process.argv[2];
-const owner = generateKeyPair();
-writeRelayEnv(home, { port: 13000, relayUrl: "ws://127.0.0.1:13000", ownerPubkey: owner.pubkey }, newRelaySecret());
-writeFileSync(home + "/owner.key", owner.secret + "\n", { mode: 0o600, flag: "wx" });
-JS
-BUZZ_HTTP_PORT=127.0.0.1:13000 docker compose -p yewholt-phase0 \
-  --project-directory "$spike_home/relay" up -d --wait
-node dist/test/spike-control-kind.js ws://127.0.0.1:13000 "$spike_home/owner.key"
-docker compose -p yewholt-phase0 --project-directory "$spike_home/relay" down -v
-```
-
-The startup override binds the unmodified Compose bundle to loopback only. The script emits
-the publish/replay/authentication matrix, not keys or payloads. Remove the disposable
-`$spike_home` directory afterward.
+To rerun, use a disposable loopback Buzz relay on `ws://127.0.0.1:13000` (Buzz's `deploy/compose`
+bundle works) with a throwaway owner key in `$spike_home/owner.key`, and set
+`YEWHOLT_RELAY_PUBKEY` to that relay's public key for the scripts below. Never point them at
+an existing community. Remove the relay and `$spike_home` afterward.
 
 #### Multi-VM daemon provisioning (Phase 1)
 
@@ -310,7 +275,7 @@ The signed content is a JSON envelope:
   payload leaves the file untouched. A changed payload replaces the file and uses
   the existing conversation for that agent.
 
-**Local integration.** Bring up the disposable Phase 0 Compose relay and leave it
+**Local integration.** Bring up the disposable relay above and leave it
 running. From this repository, run:
 
 ```sh
@@ -322,11 +287,11 @@ The fake provider uses ephemeral test identities and a new daemon home, prints t
 home path for cleanup, publishes a deploy before the daemon starts, checks its
 confirmation and the agent's kind 10100 and online kind 20001, then checks retry,
 deduplication, revocation and secret-free output. The script stops its daemon.
-Remove its disposable home and stop the Phase 0 Compose stack before reusing the port.
+Remove its disposable home and stop the disposable relay before reusing the port.
 
 ### Buzz 1.0.6: Yewholt remote agents
 
-Buzz Desktop 1.0.6 no longer discovers `buzz-backend-*` programs. Instead, the
+The
 Yewholt plugin registers a remote harness through the app's agent API. Update
 the paired daemon to this version first. On the Mac, use Node ≥22.19.0 to
 build the checkout and run `yewholt provider install` (or
@@ -380,12 +345,10 @@ contain the key; do not restore them over a running installation.
 | --- | --- | --- |
 | Phase 0 relay and encrypted kind `1059`; Phase 1 daemon pairing | Reused | Same relay, fail-closed provider allowlist, and confirmation channel; new hosted operation types. |
 | PR #8 agent provisioning, isolation, chat and `!shutdown` | Adapted | Same private agent files and runtime; hosted profiles and tombstones are separate so profile edits do not reactivate stopped agents. |
-| Phase 2 provider transport, Keychain and wake | Reused | Shared by the bridge and legacy engine. |
-| Phase 2 `info`/`deploy` JSON contract and older Buzz `docs/remote-agents.md` | Legacy | Still supported for earlier Buzz builds and direct provider callers; not the 1.0.6 plugin contract. |
+| Phase 2 provider transport, Keychain and wake | Reused | Used by the bridge. |
 | Phase 3 target files, `targets list/doctor`, and `pair` | Reused | The plugin selects relay targets; `doctor` supplies historical confirmation evidence, not a live daemon probe. |
-| Phase 3 `buzz-backend-*` shims and `--local` | Legacy for Buzz UI | Still installed and usable in the old provider flow; the 1.0.6 plugin uses the new bridge and lists only relay targets. |
 
-For an opt-in check against the disposable loopback Phase 0 relay:
+For an opt-in check against the disposable loopback relay:
 
 ```sh
 node dist/test/spike-hosted-provider.js ws://127.0.0.1:13000 "$spike_home/owner.key" yewholt-phase0-relay-1
@@ -414,13 +377,12 @@ pubkey, and any existing label and wake options.
 
 Use lowercase target IDs containing letters, digits, hyphens or underscores,
 starting with a letter or digit. The CLI writes each target file with mode
-`0600` and creates a legacy executable `buzz-backend-yewholt-<id>` in
-`~/.local/bin`. Earlier Buzz builds discover those shims. Use
-`YEWHOLT_PROVIDER_BIN_DIR` to override the bin directory (e.g. for
-tests). The shims call a single `yewholt-provider-engine` entry that points
-to the built checkout and installed Node executable. Run `provider install`
-again after moving either. An existing entry not managed by Yewholt is not
-overwritten.
+`0600`. `provider install` installs the `yewholt-buzz-bridge` entry in
+`~/.local/bin` (override with `YEWHOLT_PROVIDER_BIN_DIR`, e.g. for tests),
+pointing to the built checkout and installed Node executable, and removes
+executables that earlier releases installed there for Buzz program discovery.
+Run `provider install` again after moving either. An existing entry not
+managed by Yewholt is not overwritten.
 
 `provider install` and `yewholt pair` print the same provider public key.
 Admit it to the relay and run `yewholt pair add <providerPubkey> --label "My Mac"`
@@ -552,15 +514,15 @@ If the daemon and Buzz relay share an InstaBox VM but the VM cannot reach
 its own public WebSocket endpoint, keep `relayUrl` in the daemon's
 `config.json` set to the public `wss://…instabox.tech` address used by Buzz
 and the Mac target. In the **daemon's** `$YEWHOLT_HOME/.env` (not the
-relay Compose `.env`), set `YEWHOLT_LOCAL_PORT` to the local WebSocket
+relay's `relay/.env`), set `YEWHOLT_LOCAL_PORT` to the local WebSocket
 listener's port. Restart only the daemon to apply it. It opens the
 WebSocket to `ws://127.0.0.1:<port>` with the public `Host` header and
 signs NIP-42 AUTH for the original public URL. Use this only when both
 routes lead to the same relay. Other relay URLs and the Mac provider are
 unchanged. With the variable unset, the daemon connects directly as before.
 
-For an InstaBox VM using the Host-rewriting proxy, publish the relay on
-**loopback port 3001** (`BUZZ_HTTP_PORT=127.0.0.1:3001` in the relay Compose environment;
+<a id="instabox-relay-proxy"></a>For an InstaBox VM using the Host-rewriting proxy, publish the relay on
+**loopback port 3001** (`BUZZ_HTTP_PORT=127.0.0.1:3001` in the relay's environment;
 the container still listens on 3000). Run the proxy on **port 3000**:
 
 ```sh
@@ -573,45 +535,17 @@ default and forwards HTTP and WebSocket upgrades to `127.0.0.1:3001`.
 Override those ports with `YEWHOLT_PROXY_LISTEN` and
 `YEWHOLT_PROXY_TARGET` if needed. With the default proxy ports, set
 `YEWHOLT_LOCAL_PORT=3000` in the daemon's `.env` so the daemon connects
-through the same proxy. A plain Compose deployment and `yewholt install`
-both default to publishing the relay on host port 3000; that conflicts
-with the proxy's listener. Do not start a second proxy or change the ports
+through the same proxy. A Buzz single-node deployment defaults to publishing the relay on host
+port 3000; that conflicts with the proxy's listener. Do not start a second proxy or change the ports
 on a running InstaBox deployment that already uses this layout.
 
-**Verification.** `npm test` runs the offline provider checks. With the
-disposable Phase 0 Compose relay already running, also run:
-
-```sh
-npm run build
-node dist/test/spike-provider.js ws://127.0.0.1:13000 "$spike_home/owner.key" \
-  yewholt-phase0-relay-1
-```
-
-Pass the actual disposable relay container name. The script admits and removes
-its temporary provider key, uses a new daemon home, pipes a Buzz-shaped request
-into the provider, checks provisioning, active status and runtime kinds
-`10100`/`20001`, retries without duplication, and exercises command wake with the
-daemon stopped (allow at least 120 seconds). An optional fourth argument
-accepts a file containing a complete Buzz-shaped deploy request using the
-disposable loopback relay and an agent attested by an admitted owner. Use only
-disposable identities; remove the printed home after the script stops the daemon.
-
-To exercise the CLI and installed shim against the same disposable relay:
-
-```sh
-node dist/test/spike-provider-cli.js ws://127.0.0.1:13000 "$spike_home/owner.key" \
-  yewholt-phase0-relay-1
-```
-
-The script installs into a disposable home, pairs and admits the provider,
-deploys an app-shaped package through the generated shim, and verifies active
-status, `list`, `doctor` and removal without removing the agent file.
+**Verification.** `npm test` runs the offline provider checks.
 
 ### Coding bots (`code`)
 
-A bot whose stored permissions include `code` is a coding agent. It reads, writes, edits, and runs shell commands in its own workspace, and asks in the chat before anything on the approval list below. A bot without `code` has no tools and behaves as before. The Onboarding Specialist never gets `code`: a proposal that gives it `code` is refused.
+A bot whose stored permissions include `code` is a coding agent. It reads, writes, edits, and runs shell commands in its own workspace, and asks in the chat before anything on the approval list below. A bot without `code` has no tools and behaves as before.
 
-`code` is granted or revoked like any permission, through an approved proposal (`create bot ... permissions: post,read,code`, `change permissions of X to post,read,code`). The change applies from that bot's next turn; the daemon does not restart. Under the hood every conversation selects no extensions by default; a code bot's conversation selects pi-durable's `CodingTools` (`read`, `write`, `edit`, `bash`), the tool search extension (`tool_search`, so deferred tools do not bloat every turn), the extensions of your Pi packages, and Yewholt's gate (`yewholt-code`), in that order. This follows Buzz's Pi host ([`host.mjs`](https://github.com/block/buzz-app/blob/main/src/bundled/pi/host.mjs)); see [NOTICE](NOTICE).
+`code` is granted or revoked like any permission, in the agent's provisioning (`permissions` in its file). The change applies from that bot's next turn; the daemon does not restart. Under the hood every conversation selects no extensions by default; a code bot's conversation selects pi-durable's `CodingTools` (`read`, `write`, `edit`, `bash`), the tool search extension (`tool_search`, so deferred tools do not bloat every turn), the extensions of your Pi packages, and Yewholt's gate (`yewholt-code`), in that order. This follows Buzz's Pi host ([`host.mjs`](https://github.com/block/buzz-app/blob/main/src/bundled/pi/host.mjs)); see [NOTICE](NOTICE).
 
 The bot's instructions say it has a workspace, which tools it has, and what needs approval. Bots without `code` keep the old out-of-scope text.
 
@@ -621,7 +555,7 @@ Each code bot gets `$YEWHOLT_WORKSPACES/<id>`. The root defaults to `/srv/yewhol
 
 1. Install Yewholt, then run `sudo scripts/setup-bot-user.sh` from the daemon account. On a VM with persistent storage at `/data`, pass `--workspaces /data/yewholt/workspaces` to keep bot files there.
 2. Start the daemon from a fresh login session so it picks up the group. Check `yewholt status` for `isolation: ok`.
-3. Create a bot or grant it `code` in Buzz and approve the proposal. The daemon creates its workspace automatically.
+3. Create an agent with the `code` permission in Buzz. The daemon creates its workspace automatically.
 
 The setup script accepts `--user`, `--group`, `--workspaces`, and `--daemon-user`. Set the corresponding `YEWHOLT_BOT_USER` and `YEWHOLT_BOT_GROUP` in the daemon environment when using custom names. For a custom state directory, pass `YEWHOLT_HOME` through sudo with `sudo --preserve-env=YEWHOLT_HOME scripts/setup-bot-user.sh`. Re-run setup after a VM template update that resets the system accounts or sudoers. Existing folders on persistent storage must still match the recreated account's numeric UID and GID. Legacy files in `$YEWHOLT_HOME/workspaces` stay there. Move any workspace data you want to retain to the corresponding new workspace with the daemon stopped and apply the new ownership and permissions.
 
@@ -647,8 +581,8 @@ Who may answer, and which request an answer resolves:
 - The answer must come from a person in that same channel who is the install owner (the pubkey of `$YEWHOLT_HOME/secrets/owner.key`), the owner of a Buzz-created agent (its NIP-OA `ownerPubkey`), or an admin listed in `YEWHOLT_ADMINS`. Anyone else gets `Only the owner or an admin can answer approval <id>.`: the call stays parked, nothing runs, and the request stays in the queue. Bots never answer.
 - `aprovo`, `sim`, or `approve` (with or without a leading `@<bot>` mention) runs the call once. `rejeito`, `não`, or `reject` refuses it; the model gets a tool error saying a person rejected it.
 - A reply to the request message (NIP-10 `e` tag) answers that request.
-- `@Coder aprovo` answers Coder's oldest request in the channel. `@Onboarding Specialist aprovo` stays with the bot proposal.
-- A plain `aprovo` answers the only request in the channel. If a bot proposal is pending there too, or more than one command is waiting, the daemon lists them and asks which one instead of guessing.
+- `@Coder aprovo` answers Coder's oldest request in the channel.
+- A plain `aprovo` answers the only request in the channel. If more than one command is waiting, the daemon lists them and asks which one instead of guessing.
 
 The decision is delivered as a pi-durable signal to the parked call's task. A signal key holds one value, so a second `aprovo` finds nothing to run (`duplicate`). A daemon killed while a call is parked keeps it parked: on restart the daemon re-attaches to the bot's unfinished turn by its request id (no second input), `aprovo` still resolves it, the command runs once, and the reply is posted. `bash` is not replay-safe in pi-durable, so a crash while an approved command is running ends it `interrupted`; it is never started a second time.
 
@@ -676,7 +610,7 @@ MCP servers, skills (`SKILL.md`), git credentials, and push or PR automation are
 
 ### Keys
 
-Back up `secrets/` and `relay/.env` and keep them offline. Buzz has no key rotation: the pubkey is the identity, and a lost secret cannot be recovered or swapped in place. NIP-OA credentials are capabilities the owner key can reissue; they do not replace the agent secret. To retire a leaked bot key, `stop bot <name>` (it stops answering) and create a new bot. The old pubkey remains a Nostr identity until you remove it from the channel.
+Back up `secrets/` and keep it offline (and `relay/.env`, if this home still holds a relay from an earlier install). Buzz has no key rotation: the pubkey is the identity, and a lost secret cannot be recovered or swapped in place. NIP-OA credentials are capabilities the owner key can reissue; they do not replace the agent secret. To retire a leaked agent key, delete the agent in Buzz (or send `!shutdown` as its owner) and create a new one. The old pubkey remains a Nostr identity until you remove it from the channel.
 
 ### Provider keys on the host
 
@@ -688,7 +622,7 @@ yewholt code auth login deepseek --api-key
 
 The daemon reads the API key from the same Pi `auth.json`; there is nothing to copy. Log in on the machine running the daemon, with the same Unix user and HOME it uses. Pi defaults to `~/.pi/agent/auth.json`; if you set `PI_CODING_AGENT_DIR`, use the same absolute directory for login and the daemon. The daemon's `--home` changes Yewholt's state directory, not Pi's. Keep the auth file private to the daemon user. Restart the daemon after logging in, changing a key, or logging out so it rebuilds its model catalog.
 
-You can also supply provider keys in the daemon's environment or `$YEWHOLT_HOME/.env` (default `~/.yewholt/.env`, mode `0600`). For the daemon, a usable environment credential takes precedence over a saved Pi key; shell variables win over the `.env` file. This is not the relay's `relay/.env`. `YEWHOLT_HOME` is read before its `.env`, so set it in the service environment if needed.
+You can also supply provider keys in the daemon's environment or `$YEWHOLT_HOME/.env` (default `~/.yewholt/.env`, mode `0600`). For the daemon, a usable environment credential takes precedence over a saved Pi key; shell variables win over the `.env` file. `YEWHOLT_HOME` is read before its `.env`, so set it in the service environment if needed.
 
 `YEWHOLT_MODEL` is `provider/modelId`. OpenCode Zen free models are catalog ids with a zero cost, for example `opencode/big-pickle` or `opencode/deepseek-v4.1-flash-free`. `OPENCODE_API_KEY` registers both `opencode` and `opencode-go`.
 
@@ -743,7 +677,7 @@ None of these are required. A built-in provider is registered when its credentia
 
 | Variable | Use |
 |---|---|
-| `YEWHOLT_MODEL` | Default `provider/modelId`, for example `opencode/big-pickle`. Used for a create request that names no model, and as the harness default when no `--model` is given |
+| `YEWHOLT_MODEL` | Default `provider/modelId`, for example `opencode/big-pickle`. Used for a provisioned agent that names no model, and as the harness default when no `--model` is given |
 | `YEWHOLT_TURN_TOKENS` | Tokens charged for one interpreter turn (default 1000) |
 | `YEWHOLT_BUDGET_TOKENS` | Per-session cap (default 100000) |
 | `YEWHOLT_HOME` | State directory. Host configuration and optional provider variables are in `$YEWHOLT_HOME/.env` |
@@ -755,11 +689,11 @@ None of these are required. A built-in provider is registered when its credentia
 
 The full commented list is in `.env.example`. No dependency was added for this; the file parser is a few lines in `src/env-file.ts`.
 
-Model turns also add pi-durable `pi.usage` token totals, and the session is charged the larger of that delta and one interpreter turn. Approval and rejection do not spend the budget. A session over its cap refuses new work and still accepts `approve` on a proposal it already posted.
+Model turns also add pi-durable `pi.usage` token totals, and the session is charged the larger of that delta and one interpreter turn. Approval and rejection do not spend the budget. A session over its cap refuses new work.
 
-`yewholt admin budget <name> <tokens>` changes a cap while the daemon is stopped. `admin keys`, `admin bots`, and `admin channel` are safe while it is up. Do not open the SQLite file from a second process; pi-durable allows one writer.
+`yewholt admin budget <name> <tokens>` changes a cap while the daemon is stopped. `admin keys` and `admin bots` are safe while it is up. Do not open the SQLite file from a second process; pi-durable allows one writer.
 
-`yewholt stop` sends the daemon SIGTERM and runs `docker compose stop`. Volumes are kept.
+`yewholt stop` sends the daemon SIGTERM. It does not touch the relay.
 
 ## kill -9 resume
 
@@ -787,19 +721,17 @@ SQLite is opened with pi-durable's Node adapter (WAL, `synchronous=NORMAL`). The
 
 - NIP-OA test vector from `docs/nips/NIP-OA.md`
 - key files mode `0600` and signed kind 9 events
-- the Portuguese create example, approval, a second session, model change, and stop
-- every model phrase above, the verbatim `@Onboarding Specialist …` messages, leading-mention stripping, and the `YEWHOLT_MODEL` default for a create without a model
-- relay membership from a verbatim Buzz 0.3.0 capture (`test/fixtures/buzz-membership-20261121.json`): newest relay-signed 39002 per channel, removal, forged lists ignored, no relay key means stored scope only
+- approval words and leading-mention stripping
+- relay membership from a verbatim Buzz 0.3.0 capture (`test/fixtures/buzz-membership-20261121.json`): newest relay-signed 39002 per channel, removal, forged lists ignored
 - the relay client against a loopback WebSocket stub: per-subscription event and `EOSE` routing, `unsubscribe`, `CLOSED` reasons; bot connections, re-subscription, and one-time handling of a message seen on two connections
 - the Phase 0 control-channel fixture's encryption round-trip and rejection of mismatched AAD
-- a budget that blocks a second create and still allows `approve`
 - the kill -9 resume above
-- code bots: the approval classifier (every dangerous form, combined flags, quoting, `cd x && rm -rf y`, safe look-alikes); the workspace folder and its minimal env; a bash call cannot see a variable set in the daemon's `process.env`; `$YEWHOLT_HOME` reads refused, also through symlinks; tools only with `code`, never for the Onboarding Specialist, and grant/revoke on the next turn; the approval flow end to end on pi-ai's faux provider (park, request message, `aprovo` runs once, `rejeito` refuses, ambiguity asks, reply targets one request, a non-owner's `aprovo` runs nothing and leaves the request queued, an admin from `YEWHOLT_ADMINS` and the install owner can answer); a model error on the faux provider reaches the chat with its reason and provider text, with a fake key masked, for plain and code bots; a kill -9 while parked, then `aprovo` after reopen runs the command exactly once; the Pi package loader with a fixture `pi.durable` package and a broken one that is skipped
+- code bots: the approval classifier (every dangerous form, combined flags, quoting, `cd x && rm -rf y`, safe look-alikes); the workspace folder and its minimal env; a bash call cannot see a variable set in the daemon's `process.env`; `$YEWHOLT_HOME` reads refused, also through symlinks; tools only with `code`, and grant/revoke on the next turn; the approval flow end to end on pi-ai's faux provider (park, request message, `aprovo` runs once, `rejeito` refuses, ambiguity asks, reply targets one request, a non-owner's `aprovo` runs nothing and leaves the request queued, an admin from `YEWHOLT_ADMINS` and the install owner can answer); a model error on the faux provider reaches the chat with its reason and provider text, with a fake key masked, for plain and code bots; a kill -9 while parked, then `aprovo` after reopen runs the command exactly once; the Pi package loader with a fixture `pi.durable` package and a broken one that is skipped
 - pi-ai built-in providers register from environment credentials or saved Pi API keys, including OpenCode Zen (`opencode/big-pickle`); Claude/Codex subscription tokens do not register
 - `~/.yewholt/.env` loads at start, does not override the shell, and is mode `0600`
 - CLI routing: `yewholt` and `yewholt code ...` reach the harness with arguments unchanged, `YEWHOLT_MODEL` is added only without `--model`, help flags exit 0, daemon commands route to themselves, unknown commands exit 1. The tests do not start the TUI or call a model
 
-Relay bring-up is not part of `npm test`. It needs Docker.
+Relay bring-up is not part of `npm test`.
 
 ## Roadmap
 
