@@ -25,6 +25,7 @@ export interface ChatClient {
 export type LinkBot = Pick<BotRecord, "pubkey" | "name" | "status" | "external" | "relayUrl" | "authTag"> & { scope: readonly string[] };
 
 const SEEN_CAP = 10_000;
+const HOSTED_MEMBERS_REFRESH_MS = 10_000;
 
 /** A kind 9 as the session sees it. The channel is the event's own `h` tag. */
 export function humanMessageFrom(event: NostrEvent): HumanMessage | null {
@@ -80,6 +81,7 @@ type LinkOptions = {
  */
 class BotLink<T extends LinkBot> {
   private lists = new Map<string, NostrEvent>();
+  private nextMembersRefresh = 0;
   private member: ReadonlySet<string> = new Set();
   private direct: ReadonlySet<string> = new Set();
   private stored: string[];
@@ -100,10 +102,16 @@ class BotLink<T extends LinkBot> {
   }
 
   start(): void {
-    if (this.options.relayPubkey) {
-      this.client.subscribe("members", [{ kinds: [MEMBER_LIST_KIND], "#p": [this.bot.pubkey] }], this.onList);
-    }
+    this.refreshMembers();
     this.refresh();
+  }
+
+  refreshMembers(): void {
+    if (!this.options.relayPubkey) return;
+    const now = performance.now();
+    if (now < this.nextMembersRefresh) return;
+    this.nextMembersRefresh = now + HOSTED_MEMBERS_REFRESH_MS;
+    this.client.subscribe("members", [{ kinds: [MEMBER_LIST_KIND], "#p": [this.bot.pubkey] }], this.onList);
   }
 
   channels(): string[] {
@@ -231,6 +239,8 @@ export class BotLinks<T extends LinkBot = LinkBot> {
       if (existing) {
         existing.bot = bot;
         existing.setStoredScope(bot.scope);
+        // Buzz can store a new DM's member list without delivering it to the live REQ.
+        if (bot.external) existing.refreshMembers();
         continue;
       }
       let client: ChatClient;
