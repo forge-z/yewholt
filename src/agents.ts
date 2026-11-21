@@ -8,7 +8,7 @@ import type { BotRecord } from "./registry.js";
 
 type Defaults = { relayUrl: string; model: ModelChoice };
 
-export type AgentDefinition = Defaults & {
+export type AgentProvisioning = Defaults & {
   pubkey: string;
   ownerPubkey: string;
   name: string;
@@ -18,6 +18,9 @@ export type AgentDefinition = Defaults & {
   respondTo: string;
   respondToAllowlist: string[];
   channelId?: string;
+};
+
+export type AgentDefinition = AgentProvisioning & {
   mtimeMs: number;
   fileVersion: string;
 };
@@ -25,7 +28,7 @@ export type AgentDefinition = Defaults & {
 type AgentIssue = { id: string; name: string; pubkey?: string; reason: string };
 export type AgentScan = { definitions: AgentDefinition[]; present: Set<string>; invalid: AgentIssue[]; unavailable?: true };
 export type AgentDiagnostics = Pick<AgentScan, "invalid" | "unavailable">;
-export type AgentStatus = { name: string; pubkey: string; state: string };
+export type AgentStatus = { name: string; pubkey: string; state: string; target?: string; lastDeploy?: string | null };
 const hexKey = /^[0-9a-f]{64}$/;
 
 export function listAgents(home: string, defaults: Defaults): AgentScan {
@@ -62,10 +65,8 @@ function fileId(entry: string): string {
   return createHash("sha256").update(entry).digest("hex");
 }
 
-function loadAgent(path: string, expected: string, defaults: Defaults): AgentDefinition | Omit<AgentIssue, "id"> {
-  let pubkey: string | undefined;
-  let name = "Provisioned agent";
-  const invalid = (reason: string) => ({ name, pubkey, reason });
+export function loadAgent(path: string, expected: string, defaults: Defaults): AgentDefinition | Omit<AgentIssue, "id"> {
+  const invalid = (reason: string) => ({ name: "Provisioned agent", reason });
   let raw: string;
   let mtimeMs: number;
   let fileVersion: string;
@@ -89,6 +90,14 @@ function loadAgent(path: string, expected: string, defaults: Defaults): AgentDef
   } catch {
     return invalid("invalid JSON");
   }
+  const validated = validateAgent(parsed, expected, defaults);
+  return "nsec" in validated ? { ...validated, mtimeMs, fileVersion } : validated;
+}
+
+export function validateAgent(parsed: unknown, expected: string, defaults: Defaults): AgentProvisioning | Omit<AgentIssue, "id"> {
+  let pubkey: string | undefined;
+  let name = "Provisioned agent";
+  const invalid = (reason: string) => ({ name, pubkey, reason });
   if (!object(parsed)) return invalid("expected a JSON object");
   const { nsec, authTag } = parsed;
   if (typeof nsec !== "string" || !hexKey.test(nsec)) return invalid("invalid nsec");
@@ -127,7 +136,7 @@ function loadAgent(path: string, expected: string, defaults: Defaults): AgentDef
   const safeModel = { provider: model.provider as string, modelId: model.modelId as string, label: model.label as string };
   const fields = [relayUrl, ...Object.values(safeModel), ...permissions, respondTo, ...respondToAllowlist, channelId ?? ""];
   if (fields.some((value) => value.toLowerCase().includes(nsec))) return invalid("secret repeated in provisioning fields");
-  return { pubkey, ownerPubkey, name, nsec, authTag, relayUrl, model: safeModel, permissions, respondTo, respondToAllowlist, channelId, mtimeMs, fileVersion };
+  return { pubkey, ownerPubkey, name, nsec, authTag, relayUrl, model: safeModel, permissions, respondTo, respondToAllowlist, channelId };
 }
 
 function object(value: unknown): value is Record<string, unknown> {
@@ -188,8 +197,14 @@ export class AgentFiles {
   }
 }
 
-export function agentStatuses(bots: readonly BotRecord[], diagnostics?: AgentDiagnostics): AgentStatus[] {
+export function agentStatuses(bots: readonly BotRecord[], diagnostics?: AgentDiagnostics,
+  deployment?: { target: string; timestamps: ReadonlyMap<string, number> }): AgentStatus[] {
   const external = bots.filter((bot) => bot.external);
+  const deployFields = (pubkey?: string) => {
+    if (!deployment) return {};
+    const time = pubkey ? deployment.timestamps.get(pubkey) : undefined;
+    return { target: deployment.target, lastDeploy: time ? new Date(time).toISOString() : null };
+  };
   const known = new Map(external.filter((bot) => bot.status === "invalid").map((bot) => [fileId(`${bot.pubkey}.json`), bot]));
   const invalid: AgentStatus[] = (diagnostics?.invalid ?? []).map((issue) => {
     const bot = known.get(issue.id);
@@ -197,16 +212,18 @@ export function agentStatuses(bots: readonly BotRecord[], diagnostics?: AgentDia
       name: issue.pubkey ? issue.name : bot?.name ?? issue.name,
       pubkey: (issue.pubkey ?? bot?.pubkey)?.slice(0, 8) ?? "unknown",
       state: `invalid:${issue.reason}`,
+      ...deployFields(issue.pubkey ?? bot?.pubkey),
     };
   });
   if (diagnostics?.unavailable) {
     for (const bot of known.values()) {
-      invalid.push({ name: bot.name, pubkey: bot.pubkey.slice(0, 8), state: "invalid:cannot read agents directory" });
+      invalid.push({ name: bot.name, pubkey: bot.pubkey.slice(0, 8), state: "invalid:cannot read agents directory", ...deployFields(bot.pubkey) });
     }
   }
   return [
     ...external.filter((bot) => bot.status !== "invalid").map((bot) => ({
       name: bot.name, pubkey: bot.pubkey.slice(0, 8), state: bot.status,
+      ...deployFields(bot.pubkey),
     })),
     ...invalid,
   ];

@@ -3,11 +3,13 @@ import { spawn } from "node:child_process";
 import { chmodSync, mkdirSync, openSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
+import type { AgentStatus } from "./agents.js";
 import { loadConfig, saveConfig } from "./config.js";
 import { ensureEnvFile, loadEnvFile } from "./env-file.js";
 import { readPid, runDaemon } from "./daemon.js";
 import { ensureOwnerKey } from "./session.js";
 import { pubkeyOf } from "./nostr.js";
+import { addPairing, listPairings, removePairing } from "./pairing.js";
 import { readKey } from "./keys.js";
 import { envFilePath, logPath, ownerKeyPath, pidPath, secretsDir, sqlitePath, statusPath, yewholtHome } from "./paths.js";
 import { compose, newRelaySecret, relayHealthy, waitForRelay, writeRelayEnv } from "./relay.js";
@@ -45,7 +47,42 @@ async function main(): Promise<void> {
       return admin(home, target.args);
     case "daemon":
       return runDaemon(home);
+    case "pair":
+      return pair(home, commandArgs(target.args));
+    case "agents":
+      return agents(home, commandArgs(target.args));
   }
+}
+
+function commandArgs(rest: string[]): string[] {
+  const index = rest.indexOf("--home");
+  return index < 0 ? rest : [...rest.slice(0, index), ...rest.slice(index + 2)];
+}
+
+function pair(home: string, rest: string[]): void {
+  const [sub, pubkey, flag, label] = rest;
+  if (sub === "add" && rest.length === 4 && flag === "--label") {
+    addPairing(home, pubkey, label);
+  } else if (sub === "remove" && rest.length === 2) {
+    if (!removePairing(home, pubkey)) throw new Error("Provider is not paired");
+  } else if (sub === "list" && rest.length === 1) {
+    const entries = listPairings(home);
+    console.log(JSON.stringify(entries.map(({ pubkey, label }) => ({ pubkey, label })), null, 2));
+  } else {
+    throw new Error("Usage: yewholt pair add <providerPubkey> --label <label> | list | remove <providerPubkey>");
+  }
+}
+
+function agents(home: string, rest: string[]): void {
+  if (rest.length !== 1 || rest[0] !== "list") throw new Error("Usage: yewholt agents list");
+  let entries: AgentStatus[] = [];
+  try {
+    entries = (JSON.parse(readFileSync(statusPath(home), "utf8")) as { agents?: AgentStatus[] }).agents ?? [];
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error("Daemon status is unavailable");
+  }
+  console.log(JSON.stringify(entries.map(({ name, pubkey, state, target, lastDeploy }) =>
+    ({ name, pubkey, state, target: target ?? null, lastDeploy: lastDeploy ?? null })), null, 2));
 }
 
 async function install(home: string): Promise<void> {
@@ -224,4 +261,3 @@ function flag(name: string): string | undefined {
   if (index === -1) return undefined;
   return args[index + 1];
 }
-

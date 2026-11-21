@@ -4,6 +4,8 @@ import { dirname } from "node:path";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { AgentFiles, PRESENCE, agentStatuses, type AgentDiagnostics, type AgentScan } from "./agents.js";
 import { loadConfig, saveConfig, type YewholtConfig } from "./config.js";
+import { CONTROL_KIND } from "./control-protocol.js";
+import { DeployControl, lastDeploys } from "./deploy-control.js";
 import { WorkspaceIsolation } from "./isolation.js";
 import { readKey } from "./keys.js";
 import { BotLinks, Inbox, publishAll } from "./bridge.js";
@@ -39,10 +41,12 @@ export async function runDaemon(home: string): Promise<void> {
   const session = await Yewholt.open(await openNodeSqliteStorage(sqlitePath(home)), { home, isolation });
   const ownerSecret = readKey(ownerKeyPath(home));
   try {
-    const files = new AgentFiles(home, {
+    const defaults = {
       relayUrl: loadConfig(home).relayUrl,
       model: defaultModel() ?? { provider: "", modelId: "", label: "unset" },
-    });
+    };
+    const files = new AgentFiles(home, defaults);
+    const control = new DeployControl(home, ownerSecret, defaults);
     let latest: AgentDiagnostics | undefined;
     let pending: AgentScan | null = null;
     const reconcile = async () => {
@@ -62,7 +66,7 @@ export async function runDaemon(home: string): Promise<void> {
           // Reattach to durable turns after their external keys and stop states are reconciled.
           void session.resumeTurns().catch((error: unknown) => console.error("resume:", error instanceof Error ? error.message : error));
         }
-        await serve(home, session, ownerSecret, reconcile, () => latest);
+        await serve(home, session, ownerSecret, control, reconcile, () => latest);
       } catch (error) {
         console.error("relay loop:", error instanceof Error ? error.message : error);
         await sleep(2000);
@@ -75,11 +79,11 @@ export async function runDaemon(home: string): Promise<void> {
 }
 
 async function serve(
-  home: string, session: Yewholt, ownerSecret: string,
+  home: string, session: Yewholt, ownerSecret: string, control: DeployControl,
   reconcile: () => Promise<boolean>, agentDiagnostics: () => AgentDiagnostics | undefined,
 ): Promise<void> {
   const config = loadConfig(home);
-  await writeStatus(home, session, config, agentDiagnostics());
+  await writeStatus(home, session, config, control.pubkey, agentDiagnostics());
   const owner = new RelayClient(config.relayUrl, ownerSecret);
   let links: BotLinks<BotRecord> | undefined;
   let work = Promise.resolve();
@@ -128,7 +132,7 @@ async function serve(
         // This also runs without incoming messages, on the normal daemon tick.
         const queued = await session.refreshAgentRuntime(botLinks.connectedAgents());
         if (sync || queued) await drain("connected-agents");
-        if (sync || queued) await writeStatus(home, session, config, agentDiagnostics(), botLinks);
+        if (sync || queued) await writeStatus(home, session, config, control.pubkey, agentDiagnostics(), botLinks);
       });
       work = run.catch(() => undefined);
       return run;
@@ -149,6 +153,20 @@ async function serve(
         .catch((error: unknown) => console.error("outbox:", error instanceof Error ? error.message : error));
     });
     owner.subscribe("channel", [{ kinds: [9], "#h": [channelId] }], inbox.accept);
+    owner.subscribe("deploy-control", [{ kinds: [CONTROL_KIND], "#p": [control.pubkey] }], (event) => {
+      if (!serving || stopping) return;
+      work = work.then(async () => {
+        if (!serving || stopping || !owner.isOpen()) return;
+        const reply = await control.handle(event, async (pubkey) =>
+          (await session.snapshot()).bots.some((bot) => bot.pubkey === pubkey && !bot.external));
+        if (!reply) return;
+        const result = await agentRelayDeadline(owner.publish(reply));
+        if (!accepted(result)) console.error("control: confirmation rejected by relay");
+      }).catch(() => {
+        console.error("control: unable to send confirmation");
+        void owner.close();
+      });
+    });
     while (!stopping && owner.isOpen()) {
       const lost = botLinks.lost();
       if (lost) throw new Error(`bot connection lost: ${lost.name}`);
@@ -163,7 +181,7 @@ async function serve(
       if (stopping && links) {
         await session.offlineAgents(links.connectedAgents());
         await drain("offline");
-        await writeStatus(home, session, config, agentDiagnostics());
+        await writeStatus(home, session, config, control.pubkey, agentDiagnostics());
       }
     } finally {
       await links?.closeAll();
@@ -264,14 +282,15 @@ async function publishOutbox(
   await session.ackOutbox(acked);
 }
 
-async function writeStatus(home: string, session: Yewholt, config: YewholtConfig, diagnostics?: AgentDiagnostics, links?: BotLinks<BotRecord>): Promise<void> {
+async function writeStatus(home: string, session: Yewholt, config: YewholtConfig, target: string,
+  diagnostics?: AgentDiagnostics, links?: BotLinks<BotRecord>): Promise<void> {
   const state = await session.snapshot();
   const body = {
     pid: process.pid,
     isolation: session.isolationStatus(),
     relayUrl: config.relayUrl,
     channelId: config.channelId,
-    agents: agentStatuses(state.bots, diagnostics),
+    agents: agentStatuses(state.bots, diagnostics, { target, timestamps: lastDeploys(home) }),
     bots: state.bots.map((bot) => ({
       name: bot.name,
       pubkey: bot.pubkey,
