@@ -524,6 +524,17 @@ unavailable (including on Linux), the engine warns on stderr and uses
 provider configuration directory. The latter must contain just a JSON string
 and have mode `0600`. Never put these files or deploy input in version control.
 
+If the daemon and Buzz relay share an InstaBox VM but the VM cannot reach
+its own public WebSocket endpoint, keep `relayUrl` in the daemon's
+`config.json` set to the public `wss://…instabox.tech` address used by Buzz
+and the Mac target. In the **daemon's** `$YEWHOLT_HOME/.env` (not the
+relay Compose `.env`), set `YEWHOLT_LOCAL_PORT=3000`, using the actual
+host port of the local relay. Restart only the daemon. It opens the
+WebSocket to `ws://127.0.0.1:<port>` with the public `Host` header and
+signs NIP-42 AUTH for the original public URL. Use this only when both
+routes lead to the same relay. Other relay URLs and the Mac provider are
+unchanged. With the variable unset, the daemon connects directly as before.
+
 **Verification.** `npm test` runs the offline provider checks. With the
 disposable Phase 0 Compose relay already running, also run:
 
