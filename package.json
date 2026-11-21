@@ -5,6 +5,7 @@
   "description": "Yewholt: a pi coding harness, and durable agents on Buzz",
   "type": "module",
   "bin": {
+    "yh": "./dist/src/cli.js",
     "yewholt": "./dist/src/cli.js"
   },
   "scripts": {

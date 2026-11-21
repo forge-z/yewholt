@@ -4,10 +4,31 @@
 
 Yewholt has two roles:
 
-1. **Coding harness.** Type `yewholt` in any directory and it opens an interactive [pi](https://pi.dev) coding-agent session on that directory. It is the same harness as the `pi` CLI and it loads the same pi packages (extensions, skills, prompt templates, themes). See [Harness](#harness).
-2. **Durable bots on Buzz.** A headless daemon that runs durable coding agents behind [Buzz](https://github.com/block/buzz). The daemon is not a Buzz fork and has no UI of its own. The stock Buzz relay runs unmodified on the same host. The stock Buzz app (Mac or iOS, in [block/buzz-app](https://github.com/block/buzz-app)) talks only to that relay. Each bot is a Nostr member of a channel, the same way a person is.
+1. **Coding harness.** Type `yh` in any directory and it opens an interactive [pi](https://pi.dev) coding-agent session there. It is the same harness as the `pi` CLI and loads the same pi packages (extensions, skills, prompt templates, themes). `yewholt` is an alias. See [Harness](#harness).
+2. **Durable agents on Buzz.** The headless daemon runs on a Linux VM and connects to an existing [Buzz](https://github.com/block/buzz) relay. The Mac runs the Buzz app with the Yewholt plugin and bridge, not the daemon or relay.
 
 Calendar, email, MCP, cron, memory, kanban, and browser tools are out of core. They belong in later Buzz plugins.
+
+## Agent-first setup
+
+Give your coding agent [the installation skill](skills/install/SKILL.md) and
+the SSH aliases and Buzz relay for the VMs you want to use. The agent sets up
+`yh`, the Mac bridge, and a daemon on each VM. The relay administrator must
+admit the daemon and provider identities; approve the plugin in Buzz when
+prompted. Then use **Harness → Remote → Yewholt** to create an agent and choose
+a model. No Docker or Onboarding Specialist is needed for this path.
+
+For the Mac coding CLI alone, build a checkout with Node.js 22.19+:
+
+```sh
+npm ci
+npm run build
+npm link
+yh
+```
+
+The first run opens pi in the current directory. Use pi's `/login` and
+`/model` for the local harness; VM credentials are configured separately.
 
 ## Harness
 
@@ -71,7 +92,7 @@ The information-flow broker in `docs/practical-information-flow-for-buzz-agents.
 - Docker with Compose v2, only for `yewholt start` (the relay). Tests do not need it.
 - No API key is required. Keys are optional and are read from the environment only when a session calls a model.
 
-## Run
+## Legacy: run a bundled relay and chat onboarding
 
 ```bash
 npm install
@@ -328,13 +349,17 @@ moving either.
 4. Select a model from the daemon's catalog or keep **Daemon default**
    (`YEWHOLT_MODEL` on the daemon). Catalog discovery uses the paired
    control channel and does not wake a stopped VM. If the list is empty,
-   configure a supported provider credential in the daemon's `.env` and
-   restart only that daemon; credentials on the Mac are not used. Code
-   execution is opt-in and still requires Linux isolation and approvals.
+   run `/login` with an API key on the VM as the daemon user, or configure a
+   supported credential in the daemon's `.env`; then restart only that daemon.
+   Credentials on the Mac are not used for VM agents. For example, a DeepSeek
+   API-key login or `DEEPSEEK_API_KEY` enables the built-in `deepseek/*` models.
+   Code execution is opt-in and still requires Linux isolation and approvals.
    Direct replies are limited to the attested owner by default.
 5. Compare the agent pubkey with `yewholt agents list` on the daemon. Edit
    name and picture in Buzz, or delete the agent there before removing its
-   target. Editing does not restart a stopped agent. The daemon continues
+   target. The model picker is currently creation-only: Buzz 1.0.6 sends
+   no hosted model setting through its profile edit. Editing name or
+   picture does not restart a stopped agent. The daemon continues
    publishing runtime/presence kinds `10100` and `20001`; Buzz 1.0.6
    classifies hosted agents by type, so its UI is not a daemon heartbeat.
 
@@ -378,7 +403,6 @@ configure a target for each daemon:
 ```sh
 yewholt provider install
 yewholt targets add my-vm --relay wss://relay.example --daemon <daemon-owner-pubkey> --label "My VM"
-yewholt targets add my-mac --local --label "This Mac"
 yewholt targets list
 yewholt targets doctor my-vm     # omit the ID to check all targets
 ```

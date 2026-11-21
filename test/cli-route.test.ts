@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { generateKeyPair } from "../src/nostr.js";
 import { DAEMON_COMMANDS, route, usageText, withDefaultModel } from "../src/route.js";
 
 const cliPath = fileURLToPath(new URL("../src/cli.js", import.meta.url));
@@ -83,14 +84,13 @@ test("usage lists the harness first, then the daemon commands", () => {
   }
 });
 
-function runCli(args: string[]): { status: number | null; stdout: string } {
-  const home = mkdtempSync(join(tmpdir(), "yewholt-cli-"));
+function runCli(args: string[], home = mkdtempSync(join(tmpdir(), "yewholt-cli-"))) {
   const result = spawnSync(process.execPath, [cliPath, ...args], {
     encoding: "utf8",
     env: { PATH: process.env.PATH, YEWHOLT_HOME: home, HOME: home },
     timeout: 20_000,
   });
-  return { status: result.status, stdout: result.stdout };
+  return result;
 }
 
 test("the CLI prints usage for help flags with exit 0 and exit 1 for unknown", () => {
@@ -102,4 +102,35 @@ test("the CLI prints usage for help flags with exit 0 and exit 1 for unknown", (
   const unknown = runCli(["bogus"]);
   assert.equal(unknown.status, 1);
   assert.match(unknown.stdout, /yewholt code --help/);
+});
+
+test("yh and yewholt install the same CLI entry point", () => {
+  const { bin } = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
+  assert.equal(bin.yh, "./dist/src/cli.js");
+  assert.equal(bin.yh, bin.yewholt);
+});
+
+test("external install preserves the daemon identity without installing or stopping a local relay", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "yewholt-external-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const key = generateKeyPair().pubkey;
+  const install = ["install", "--relay", "https://buzz.example", "--relay-pubkey", key];
+  assert.equal(runCli(["install", "--relay", "wss://https://buzz.example", "--relay-pubkey", key], home).status, 1);
+  assert.equal(runCli(["install", "--relay", "https://buzz.example"], home).status, 1);
+  assert.equal(existsSync(join(home, "config.json")), false);
+  const first = runCli(install, home);
+  assert.equal(first.status, 0, first.stderr);
+  assert.match(first.stdout, /^Daemon pubkey: [a-f0-9]{64}$/m);
+  assert.equal(runCli(install, home).stdout, first.stdout);
+  assert.equal(runCli(["install", "--relay", "wss://elsewhere.example", "--relay-pubkey", key], home).status, 1);
+  const config = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
+  assert.equal(config.relayUrl, "wss://buzz.example");
+  assert.equal(config.externalRelayPubkey, key);
+  assert.equal(config.channelId, null);
+  assert.equal(statSync(join(home, ".env")).mode & 0o777, 0o600);
+  assert.equal(existsSync(join(home, "relay")), false);
+  const stop = runCli(["stop"], home);
+  assert.equal(stop.status, 0);
+  assert.doesNotMatch(stop.stderr, /docker|compose/);
+  assert.match(runCli(["status"], home).stdout, /^relay: external wss:\/\/buzz\.example$/m);
 });

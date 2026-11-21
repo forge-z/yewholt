@@ -46,11 +46,13 @@ export function usageText(): string {
   return `Yewholt: a pi coding harness, and durable agents on Buzz
 
 Usage:
-  yewholt                        Open the pi coding harness in the current directory
+  yewholt                        Open the pi coding harness in the current directory (alias: yh)
   yewholt code [args...]         Forward every argument to the harness unchanged
                                  (yewholt code --help shows the harness flags)
 
   yewholt install [--home dir] [--port 3000]
+  yh install --relay <url> --relay-pubkey <pubkey> [--home dir]
+                                 Set up only a daemon for an existing Buzz relay
   yewholt start [--home dir]
   yewholt stop [--home dir]
   yewholt status [--home dir]

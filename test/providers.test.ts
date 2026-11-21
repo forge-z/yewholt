@@ -35,6 +35,14 @@ test("OpenCode Zen key registers Zen and Go, including free models", async () =>
   assert.equal(catalogHas(models, parseModelLabel("opencode/deepseek-v4.1-flash-free")), true);
 });
 
+test("a DeepSeek environment key enables its models without a Pi login", async () => {
+  const model = parseModelLabel("deepseek/deepseek-v4-pro");
+  assert.equal(catalogHas(await loadModels({}), model), false);
+  const models = await loadModels({ DEEPSEEK_API_KEY: "test-key" });
+  assert.deepEqual(models.getProviders().map((provider) => provider.id), ["deepseek"]);
+  assert.equal(catalogHas(models, model), true);
+});
+
 test("a saved Pi API key enables DeepSeek in the hosted catalog and authenticates model requests", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "yewholt-pi-auth-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
