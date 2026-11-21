@@ -164,3 +164,25 @@ test("default model: a create without a model uses YEWHOLT_MODEL; without it the
     else process.env.YEWHOLT_MODEL = previous;
   }
 });
+
+test("parser: Portuguese permission fields and phrases grant code", () => {
+  const permissions = ["post", "read", "code"];
+  for (const field of ["permissões", "permissoes"]) {
+    assert.deepEqual(parseCommand(`crie um novo bot chamado Coder modelo: ${MODEL} ${field}: post,read,code`), {
+      type: "create", name: "Coder", modelLabel: MODEL, scope: null, permissions,
+    });
+    assert.deepEqual(parseCommand(`mude as ${field} de Coder para post,read,code`), {
+      type: "update-permissions", name: "Coder", permissions,
+    });
+    assert.deepEqual(parseCommand(`change bot Coder ${field}: post,read,code`), {
+      type: "update-permissions", name: "Coder", permissions,
+    });
+  }
+  for (const phrase of ["com permissão code", "com permissão de código", "e com permissão de código"]) {
+    for (const model of [`com modelo ${MODEL}`, `modelo: ${MODEL}`]) {
+      assert.deepEqual(parseCommand(`crie um novo bot chamado Coder ${model} ${phrase}`), {
+        type: "create", name: "Coder", modelLabel: MODEL, scope: null, permissions,
+      });
+    }
+  }
+});

@@ -1,0 +1,19 @@
+Yewholt
+
+This product includes code adapted from Buzz (https://github.com/block/buzz-app),
+commit 9657bb35451c99d3cf1687f1af9ca76fa7f001f0.
+Copyright 2026 Block, Inc.
+Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0).
+
+Adapted parts, each marked with a header comment naming the source file and commit:
+
+- src/packages.ts: loadPackages, loadPackage, isProvider, hookPackages and piDir from
+  src/bundled/pi/host.mjs, ported to TypeScript and pi-durable 1.6.0, with Yewholt's
+  reserved extension names and messages.
+- src/session.ts (Yewholt.open, codeExtensions): the coding registry from
+  src/bundled/pi/host.mjs: CodingTools, then the tool search extension, then the
+  packages' extensions.
+- src/workspace.ts (WorkspaceEnv): the per-conversation NodeExecutionEnv with its cwd
+  at the workspace, from src/bundled/pi/host.mjs; Yewholt passes no inherited
+  environment.
+- README.md, "Pi packages": the package convention of src/bundled/pi/EXTENSIONS.md.

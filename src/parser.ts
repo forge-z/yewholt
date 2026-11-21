@@ -41,28 +41,40 @@ export function parseCommand(input: string): ParsedCommand | null {
   const scopePt = text.match(/^mude o escopo de (.+?) para (.+)$/i);
   if (scopePt) return { type: "update-scope", name: scopePt[1]!.trim(), scope: scopePt[2]!.trim() };
 
-  const permEn = text.match(/^(?:change|set) permissions of (.+?) to (.+)$/i);
-  if (permEn) return { type: "update-permissions", name: permEn[1]!.trim(), permissions: splitPermissions(permEn[2]!) };
+  const permissionChange = text.match(/^(?:(?:change|set) permiss(?:ions|[õo]es) of (.+?) to|mude (?:as )?permiss[õo]es de (.+?) para)\s+(.+)$/i);
+  if (permissionChange) {
+    const raw = permissionChange[3]!;
+    return { type: "update-permissions", name: (permissionChange[1] ?? permissionChange[2]!).trim(), permissions: splitPermissions(field(raw, PERMISSIONS) ?? raw) };
+  }
+  const permissionField = text.match(/^(?:change bot|set bot|mude o bot)\s+(.+?)\s+permiss(?:ions|[õo]es)\s*[:=]\s*(.+)$/i);
+  if (permissionField) {
+    return { type: "update-permissions", name: permissionField[1]!.trim(), permissions: splitPermissions(permissionField[2]!) };
+  }
 
   if (/^(?:create|crie)\b/i.test(text) || /\bnovo bot\b/i.test(text)) {
+    const permissions = field(text, PERMISSIONS);
     return {
       type: "create",
       name: field(text, "name") ?? named(text),
       modelLabel: modelPhrase(text),
       scope: field(text, "scope"),
-      permissions: field(text, "permissions") ? splitPermissions(field(text, "permissions")!) : null,
+      permissions: permissions ? splitPermissions(permissions) : CODE_PHRASE.test(text) ? ["post", "read", "code"] : null,
     };
   }
   return null;
 }
 
+const PERMISSIONS = "permiss(?:ions|[õo]es)";
+const CODE_PHRASE = /\b(?:e\s+)?com\s+permiss[ãa]o\s+(?:code|de\s+c[óo]digo)\b/i;
+const FIELD_END = `\\s+(?:[\\p{L}\\p{N}_]+\\s*[:=]|${CODE_PHRASE.source})|$`;
+
 function field(text: string, key: string): string | null {
-  const match = text.match(new RegExp(`\\b${key}\\s*[:=]\\s*([^\\n]+?)(?=\\s+\\w+\\s*[:=]|$)`, "i"));
+  const match = text.match(new RegExp(`\\b${key}\\s*[:=]\\s*([^\\n]+?)(?=${FIELD_END})`, "iu"));
   return match ? match[1]!.trim() : null;
 }
 
 function named(text: string): string | null {
-  const match = text.match(/\b(?:named|chamado|chamada)\s+(.+?)(?=\s+e\s|\s+com\s|\s+usando\s|\s+using\s|\s+with\s|\s+model[o]?\b|$)/i);
+  const match = text.match(/\b(?:named|chamado|chamada)\s+(.+?)(?=\s+e\s|\s+com\s|\s+usando\s|\s+using\s|\s+with\s|\s+model[o]?\b|\s+permiss(?:ions|[õo]es)\s*[:=]|$)/i);
   return match ? match[1]!.trim() : null;
 }
 
@@ -72,9 +84,9 @@ function modelPhrase(text: string): string | null {
   const pt = text.match(/coloque\s+o\s+(.+?)\s+como\s+modelo/i);
   if (pt) return pt[1]!.trim();
   // "com o modelo X", "com modelo X", "usando o modelo X", "with model X", "using model X".
-  const phrase = text.match(/\b(?:com(?:\s+o)?|usando(?:\s+o)?|with|using)\s+(?:the\s+)?modelo?\s+(.+?)(?=\s+(?:scope|escopo|permissions|permiss[õo]es)\b|\s+\w+\s*[:=]|$)/i);
+  const phrase = text.match(/\b(?:com(?:\s+o)?|usando(?:\s+o)?|with|using)\s+(?:the\s+)?modelo?\s+(.+?)(?=\s+(?:scope|escopo|permissions|permiss[õo]es)\b|\s+\w+\s*[:=]|\s+(?:e\s+)?com\s+permiss[ãa]o\b|$)/i);
   if (phrase) return phrase[1]!.trim().replace(/[.,;!?]+$/, "") || null;
-  const en = text.match(/\bmodel\s+(.+?)(?=\s+scope\b|\s+permissions\b|$)/i);
+  const en = text.match(/\bmodel\s+(.+?)(?=\s+scope\b|\s+permiss(?:ions|[õo]es)\b|\s+(?:e\s+)?com\s+permiss[ãa]o\b|$)/i);
   return en ? en[1]!.trim() : null;
 }
 
