@@ -8,6 +8,7 @@ import type { Target } from "./target.js";
 export type RelayWait = (
   target: Extract<Target, { transport: "relay" }>, secret: string, event: NostrEvent,
   requestId: string, agentPubkey: string, timeoutMs: number,
+  onConfirmation?: (body: Record<string, unknown>) => void,
 ) => Promise<"confirmed" | "refused" | "timeout">;
 
 function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -19,7 +20,7 @@ function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   });
 }
 
-export const waitForConfirmation: RelayWait = async (target, secret, event, requestId, agentPubkey, timeoutMs) => {
+export const waitForConfirmation: RelayWait = async (target, secret, event, requestId, agentPubkey, timeoutMs, onConfirmation) => {
   const recipient = pubkeyOf(secret);
   const deadline = AbortSignal.timeout(timeoutMs);
   while (!deadline.aborted) {
@@ -37,6 +38,7 @@ export const waitForConfirmation: RelayWait = async (target, secret, event, requ
           try {
             const body = decryptControl(envelope, secret, target.daemonPubkey);
             if (record(body) && body.job === requestId && body.agentPubkey === agentPubkey && typeof body.ok === "boolean") {
+              onConfirmation?.(body);
               resolve(body.ok ? "confirmed" : "refused");
             }
           } catch {

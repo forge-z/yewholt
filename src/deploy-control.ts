@@ -3,7 +3,7 @@ import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { loadAgent, validateAgent, type AgentProvisioning } from "./agents.js";
 import { readJson, record, writePrivateJson } from "./control-files.js";
-import { controlEvent, decryptControl, verifiedEnvelope, type Confirmation, type ControlEnvelope } from "./control-protocol.js";
+import { controlEvent, decryptControl, verifiedEnvelope, type Confirmation, type ControlEnvelope, type ModelPage } from "./control-protocol.js";
 import { HostedControl, hostedLastDeploy, type HostedEffects } from "./hosted-control.js";
 import { pubkeyOf, type NostrEvent } from "./nostr.js";
 import { readPairing } from "./pairing.js";
@@ -66,6 +66,18 @@ function digest(file: ReturnType<typeof provisioningFile>): string {
   return createHash("sha256").update(JSON.stringify(file)).digest("hex");
 }
 
+function modelPage(models: string[], offset: number): ModelPage {
+  const page: string[] = [];
+  let size = 0;
+  for (const model of models.slice(offset)) {
+    size += Buffer.byteLength(JSON.stringify(model)) + 1;
+    if (size > 20_000) break;
+    page.push(model);
+  }
+  const next = offset + page.length;
+  return { models: page, ...(next < models.length && { next }) };
+}
+
 export class DeployControl {
   readonly pubkey: string;
   private readonly hosted: HostedControl;
@@ -84,7 +96,8 @@ export class DeployControl {
     const envelope = verifiedEnvelope(event, this.pubkey, "deploy") ??
       verifiedEnvelope(event, this.pubkey, "hosted-activate") ??
       verifiedEnvelope(event, this.pubkey, "hosted-profile") ??
-      verifiedEnvelope(event, this.pubkey, "hosted-remove");
+      verifiedEnvelope(event, this.pubkey, "hosted-remove") ??
+      verifiedEnvelope(event, this.pubkey, "hosted-models");
     if (!envelope) return null;
     const confirmation: Confirmation = { job: envelope.requestId, agentPubkey: envelope.agentPubkey, ok: false };
     const now = this.now();
@@ -101,14 +114,22 @@ export class DeployControl {
           confirmation.error = "invalid ciphertext";
         }
         if (!confirmation.error) {
-          const isReserved = envelope.agentPubkey === this.pubkey || await reserved(envelope.agentPubkey);
           const authorized = () => readPairing(this.home, event.pubkey)?.pairedAt === pairing.pairedAt;
-          if (!authorized()) confirmation.error = "provider not paired";
-          else if (envelope.type === "deploy") confirmation.error = this.hosted.manages(envelope.agentPubkey)
-            ? "agent is managed by hosted control" : this.apply(event, envelope, body, isReserved, now);
-          else if (envelope.type !== "confirmation" && effects) {
-            confirmation.error = await this.hosted.apply(envelope.type, event, envelope, body, isReserved, now, effects, authorized);
-          } else confirmation.error = "hosted control unavailable";
+          if (envelope.type === "hosted-models") {
+            if (!authorized()) confirmation.error = "provider not paired";
+            else if (now - envelope.issuedAt > 60_000 || envelope.agentPubkey !== this.pubkey ||
+                !record(body) || typeof body.offset !== "number" || !Number.isSafeInteger(body.offset) ||
+                body.offset < 0 || !effects?.models) confirmation.error = "model catalog unavailable";
+            else confirmation.catalog = modelPage(effects.models(), body.offset);
+          } else {
+            const isReserved = envelope.agentPubkey === this.pubkey || await reserved(envelope.agentPubkey);
+            if (!authorized()) confirmation.error = "provider not paired";
+            else if (envelope.type === "deploy") confirmation.error = this.hosted.manages(envelope.agentPubkey)
+              ? "agent is managed by hosted control" : this.apply(event, envelope, body, isReserved, now);
+            else if (envelope.type !== "confirmation" && effects) {
+              confirmation.error = await this.hosted.apply(envelope.type, event, envelope, body, isReserved, now, effects, authorized);
+            } else confirmation.error = "hosted control unavailable";
+          }
         }
       }
     } catch {

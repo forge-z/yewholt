@@ -21,6 +21,7 @@ import { createToolSearchExtension } from "@earendil-works/pi-durable/tool-searc
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { PRESENCE, RUNTIME_PROFILE, presence, runtimeProfile, type AgentScan } from "./agents.js";
 import { ApprovalDecision, createGateExtension, type ApprovalAsk } from "./coding.js";
+import { isModelReference } from "./control-protocol.js";
 import { loadPackages, piDir } from "./packages.js";
 import { physicalPath, WorkspaceEnv, type Roots } from "./workspace.js";
 import { WorkspaceIsolation } from "./isolation.js";
@@ -207,6 +208,15 @@ export class Yewholt {
 
   hasAgentKey(pubkey: string): boolean {
     return this.agentKeys.has(pubkey);
+  }
+
+  availableModelReferences(): string[] {
+    return [...new Set(this.options.models.getModels().map((model) => `${model.provider}/${model.id}`)
+      .filter(isModelReference))].sort();
+  }
+
+  hasModel(choice: ModelChoice): boolean {
+    return catalogHas(this.options.models, choice);
   }
 
   async forgetRemovedAgent(pubkey: string): Promise<void> {

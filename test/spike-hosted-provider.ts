@@ -40,8 +40,11 @@ async function main() {
   Object.assign(process.env, {
     YEWHOLT_PROVIDER_HOME: providerHome, YEWHOLT_PROVIDER_BIN_DIR: bin, YEWHOLT_PROVIDER_FILE_STORAGE: "1",
   });
+  const fixtureCredential = "not-a-provider-key-hosted-test";
+  const model = "openai/gpt-4o-mini";
   const env = { PATH: process.env.PATH, HOME: home, YEWHOLT_HOME: home, YEWHOLT_PROVIDER_HOME: providerHome,
-    YEWHOLT_PROVIDER_BIN_DIR: bin, YEWHOLT_PROVIDER_FILE_STORAGE: "1", YEWHOLT_MODEL: "test/offline" };
+    YEWHOLT_PROVIDER_BIN_DIR: bin, YEWHOLT_PROVIDER_FILE_STORAGE: "1", YEWHOLT_MODEL: "test/offline",
+    OPENAI_API_KEY: fixtureCredential };
   const owner = readKey(ownerFile);
   const daemonKey = pubkeyOf(owner);
   const run = (...args: string[]) => {
@@ -65,7 +68,7 @@ async function main() {
     return JSON.parse(result.stdout);
   };
   assert.deepEqual(invoke({ op: "targets" }), { ok: true, targets: ["instabox"] });
-  const create = { op: "provision", target: "instabox", name: "Hosted test", community: relay };
+  const create = { op: "provision", target: "instabox", name: "Hosted test", community: relay, model };
   const reserved = invoke(create) as { ok: true; pubkey: string };
   assert.deepEqual(invoke(create), reserved);
   const pubkey = reserved.pubkey;
@@ -81,6 +84,10 @@ async function main() {
   const exited = once(daemon, "exit");
   try {
     await client.connect();
+    const catalog = invoke({ op: "models", target: "instabox" });
+    assert.ok(catalog.models.includes(model));
+    assert.ok(catalog.models.every((id: string) => id.startsWith("openai/")));
+    assert.ok(!JSON.stringify(catalog).includes(fixtureCredential));
     const profiles = new Map<number, NostrEvent>();
     client.subscribe("hosted-agent", [{ kinds: [0, 10100, 20001], authors: [pubkey] }], (event) => profiles.set(event.kind, event));
     let captured: { event: NostrEvent; secret: string } | undefined;
@@ -90,6 +97,8 @@ async function main() {
     };
     const params = { pubkey, community: relay };
     assert.deepEqual(await bridge({ ...params, op: "activate", auth }, wait), { ok: true });
+    assert.equal(JSON.parse(readFileSync(file, "utf8")).model.label, model);
+    console.log(JSON.stringify({ catalog: "configured provider only", selectedModel: model, credentialOutput: false }));
     const status = (expected: string) => {
       const bots: { pubkey: string; status: string; name: string; conversationId: number }[] =
         JSON.parse(readFileSync(statusPath(home), "utf8")).bots;

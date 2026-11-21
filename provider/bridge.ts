@@ -4,11 +4,12 @@ import { linkSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { record, writePrivateJson } from "../src/control-files.js";
-import { isPubkey } from "../src/control-protocol.js";
+import { controlEvent, isModelReference, isPubkey } from "../src/control-protocol.js";
+import { parseModelLabel } from "../src/models.js";
 import { generateKeyPair, verifyAuthSignature } from "../src/nostr.js";
 import { sendControl } from "./engine.js";
 import { targetIds } from "./install.js";
-import { waitForConfirmation } from "./relay.js";
+import { waitForConfirmation, type RelayWait } from "./relay.js";
 import { ProviderSecrets } from "./secrets.js";
 import { recordOutcome } from "./status.js";
 import { loadTarget, privateJson, providerHome, relayUrl, validId } from "./target.js";
@@ -16,7 +17,7 @@ import { runWake } from "./wake.js";
 
 type Binding = {
   target: string; relay: string; daemon: string; community: string;
-  reservation: string; name: string; picture?: string; code: boolean;
+  reservation: string; name: string; picture?: string; code: boolean; model?: string;
   secret?: string; authTag?: string[]; removed?: true;
 };
 const fail = (error: string) => ({ ok: false as const, error });
@@ -43,16 +44,26 @@ function release(binding: Binding, pubkey: string): void {
   if (read<string>(path) === pubkey) removeFile(path);
 }
 
+function sameCommunity(relay: string, community: string): boolean {
+  const endpoint = (value: string) => {
+    const url = new URL(value);
+    if (url.hostname.endsWith(".")) url.hostname = url.hostname.slice(0, -1);
+    return url.href;
+  };
+  return endpoint(relay) === endpoint(community);
+}
+
 function provision(input: Record<string, unknown>, community: string) {
-  const { target: id, name, picture, code } = input;
+  const { target: id, name, picture, code, model } = input;
   if (!validId(id) || typeof name !== "string" || !name.trim() || name.length > 120 ||
-      /[\x00-\x1f\x7f]/.test(name) || (picture !== undefined &&
+      /[\x00-\x1f\x7f]/.test(name) || (model !== undefined && !isModelReference(model)) || (picture !== undefined &&
         (typeof picture !== "string" || picture.length > 2048 || !picture.startsWith("https://")))) {
     return fail("Invalid Yewholt target or agent profile");
   }
   const target = loadTarget(id);
-  if (target.transport !== "relay" || new URL(target.relay).href !== new URL(community).href) {
-    return fail("Select a relay target for this Buzz community");
+  if (target.transport !== "relay") return fail("Select a Yewholt relay target");
+  if (!sameCommunity(target.relay, community)) {
+    return fail(`Buzz is open to ${community}, but target ${id} uses ${target.relay}. Open the target relay as a Buzz community, then create the agent there.`);
   }
   const reservation = sha([id, target.relay, target.daemonPubkey, community, name]);
   const path = reservationPath(reservation);
@@ -69,7 +80,7 @@ function provision(input: Record<string, unknown>, community: string) {
   const { pubkey, secret } = generateKeyPair();
   const pending = reservationPath(randomUUID());
   writePrivateJson(agentPath(pubkey), { target: id, relay: target.relay, daemon: target.daemonPubkey,
-    community, reservation, name, picture, code: code === true, secret } satisfies Binding);
+    community, reservation, name, picture, code: code === true, model, secret } satisfies Binding);
   try {
     writePrivateJson(pending, pubkey);
     linkSync(pending, path);
@@ -83,15 +94,41 @@ function provision(input: Record<string, unknown>, community: string) {
   return { ...ok, pubkey, picture };
 }
 
-export async function bridge(input: unknown, wait = waitForConfirmation) {
+async function modelCatalog(id: unknown, wait: RelayWait) {
+  if (!validId(id)) return fail("Select a Yewholt relay target");
+  const target = loadTarget(id);
+  if (target.transport !== "relay") return fail("Select a Yewholt relay target");
+  const secret = new ProviderSecrets().identity();
+  const models: string[] = [];
+  const deadline = Date.now() + 15_000;
+  for (let pages = 0, offset = 0; pages < 12 && Date.now() < deadline; pages++) {
+    const requestId = randomUUID();
+    const event = controlEvent(secret, target.daemonPubkey, "hosted-models",
+      { requestId, agentPubkey: target.daemonPubkey }, { offset });
+    let catalog: unknown;
+    const result = await wait(target, secret, event, requestId, target.daemonPubkey,
+      Math.max(1, deadline - Date.now()), (body) => { catalog = body.catalog; });
+    if (result !== "confirmed" || !record(catalog) || !Array.isArray(catalog.models) ||
+        !catalog.models.every(isModelReference)) break;
+    models.push(...catalog.models);
+    if (catalog.next === undefined) return { ...ok, models };
+    if (!catalog.models.length || catalog.next !== offset + catalog.models.length) break;
+    offset = catalog.next;
+  }
+  return fail("Could not load models from the daemon. Check that it is updated, online and paired, then retry.");
+}
+
+export async function bridge(input: unknown, wait: RelayWait = waitForConfirmation) {
   try {
     if (!record(input)) return fail("Invalid Yewholt request");
     if (input.op === "targets") {
-      return { ...ok, targets: targetIds().flatMap((id) => {
+      const relays = Object.fromEntries(targetIds().flatMap((id) => {
         const target = loadTarget(id);
-        return target.transport === "relay" ? [id] : [];
-      }) };
+        return target.transport === "relay" ? [[id, target.relay] as const] : [];
+      }));
+      return { ...ok, targets: Object.keys(relays), ...(input.details === true && { relays }) };
     }
+    if (input.op === "models") return await modelCatalog(input.target, wait);
     const { op, community, pubkey } = input;
     if (!relayUrl(community)) return fail("Invalid Buzz community");
     if (op === "provision") return provision(input, community);
@@ -132,6 +169,7 @@ export async function bridge(input: unknown, wait = waitForConfirmation) {
     const body = op === "activate" ? { ...context, name: binding.name, picture: binding.picture, agent: {
       name: binding.name, nsec: binding.secret, authTag, permissions: ["post", "read", ...(binding.code ? ["code"] : [])],
       respondTo: "allowlist", respondToAllowlist: [owner],
+      model: binding.model ? parseModelLabel(binding.model) : undefined,
     } } : op === "profile" ? { ...context, name: input.name, picture: input.picture } : context;
     const secrets = new ProviderSecrets();
     const result = await sendControl(target, secrets.identity(), `hosted-${op}`, randomUUID(), pubkey, body, {

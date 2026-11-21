@@ -160,6 +160,8 @@ async function serve(
         if (!serving || stopping || !owner.isOpen()) return;
         const reply = await control.handle(event, async (pubkey) =>
           (await session.snapshot()).bots.some((bot) => bot.pubkey === pubkey && !bot.external), {
+          models: () => session.availableModelReferences(),
+          hasModel: (choice) => session.hasModel(choice),
           publishProfile: async (agent, profile) => {
             const client = new RelayClient(agent.relayUrl, agent.nsec, agent.authTag, false);
             try {
