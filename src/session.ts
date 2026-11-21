@@ -20,7 +20,8 @@ import { createToolSearchExtension } from "@earendil-works/pi-durable/tool-searc
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { ApprovalDecision, createGateExtension, type ApprovalAsk } from "./coding.js";
 import { loadPackages, piDir } from "./packages.js";
-import { ensureWorkspace, physicalPath, WorkspaceEnv, workspaceDir } from "./workspace.js";
+import { physicalPath, WorkspaceEnv, type Roots } from "./workspace.js";
+import { WorkspaceIsolation } from "./isolation.js";
 import { catalogHas, defaultModel, loadModels, parseModelLabel, type ModelChoice } from "./models.js";
 import { readKey, writeKey } from "./keys.js";
 import { generateKeyPair, ownerAuthTag, pubkeyOf, signEvent, type NostrEvent } from "./nostr.js";
@@ -47,6 +48,7 @@ export type SessionOptions = {
   turnTokens?: number;
   defaultLimit?: number;
   models?: Models;
+  isolation?: WorkspaceIsolation;
   /** Pi's settings folder for `pi.durable` packages (default `PI_CODING_AGENT_DIR` or ~/.pi/agent). */
   piDir?: string;
 };
@@ -74,6 +76,7 @@ export class Yewholt {
     readonly harness: Harness,
     private readonly options: Required<Pick<SessionOptions, "home" | "turnTokens" | "defaultLimit">> & { models: Models },
     private readonly coding: Coding,
+    private readonly isolation: WorkspaceIsolation,
   ) {}
 
   static async open(storage: Storage, options: SessionOptions): Promise<Yewholt> {
@@ -86,7 +89,7 @@ export class Yewholt {
     let ready!: (session: Yewholt) => void;
     const opened = new Promise<Yewholt>((resolve) => (ready = resolve));
     const gate = createGateExtension({
-      roots: async (conversationId) => (await opened).rootsOf(conversationId),
+      workspace: async (conversationId) => (await opened).toolWorkspace(conversationId),
       request: async (ask) => (await opened).requestApproval(ask),
       expire: async (taskId, key) => (await opened).dropApproval(taskId, key),
     });
@@ -117,9 +120,14 @@ export class Yewholt {
         models,
       },
       { registry, toolSearch, gate, packages: [], piDir: options.piDir ?? piDir() },
+      options.isolation ?? new WorkspaceIsolation(options.home),
     );
     ready(self);
     return self;
+  }
+
+  isolationStatus(): string {
+    return this.isolation.status();
   }
 
   /** Called after a commit that put events in the outbox outside a chat turn (approval requests, resumed turns). */
@@ -454,6 +462,7 @@ export class Yewholt {
       reg.bots.push({ ...bot });
       reg.outbox.push(...events);
     }, ctx);
+    if (isCoder(bot)) this.isolation.prepare(bot.pubkey);
     return bot;
   }
 
@@ -564,7 +573,8 @@ export class Yewholt {
     if (!conversation) return;
     if (isCoder(bot)) {
       await this.ensurePackages();
-      const workspace = ensureWorkspace(this.options.home, bot.pubkey);
+      this.isolation.prepare(bot.pubkey);
+      const workspace = this.isolation.workspace(bot.pubkey);
       await conversation.configure({ extensions: this.codeExtensions(), cwd: workspace, instructions: instructionsFor(bot) }, ctx);
       return;
     }
@@ -573,7 +583,7 @@ export class Yewholt {
   }
 
   private async codeTurn(bot: BotRecord, message: HumanMessage, conversation: Conversation): Promise<void> {
-    const workspace = ensureWorkspace(this.options.home, bot.pubkey);
+    const workspace = this.isolation.workspace(bot.pubkey);
     await conversation.configure({ extensions: this.codeExtensions(), cwd: workspace, instructions: instructionsFor(bot) }, ctx);
     const turn: CodeTurn = {
       requestId: `nostr:${message.eventId}:${bot.pubkey}`,
@@ -626,16 +636,27 @@ export class Yewholt {
     this.notifyOutbox();
   }
 
-  /** The execution environment of a code bot's conversation; none (as before) for every other conversation. */
+  /** A resumed turn can still have the previous workspace path stored in its agent snapshot. */
   private async envFor(target: EnvTarget): Promise<WorkspaceEnv | undefined> {
-    const roots = await this.rootsOf(target.conversationId);
-    if (!roots || target.cwd !== roots.workspace) return undefined;
-    return new WorkspaceEnv(roots.workspace);
+    const bot = await this.coderFor(target.conversationId);
+    if (!bot) return undefined;
+    return new WorkspaceEnv(
+      this.isolation.workspace(bot.pubkey),
+      this.isolation.unsafe ? undefined : this.isolation.user,
+      () => this.isolation.prepare(bot.pubkey),
+    );
   }
 
-  private async rootsOf(conversationId: ConversationId): Promise<{ home: string; workspace: string; homeAliases: string[] } | undefined> {
+  private async coderFor(conversationId: ConversationId): Promise<BotRecord | undefined> {
     const bot = (await this.snapshot()).bots.find((item) => item.conversationId === (conversationId as unknown as number));
-    if (!bot || !isCoder(bot)) return undefined;
+    return bot && isCoder(bot) ? bot : undefined;
+  }
+
+  private async toolWorkspace(conversationId: ConversationId): Promise<(Roots & { homeAliases: string[] }) | { refusal: string } | undefined> {
+    const bot = await this.coderFor(conversationId);
+    if (!bot) return undefined;
+    const refusal = this.isolation.prepare(bot.pubkey);
+    if (refusal) return { refusal };
     const home = this.options.home;
     let real = home;
     try {
@@ -643,7 +664,7 @@ export class Yewholt {
     } catch {
       // keep the configured path
     }
-    return { home, workspace: workspaceDir(home, bot.pubkey), homeAliases: real === home ? [] : [real] };
+    return { home, workspace: this.isolation.workspace(bot.pubkey), homeAliases: real === home ? [] : [real] };
   }
 
   /** Store a parked call's request and post it in the channel of the turn it belongs to. Idempotent. */
@@ -813,7 +834,7 @@ export function instructionsFor(bot: BotRecord): string {
     "code gives you your own workspace folder. It is your working directory and your $HOME; use relative paths there.",
     "Tools: read, write, edit and bash work in the workspace. tool_search finds and loads more tools when you need them.",
     "Inside the workspace you work freely. These wait until a person approves them in the chat: recursive deletes (rm -r), git push, piping a download into a shell, sudo/su/doas, any command that mentions the Yewholt state folder ($YEWHOLT_HOME, .yewholt), and write or edit outside the workspace. The call waits; a rejection comes back to you as a refusal.",
-    "Reading or writing Yewholt's state folder outside your workspace is refused and cannot be approved. Your commands do not get the daemon's environment or its API keys.",
+    "Reading or writing Yewholt's state folder is refused and cannot be approved. Your commands do not get the daemon's environment or its API keys.",
     "Do not invent extra permissions. Calendar, email and MCP are out of scope.",
   );
   return lines.join("\n");

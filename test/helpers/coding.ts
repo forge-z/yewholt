@@ -1,10 +1,11 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { createModels, type Models } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import type { Storage } from "@earendil-works/pi-durable";
 import { ensureOwnerKey, Yewholt, type HumanMessage } from "../../src/session.js";
+import { WorkspaceIsolation } from "../../src/isolation.js";
 import type { RegistryState } from "../../src/registry.js";
 
 export const CHANNEL = "22222222-2222-4222-8222-222222222222";
@@ -36,6 +37,8 @@ export function scriptedModels(): Models {
     if (read) return fauxAssistantMessage(fauxToolCall("read", { path: read[1]! }), { stopReason: "toolUse" });
     const write = text.match(/\bwrite:\s*(\S+)/);
     if (write) return fauxAssistantMessage(fauxToolCall("write", { path: write[1]!, content: "written\n" }), { stopReason: "toolUse" });
+    const edit = text.match(/\bedit:\s*(\S+)/);
+    if (edit) return fauxAssistantMessage(fauxToolCall("edit", { path: edit[1]!, edits: [{ oldText: "old", newText: "new" }] }), { stopReason: "toolUse" });
     return fauxAssistantMessage("ok");
   };
   faux.setResponses(Array.from({ length: 200 }, () => respond as never));
@@ -51,9 +54,19 @@ export function emptyPiDir(): string {
   return dir;
 }
 
-export async function openSession(storage: Storage, home: string, piDir: string, models: Models = scriptedModels()): Promise<Yewholt> {
+export function testWorkspaces(home: string): string {
+  return join(dirname(home), `${basename(home)}-workspaces`);
+}
+
+export async function openSession(
+  storage: Storage,
+  home: string,
+  piDir: string,
+  models: Models = scriptedModels(),
+  isolation = new WorkspaceIsolation(home, { YEWHOLT_WORKSPACES: testWorkspaces(home), YEWHOLT_UNSAFE_SHARED_USER: "1" }),
+): Promise<Yewholt> {
   ensureOwnerKey(home);
-  return Yewholt.open(storage, { home, models, piDir, turnTokens: 1000, defaultLimit: 10_000_000 });
+  return Yewholt.open(storage, { home, models, piDir, isolation, turnTokens: 1000, defaultLimit: 10_000_000 });
 }
 
 export function human(eventId: string, text: string, extra: Partial<HumanMessage> = {}): HumanMessage {

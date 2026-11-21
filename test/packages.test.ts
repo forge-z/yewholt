@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { MemoryStorage, type ConversationId } from "@earendil-works/pi-durable";
 import { loadPackages } from "../src/packages.js";
-import { CHANNEL, chatFrom, createBot, human, openSession } from "./helpers/coding.js";
+import { CHANNEL, chatFrom, createBot, human, openSession, testWorkspaces } from "./helpers/coding.js";
 
 const ctx = BACKGROUND_CONTEXT;
 
@@ -101,5 +101,6 @@ test("packages: a code bot gets the package's tool, a bot without code does not;
     await session.close();
     rmSync(dir, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
+    rmSync(testWorkspaces(home), { recursive: true, force: true });
   }
 });

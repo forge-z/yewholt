@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { loadConfig, saveConfig, type YewholtConfig } from "./config.js";
+import { WorkspaceIsolation } from "./isolation.js";
 import { readKey } from "./keys.js";
 import { BotLinks, Inbox, publishAll } from "./bridge.js";
 import { accepted, RelayClient } from "./nostr-client.js";
@@ -14,6 +15,8 @@ import { ensureOwnerKey, Yewholt } from "./session.js";
 let stopping = false;
 
 export async function runDaemon(home: string): Promise<void> {
+  const isolation = new WorkspaceIsolation(home);
+  isolation.start();
   mkdirSync(dirname(sqlitePath(home)), { recursive: true });
   writeFileSync(pidPath(home), `${process.pid}\n`);
   const removePid = () => {
@@ -30,7 +33,7 @@ export async function runDaemon(home: string): Promise<void> {
     stopping = true;
   });
   ensureOwnerKey(home);
-  const session = await Yewholt.open(await openNodeSqliteStorage(sqlitePath(home)), { home });
+  const session = await Yewholt.open(await openNodeSqliteStorage(sqlitePath(home)), { home, isolation });
   const ownerSecret = readKey(ownerKeyPath(home));
   // Code bots' turns a previous process left open (for example a call parked on an approval)
   // continue here; their replies reach the relay through the outbox listener set in serve().
@@ -52,6 +55,7 @@ export async function runDaemon(home: string): Promise<void> {
 
 async function serve(home: string, session: Yewholt, ownerSecret: string): Promise<void> {
   const config = loadConfig(home);
+  await writeStatus(home, session, config.relayUrl, config.channelId);
   const owner = new RelayClient(config.relayUrl, ownerSecret);
   let links: BotLinks | undefined;
   await owner.connect();
@@ -164,10 +168,11 @@ async function publishOutbox(
   await session.ackOutbox(acked);
 }
 
-async function writeStatus(home: string, session: Yewholt, relayUrl: string, channelId: string, links?: BotLinks): Promise<void> {
+async function writeStatus(home: string, session: Yewholt, relayUrl: string, channelId: string | null, links?: BotLinks): Promise<void> {
   const state = await session.snapshot();
   const body = {
     pid: process.pid,
+    isolation: session.isolationStatus(),
     relayUrl,
     channelId,
     bots: state.bots.map((bot) => ({

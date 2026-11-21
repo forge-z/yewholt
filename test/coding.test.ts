@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -7,22 +7,27 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { MemoryStorage, type ConversationId } from "@earendil-works/pi-durable";
 import { instructionsFor, type Yewholt } from "../src/session.js";
 import { workspaceDir } from "../src/workspace.js";
+import { WorkspaceIsolation, type IsolationProbe } from "../src/isolation.js";
 import type { BotRecord } from "../src/registry.js";
-import { CHANNEL, chatFrom, createBot, emptyPiDir, human, openSession, waitUntil } from "./helpers/coding.js";
+import { CHANNEL, chatFrom, createBot, emptyPiDir, human, openSession, testWorkspaces, waitUntil } from "./helpers/coding.js";
 
 const ctx = BACKGROUND_CONTEXT;
 const ELSEWHERE = "44444444-4444-4444-8444-444444444444";
 
-async function withCoding(fn: (session: Yewholt, home: string) => Promise<void>): Promise<void> {
-  const home = mkdtempSync(join(tmpdir(), "yewholt-code-"));
+async function withCoding(
+  fn: (session: Yewholt, home: string) => Promise<void>,
+  isolationFor?: (home: string) => WorkspaceIsolation,
+): Promise<void> {
+  const root = mkdtempSync(join(tmpdir(), "yewholt-code-"));
+  const home = join(root, "state");
   const piDir = emptyPiDir();
-  const session = await openSession(new MemoryStorage(), home, piDir);
+  const session = await openSession(new MemoryStorage(), home, piDir, undefined, isolationFor?.(home));
   try {
     await session.ensureOnboarding(CHANNEL);
     await fn(session, home);
   } finally {
     await session.close();
-    rmSync(home, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
     rmSync(piDir, { recursive: true, force: true });
   }
 }
@@ -51,12 +56,12 @@ test("permissions: only a bot whose stored permissions include code gets tools; 
     await session.handleHuman(human("p1", "@Plain run: echo hi > plain.txt"));
     assert.deepEqual(await toolNames(session, plain), []);
     assert.match(await lastReply(session, plain), /done\[error\]/);
-    assert.equal(existsSync(workspaceDir(home, plain.pubkey)), false);
+    assert.equal(existsSync(workspaceDir(testWorkspaces(home), plain.pubkey)), false);
 
     await session.handleHuman(human("c1", "@Coder run: echo hi > hello.txt"));
     assert.deepEqual(await toolNames(session, coder), ["bash", "edit", "read", "tool_search", "write"]);
     assert.match(await lastReply(session, coder), /done\[ok\]/);
-    assert.equal(readFileSync(join(workspaceDir(home, coder.pubkey), "hello.txt"), "utf8"), "hi\n");
+    assert.equal(readFileSync(join(workspaceDir(testWorkspaces(home), coder.pubkey), "hello.txt"), "utf8"), "hi\n");
 
     assert.deepEqual(await toolNames(session, onboarding), []);
     await session.handleHuman(human("o1", "change permissions of Onboarding Specialist to post,read,code"));
@@ -72,9 +77,10 @@ test("permissions: granting and revoking code through a proposal applies on the 
     await session.handleHuman(human("g1", "change permissions of Plain to post,read,code"));
     assert.match((await session.snapshot()).pending?.summary ?? "", /permissions: post, read, code/);
     await session.handleHuman(human("g2", "approve"));
+    assertWorkspace(testWorkspaces(home), plain.pubkey);
     await session.handleHuman(human("g3", "@Plain run: echo granted > granted.txt"));
     assert.match(await lastReply(session, plain), /done\[ok\]/);
-    assert.equal(readFileSync(join(workspaceDir(home, plain.pubkey), "granted.txt"), "utf8"), "granted\n");
+    assert.equal(readFileSync(join(workspaceDir(testWorkspaces(home), plain.pubkey), "granted.txt"), "utf8"), "granted\n");
     assert.ok((await toolNames(session, plain)).includes("bash"));
 
     await session.handleHuman(human("r1", "change permissions of Plain to post,read"));
@@ -82,7 +88,7 @@ test("permissions: granting and revoking code through a proposal applies on the 
     assert.deepEqual(await toolNames(session, plain), []);
     await session.handleHuman(human("r3", "@Plain run: echo revoked > revoked.txt"));
     assert.match(await lastReply(session, plain), /done\[error\]/);
-    assert.equal(existsSync(join(workspaceDir(home, plain.pubkey), "revoked.txt")), false);
+    assert.equal(existsSync(join(workspaceDir(testWorkspaces(home), plain.pubkey), "revoked.txt")), false);
   });
 });
 
@@ -132,14 +138,14 @@ test("secrets: a bash call cannot see a variable set in the daemon's process.env
 test("secrets: reading $YEWHOLT_HOME outside the workspace is refused outright, also through a symlink", async () => {
   await withCoding(async (session, home) => {
     const coder = await createBot(session, "Coder", "post,read,code");
-    await session.handleHuman(human("k1", "@Coder read: ../../secrets/owner.key"));
+    await session.handleHuman(human("k1", "@Coder read: ../../state/secrets/owner.key"));
     const reply = await lastReply(session, coder);
     assert.match(reply, /done\[error\]/);
     assert.match(reply, /refused/i);
     assert.doesNotMatch(reply, new RegExp(readFileSync(join(home, "secrets", "owner.key"), "utf8").trim()));
     assert.equal((await approvals(session)).length, 0);
     // The symlink itself is made by an approved-free command inside the workspace.
-    await session.handleHuman(human("k2", "@Coder run: ln -s ../.. up"));
+    await session.handleHuman(human("k2", "@Coder run: ln -s ../../state up"));
     await session.handleHuman(human("k3", "@Coder read: up/secrets/owner.key"));
     assert.match(await lastReply(session, coder), /done\[error\].*refused/is);
   });
@@ -161,7 +167,7 @@ test("approval: a dangerous call parks, the bot asks in the channel, aprovo runs
     assert.match(asked, /aprovo/);
     assert.match(asked, /rejeito/);
     assert.match(asked, /recursive delete/);
-    const ran = join(workspaceDir(home, coder.pubkey), "ran.txt");
+    const ran = join(workspaceDir(testWorkspaces(home), coder.pubkey), "ran.txt");
     assert.equal(existsSync(ran), false);
 
     // Someone else's "aprovo" in another channel does not resolve it.
@@ -187,7 +193,7 @@ test("approval: rejeito resolves the call with a refusal the model sees", async 
     await waitUntil(async () => (await approvals(session)).length === 1, "the approval request");
     await session.handleHuman(human("j2", "@Coder rejeito"));
     await turn;
-    assert.equal(existsSync(join(workspaceDir(home, coder.pubkey), "rejected.txt")), false);
+    assert.equal(existsSync(join(workspaceDir(testWorkspaces(home), coder.pubkey), "rejected.txt")), false);
     assert.match(await lastReply(session, coder), /done\[error\]:[\s\S]*A person rejected this in the chat; it was not run: rm -rf stuff/);
     assert.equal((await approvals(session)).length, 0);
   });
@@ -233,7 +239,7 @@ test("approval: with a proposal and a command approval pending, a plain aprovo a
 
     await session.handleHuman(human("b4", "@Coder aprovo"));
     await turn;
-    assert.equal(readFileSync(join(workspaceDir(home, coder.pubkey), "both.txt"), "utf8"), "ran\n");
+    assert.equal(readFileSync(join(workspaceDir(testWorkspaces(home), coder.pubkey), "both.txt"), "utf8"), "ran\n");
     assert.equal((await session.snapshot()).pending?.name, "Later");
 
     await session.handleHuman(human("b5", "@Onboarding Specialist aprovo"));
@@ -253,7 +259,107 @@ test("approval: a reply to the request message resolves that request", async () 
     await session.handleHuman(human("x2", "sim", { replyTo: [request!.eventId] }));
     await turn;
     // git push fails offline (no repo); what matters is that the call ran once and the proposal stayed.
-    assert.equal(readFileSync(join(workspaceDir(home, coder.pubkey), "pushed.txt"), "utf8"), "ran\n");
+    assert.equal(readFileSync(join(workspaceDir(testWorkspaces(home), coder.pubkey), "pushed.txt"), "utf8"), "ran\n");
     assert.equal((await session.snapshot()).pending?.name, "Later");
   });
+});
+
+function assertWorkspace(root: string, pubkey: string): void {
+  const workspace = workspaceDir(root, pubkey);
+  const info = statSync(workspace);
+  assert.equal(info.mode & 0o7777, 0o2770);
+  assert.equal(info.gid, statSync(root).gid);
+  assert.equal(statSync(join(workspace, ".tmp")).mode & 0o7777, 0o2770);
+}
+
+function secureFixture(home: string): WorkspaceIsolation {
+  const root = testWorkspaces(home);
+  mkdirSync(root);
+  chmodSync(root, 0o2770);
+  const { gid } = statSync(root);
+  const probe: IsolationProbe = {
+    account: () => ({ uid: 2000, gid, groups: ["yewholt-ws"] }),
+    groupId: () => gid,
+    daemon: () => ({ uid: 1000, gid: gid + 1, groups: [gid, gid + 1] }),
+    sudoWorks: () => true,
+    workspaceInfo: (path) => {
+      if (!existsSync(path)) return undefined;
+      const entry = lstatSync(path);
+      return { uid: 2000, gid: entry.gid, mode: entry.mode, isDirectory: () => entry.isDirectory() };
+    },
+    homeMode: () => 0o750,
+    botCanAccessHome: () => false,
+    mkdirAsBot: (_user, path) => {
+      const previous = process.umask(0o007);
+      try {
+        mkdirSync(path, { recursive: true });
+        return true;
+      } finally {
+        process.umask(previous);
+      }
+    },
+  };
+  return new WorkspaceIsolation(home, { YEWHOLT_WORKSPACES: root }, probe);
+}
+
+test("isolation: approving a Buzz code proposal creates the setgid workspace immediately", async () => {
+  await withCoding(async (session, home) => {
+    const root = testWorkspaces(home);
+    const coder = await createBot(session, "New Coder", "post,read,code");
+    assert.equal(session.isolationStatus(), "ok");
+    assertWorkspace(root, coder.pubkey);
+    const plain = await createBot(session, "New Plain", "post,read");
+    assert.equal(existsSync(workspaceDir(root, plain.pubkey)), false);
+    await session.handleHuman(human("isolation-grant", "change permissions of New Plain to post,read,code"));
+    await session.handleHuman(human("isolation-grant-approve", "approve"));
+    assertWorkspace(root, plain.pubkey);
+  }, secureFixture);
+});
+
+test("isolation: each failed check blocks bash, read, write and edit with the status reason", async () => {
+  const ready: IsolationProbe = {
+    account: () => ({ uid: 2000, gid: 3000, groups: ["yewholt-ws"] }),
+    groupId: () => 3000,
+    daemon: () => ({ uid: 1000, gid: 1000, groups: [1000, 3000] }),
+    sudoWorks: () => true,
+    workspaceInfo: () => ({ uid: 2000, gid: 3000, mode: 0o2770, isDirectory: () => true }),
+    homeMode: () => 0o750,
+    botCanAccessHome: () => false,
+    mkdirAsBot: () => assert.fail("a failed check must prevent provisioning"),
+  };
+  const cases = [
+    [{ account: () => undefined }, /bot user.*does not exist/i],
+    [{ account: () => ({ uid: 1000, gid: 3000, groups: ["yewholt-ws"] }) }, /unprivileged/i],
+    [{ account: () => ({ uid: 2000, gid: 3000, groups: ["docker"] }) }, /unprivileged/i],
+    [{ sudoWorks: () => false }, /sudo -n/i],
+    [{ groupId: () => undefined }, /group.*does not exist/i],
+    [{ daemon: () => ({ uid: 1000, gid: 1000, groups: [1000] }) }, /daemon process.*group/i],
+    [{ workspaceInfo: () => undefined }, /workspaces folder/i],
+    [{ workspaceInfo: () => ({ ...ready.workspaceInfo("")!, uid: 42 }) }, /workspaces folder/i],
+    [{ workspaceInfo: () => ({ ...ready.workspaceInfo("")!, gid: 42 }) }, /workspaces folder/i],
+    [{ workspaceInfo: () => ({ ...ready.workspaceInfo("")!, mode: 0o770 }) }, /workspaces folder/i],
+    [{ homeMode: () => 0o751 }, /daemon HOME/i],
+    [{ botCanAccessHome: () => true }, /daemon HOME/i],
+  ] satisfies Array<[Partial<IsolationProbe>, RegExp]>;
+  const probe = { ...ready };
+  const logs: string[] = [];
+  await withCoding(async (session, home) => {
+    Object.assign(probe, cases[0]![0]);
+    const coder = await createBot(session, "Blocked Coder", "post,read,code");
+    for (const [index, [overrides, reason]] of cases.entries()) {
+      Object.assign(probe, ready, overrides);
+      const status = session.isolationStatus();
+      assert.match(status, reason);
+      assert.match(status, /run sudo scripts\/setup-bot-user\.sh/i);
+      for (const [tool, request] of Object.entries({ bash: "run: touch side-effect", read: "read: fixture", write: "write: fixture", edit: "edit: fixture" })) {
+        await session.handleHuman(human(`denied-${index}-${tool}`, `@Blocked Coder ${request}`));
+        const reply = await lastReply(session, coder);
+        assert.match(reply, /done\[error\].*Refused/s);
+        assert.ok(reply.includes(status), reply);
+      }
+    }
+    assert.equal(existsSync(testWorkspaces(home)), false);
+    assert.equal(logs.length, 1);
+    assert.deepEqual(await approvals(session), []);
+  }, (home) => new WorkspaceIsolation(home, { YEWHOLT_WORKSPACES: testWorkspaces(home) }, probe, undefined, (message) => logs.push(message)));
 });

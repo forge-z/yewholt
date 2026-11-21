@@ -10,7 +10,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { workspaceDir } from "../../src/workspace.js";
-import { chatFrom, createBot, human, openSession, waitUntil } from "./coding.js";
+import { chatFrom, createBot, human, openSession, testWorkspaces, waitUntil } from "./coding.js";
 
 export const DANGEROUS = "mkdir -p junk && rm -rf junk && echo ran >> ran.txt";
 
@@ -31,7 +31,7 @@ async function main(mode: string, dir: string): Promise<void> {
     }, "the approval request");
     // Let the park commit land too; a kill before it is also fine (the gate reruns on reopen).
     await new Promise((resolve) => setTimeout(resolve, 300));
-    writeFileSync(join(dir, "parked"), JSON.stringify({ workspace: workspaceDir(home, coder.pubkey), approvals }));
+    writeFileSync(join(dir, "parked"), JSON.stringify({ workspace: workspaceDir(testWorkspaces(home), coder.pubkey), approvals }));
     setInterval(() => undefined, 1000);
     return;
   }

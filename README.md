@@ -150,7 +150,15 @@ The bot's instructions say it has a workspace, which tools it has, and what need
 
 #### Workspace
 
-Each code bot gets `$YEWHOLT_HOME/workspaces/<id>`, where `<id>` is the first 16 hex digits of `sha256("yewholt-workspace:" + pubkey)`, so it stays the same for the bot's whole life. The folder and `workspaces/` are mode `0700`. The bot's execution environment is pi-durable's `NodeExecutionEnv` with its cwd at that folder, built per call. Conversations of other bots get no environment, as before.
+Each code bot gets `$YEWHOLT_WORKSPACES/<id>`. The root defaults to `/srv/yewholt/workspaces` and must be outside `$YEWHOLT_HOME`. The id is the first 16 hex digits of `sha256("yewholt-workspace:" + pubkey)`, so existing bots keep their ids. The root and each bot directory are owned by `yewholt-bot:yewholt-ws` with mode `2770` (setgid). The daemon belongs to `yewholt-ws`. Both the daemon and the bot shell use umask `007` so ordinary new files and directories are group-writable.
+
+1. Install Yewholt, then run `sudo scripts/setup-bot-user.sh` from the daemon account. On a VM with persistent storage at `/data`, pass `--workspaces /data/yewholt/workspaces` to keep bot files there.
+2. Start the daemon from a fresh login session so it picks up the group. Check `yewholt status` for `isolation: ok`.
+3. Create a bot or grant it `code` in Buzz and approve the proposal. The daemon creates its workspace automatically.
+
+The setup script accepts `--user`, `--group`, `--workspaces`, and `--daemon-user`. Set the corresponding `YEWHOLT_BOT_USER` and `YEWHOLT_BOT_GROUP` in the daemon environment when using custom names. For a custom state directory, pass `YEWHOLT_HOME` through sudo with `sudo --preserve-env=YEWHOLT_HOME scripts/setup-bot-user.sh`. Re-run setup after a VM template update that resets the system accounts or sudoers. Existing folders on persistent storage must still match the recreated account's numeric UID and GID. Legacy files in `$YEWHOLT_HOME/workspaces` stay there. Move any workspace data you want to retain to the corresponding new workspace with the daemon stopped and apply the new ownership and permissions.
+
+Buzz also accepts `permissões: post,read,code` and `permissoes: post,read,code`. In Portuguese create requests, `com permissão code` and `com permissão de código` add `code` to the default `post,read` permissions.
 
 #### Approvals
 
@@ -160,7 +168,7 @@ Everything inside the workspace runs without asking. These wait for a person in 
 - `git push`, in any form (`git -C dir push`, `git -c k=v push`, ...);
 - a download piped into a shell (`curl ... | sh`, `wget -qO- ... | sudo bash`) or run by one (`sh -c "$(curl ...)"`, `bash <(curl ...)`);
 - `sudo`, `su`, `doas`;
-- any bash command that mentions `$YEWHOLT_HOME`, the `.yewholt` folder, `~/.yewholt`, or the state folder's path (the bot's own workspace path included, so the bot is told to use relative paths and `$HOME`);
+- any bash command that mentions `$YEWHOLT_HOME`, the `.yewholt` folder, `~/.yewholt`, or the state folder's path;
 - `write` or `edit` of a path outside the workspace.
 
 The classifier looks into `;`, `&&`, `||`, pipes, subshells, quotes, escapes, `$(...)`, backticks, `<(...)`, wrappers such as `env`, `xargs`, `timeout`, `find -exec`, and `-c` scripts of sh/bash/zsh/dash/ksh/su. When it cannot parse a command, or the command name is a variable or substitution (`$CMD -rf x`), it asks (fail closed). Look-alikes such as `rm -f file`, `git status`, `git stash push`, and `curl -o file url` run freely.
@@ -179,11 +187,13 @@ The decision is delivered as a pi-durable signal to the parked call's task. A si
 
 #### Secret isolation
 
-The daemon's `process.env` holds the provider keys from `$YEWHOLT_HOME/.env`. A code bot's commands never see it: every command, from the built-in `bash` or any other tool that calls the environment, runs with exactly `PATH`, `HOME` (the workspace), `LANG` and `LC_ALL` (`C.UTF-8`), `TERM=dumb`, and `TMPDIR` (`<workspace>/.tmp`). pi-durable's `NodeExecutionEnv` merges `process.env` into every command unless told not to; Yewholt's `WorkspaceEnv` forces that off.
+Code-bot commands run as the dedicated, unprivileged bot account through `sudo -n -u`. The bot has only the workspace group and cannot access the daemon's login HOME. Commands start in the workspace with a clean environment containing `PATH`, `HOME` (the workspace), `LANG=C.UTF-8`, `LC_ALL=C.UTF-8`, `TERM=dumb`, and `TMPDIR` (the workspace's `.tmp` directory). Bash commands and package commands that use the execution environment receive these same restrictions.
 
-`read`, `write`, and `edit` of any path in `$YEWHOLT_HOME` other than the bot's own workspace are refused outright; a person cannot approve them. Paths are resolved as the OS would follow them, symlinks (also dangling ones and chains) included, so a link in the workspace that points at `secrets/` is refused too. Reading elsewhere on the machine is allowed.
+Yewholt checks isolation at startup and before code-bot tool calls, and caches a successful check for at most 60 seconds. If the account, sudo access, group membership, workspace root, or daemon HOME fails validation, the tools return a refusal with the failed check and the setup command. The daemon logs the first failure and exposes the check result in `status.json` and `yewholt status`. For local development only, `YEWHOLT_UNSAFE_SHARED_USER=1` runs shell commands as the daemon user, with workspaces still outside the state directory. Every daemon start in this mode logs a warning.
 
-What is not contained: bash is not sandboxed. It runs as the daemon's user, can reach the network, and can read and write anything that user can, through commands the approval list does not name, for example `cat ../../secrets/owner.key` from the workspace or `cd /; cat <path>` built without naming the state folder. Package code (below) runs inside the daemon and can read `process.env`. Run the daemon as a user that owns nothing else you care about, and put stronger isolation (a container or a separate uid) around it if bots take instructions from people you do not trust.
+`read`, `write`, and `edit` run in the daemon with group access. They refuse paths into `$YEWHOLT_HOME` and other bots' workspaces, including through symlinks. Reads elsewhere use the daemon's permissions, including in its login HOME. Writes or edits outside the workspace need approval. The path check and the filesystem operation are separate, so concurrent symlink changes can race the check.
+
+The bot shell can reach the network and access files available to the bot account. All code bots share one Unix user, so shell commands can read or modify each other's workspaces. Package code runs inside the daemon with access to its environment and permissions. Install only packages you trust.
 
 #### Pi packages
 
@@ -278,6 +288,10 @@ None of these are required. A provider is registered only when its own credentia
 | `YEWHOLT_TURN_TOKENS` | Tokens charged for one interpreter turn (default 1000) |
 | `YEWHOLT_BUDGET_TOKENS` | Per-session cap (default 100000) |
 | `YEWHOLT_HOME` | State directory. The key file is `$YEWHOLT_HOME/.env` |
+| `YEWHOLT_BOT_USER` | Unprivileged Unix account for code-bot commands (default `yewholt-bot`) |
+| `YEWHOLT_BOT_GROUP` | Workspace group shared by the bot account and the daemon (default `yewholt-ws`) |
+| `YEWHOLT_WORKSPACES` | Workspace root, outside `$YEWHOLT_HOME` (default `/srv/yewholt/workspaces`) |
+| `YEWHOLT_UNSAFE_SHARED_USER` | Development-only escape hatch. Set to `1` to run commands as the daemon user |
 
 The full commented list is in `.env.example`. No dependency was added for this; the file parser is a few lines in `src/env-file.ts`.
 

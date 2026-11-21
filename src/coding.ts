@@ -44,8 +44,8 @@ export type ApprovalAsk = {
 
 /** What the gate needs from the session. */
 export type GateHost = {
-  /** Home and workspace of the code bot that owns this conversation; undefined when it has no `code`. */
-  roots(conversationId: ConversationId): Promise<(Roots & { homeAliases: string[] }) | undefined>;
+  /** Roots after isolation has passed. Undefined when the bot no longer has code permission. */
+  workspace(conversationId: ConversationId): Promise<(Roots & { homeAliases: string[] }) | { refusal: string } | undefined>;
   /** Store the request and post it in the channel. Idempotent by (taskId, key): the gate reruns on every wake. */
   request(ask: ApprovalAsk): Promise<void>;
   /** Forget a request whose deadline passed. */
@@ -91,9 +91,13 @@ export function createGateExtension(host: GateHost): Extension {
     hooks: [
       hook(ToolTask, {
         beforeTool: async (call, api, context) => {
-          if (!GATED.has(call.name)) return undefined;
-          const roots = await host.roots(api.conversationId);
+          const roots = await host.workspace(api.conversationId);
           if (!roots) return { block: "This bot has no workspace: its code permission is off." };
+          if ("refusal" in roots) {
+            if (GATED.has(call.name)) await host.expire(api.taskId, approvalKey(call.name, call.arguments));
+            return { block: `Refused. ${roots.refusal}` };
+          }
+          if (!GATED.has(call.name)) return undefined;
           const verdict = judgeCall(call.name, call.arguments as Record<string, unknown> | undefined, roots);
           if (verdict.kind === "allow") return undefined;
           if (verdict.kind === "refuse") return { block: `Refused (not approvable): ${verdict.reason}.` };

@@ -125,8 +125,12 @@ async function status(home: string): Promise<void> {
   console.log(`daemon: ${pid ? `running (${pid})` : "stopped"}`);
   console.log(`channel: ${config.channelId ?? "(created on first start)"}`);
   try {
-    console.log(readFileSync(statusPath(home), "utf8"));
+    const raw = readFileSync(statusPath(home), "utf8");
+    const status = JSON.parse(raw) as { isolation?: string };
+    console.log(`isolation: ${status.isolation ?? "unknown until daemon restart"}`);
+    console.log(raw);
   } catch {
+    console.log("isolation: unknown until daemon start");
     console.log("no daemon status yet");
   }
 }
