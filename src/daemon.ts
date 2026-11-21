@@ -32,6 +32,9 @@ export async function runDaemon(home: string): Promise<void> {
   ensureOwnerKey(home);
   const session = await Yewholt.open(await openNodeSqliteStorage(sqlitePath(home)), { home });
   const ownerSecret = readKey(ownerKeyPath(home));
+  // Code bots' turns a previous process left open (for example a call parked on an approval)
+  // continue here; their replies reach the relay through the outbox listener set in serve().
+  void session.resumeTurns().catch((error: unknown) => console.error("resume:", error instanceof Error ? error.message : error));
   try {
     while (!stopping) {
       try {
@@ -90,6 +93,12 @@ async function serve(home: string, session: Yewholt, ownerSecret: string): Promi
     });
     await sync();
     await writeStatus(home, session, config.relayUrl, channelId, links);
+    // Approval requests and resumed code turns commit outside a chat message's handling.
+    session.setOutboxListener(() => {
+      void publishOutbox(home, session, ownerSecret, owner, links, config)
+        .then(() => writeStatus(home, session, config.relayUrl, channelId, links))
+        .catch((error: unknown) => console.error("outbox:", error instanceof Error ? error.message : error));
+    });
     owner.subscribe("channel", [{ kinds: [9], "#h": [channelId] }], inbox.accept);
     while (!stopping && owner.isOpen()) {
       const lost = botLinks.lost();
@@ -97,6 +106,7 @@ async function serve(home: string, session: Yewholt, ownerSecret: string): Promi
       await sleep(500);
     }
   } finally {
+    session.setOutboxListener(undefined);
     await links?.closeAll();
     await owner.close();
   }
@@ -176,6 +186,7 @@ async function writeStatus(home: string, session: Yewholt, relayUrl: string, cha
       conversationId: bot.conversationId,
     })),
     pending: state.pending?.summary ?? null,
+    approvals: (state.approvals ?? []).map((item) => ({ id: item.id, pubkey: item.pubkey, channelId: item.channelId, tool: item.tool, subject: item.subject })),
     outbox: state.outbox.length,
   };
   writeFileSync(statusPath(home), `${JSON.stringify(body, null, 2)}\n`);

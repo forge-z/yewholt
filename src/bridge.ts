@@ -30,13 +30,17 @@ export function humanMessageFrom(event: NostrEvent): HumanMessage | null {
   if (event.kind !== 9 || typeof event.id !== "string") return null;
   const channelId = event.tags?.find((tag) => tag[0] === "h" && typeof tag[1] === "string" && tag[1] !== "")?.[1];
   if (!channelId) return null;
-  return {
+  const message: HumanMessage = {
     channelId,
     authorPubkey: event.pubkey,
     eventId: event.id,
     text: event.content ?? "",
     createdAt: event.created_at,
   };
+  // Replies (NIP-10 `e` tags) let a person answer one approval request among several.
+  const replyTo = event.tags?.filter((tag) => tag[0] === "e" && typeof tag[1] === "string" && tag[1] !== "").map((tag) => tag[1]!) ?? [];
+  if (replyTo.length > 0) message.replyTo = replyTo;
+  return message;
 }
 
 /**

@@ -29,12 +29,42 @@ export type Proposal = {
   summary: string;
 };
 
+/** A chat message a `code` bot is answering. Kept until its reply is stored, so a restart re-attaches to it. */
+export type CodeTurn = {
+  requestId: string;
+  pubkey: string;
+  channelId: string;
+  eventId: string;
+  author: string;
+  text: string;
+  createdAt: number;
+};
+
+/** A parked tool call waiting for `aprovo`/`rejeito` in its channel (src/coding.ts). */
+export type ApprovalRequest = {
+  id: string;
+  pubkey: string;
+  conversationId: number;
+  taskId: number;
+  key: string;
+  channelId: string;
+  tool: string;
+  subject: string;
+  reasons: string[];
+  /** The kind 9 that asked; a reply to it resolves this request. */
+  eventId: string;
+  createdAt: number;
+};
+
 export type RegistryState = {
   bots: BotRecord[];
   pending: Proposal | null;
   processed: string[];
   outbox: NostrEvent[];
   highWater: number;
+  /** Absent in registries written before code bots existed. */
+  turns?: CodeTurn[];
+  approvals?: ApprovalRequest[];
 };
 
 export const RegistryDoc = defineDoc<RegistryState>({
