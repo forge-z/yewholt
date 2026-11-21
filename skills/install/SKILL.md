@@ -56,9 +56,11 @@ install a relay, or change existing installations without permission.
    yh pair list
    ```
 
-4. Have the owner configure a model credential privately in the daemon's
-   `$YEWHOLT_HOME/.env` (`~/.yewholt/.env` by default, mode 0600); don't read,
-   echo or copy the credential. See the [provider variable list](../../README.md#environment).
+4. Have the owner run `/login` inside `yh` on the VM and choose an API key, or
+   configure a provider credential in the daemon's `$YEWHOLT_HOME/.env`
+   (`~/.yewholt/.env` by default, mode 0600). Run login under the same Unix
+   user, HOME and Pi agent directory as the daemon so it can read the saved key.
+   Don't read, echo or copy credentials. See [Provider keys on the host](../../README.md#provider-keys-on-the-host).
    If using **Daemon default**, set `YEWHOLT_MODEL=provider/modelId` on the VM.
    Run `yh start` and `yh status`, or use the VM's existing approved
    supervisor to run `yh daemon` in the foreground. With no supervisor,

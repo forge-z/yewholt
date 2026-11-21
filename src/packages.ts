@@ -10,6 +10,7 @@ import { homedir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Provider } from "@earendil-works/pi-ai/models";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { createRegistry, type Extension } from "@earendil-works/pi-durable";
 import { createToolSearchExtension } from "@earendil-works/pi-durable/tool-search";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
@@ -24,8 +25,7 @@ export type LoadedPackages = { extensions: Extension[]; providers: Provider[]; e
 
 /** Pi's folder, shared with the `pi` command: its keys and settings. */
 export function piDir(): string {
-  const dir = process.env.PI_CODING_AGENT_DIR;
-  return dir ? dir.replace(/^~(?=$|[\\/])/, homedir()) : join(homedir(), ".pi", "agent");
+  return getAgentDir();
 }
 
 /** How long a package has to load before it's left out, so one that hangs doesn't keep every agent from starting. */

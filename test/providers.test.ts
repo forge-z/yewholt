@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+import { MemoryStorage } from "@earendil-works/pi-durable";
 import { ensureEnvFile, loadEnvFile } from "../src/env-file.js";
 import { catalogHas, loadModels, parseModelLabel } from "../src/models.js";
+import { Yewholt } from "../src/session.js";
 
 const readmePath = fileURLToPath(new URL("../../README.md", import.meta.url));
 const examplePath = fileURLToPath(new URL("../../.env.example", import.meta.url));
@@ -33,12 +35,35 @@ test("OpenCode Zen key registers Zen and Go, including free models", async () =>
   assert.equal(catalogHas(models, parseModelLabel("opencode/deepseek-v4.1-flash-free")), true);
 });
 
-test("DeepSeek models are present only when the daemon environment supplies a DeepSeek key", async () => {
+test("a DeepSeek environment key enables its models without a Pi login", async () => {
   const model = parseModelLabel("deepseek/deepseek-v4-pro");
   assert.equal(catalogHas(await loadModels({}), model), false);
   const models = await loadModels({ DEEPSEEK_API_KEY: "test-key" });
   assert.deepEqual(models.getProviders().map((provider) => provider.id), ["deepseek"]);
   assert.equal(catalogHas(models, model), true);
+});
+
+test("a saved Pi API key enables DeepSeek in the hosted catalog and authenticates model requests", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "yewholt-pi-auth-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const authPath = join(dir, "auth.json");
+  writeFileSync(authPath, JSON.stringify({
+    deepseek: { type: "api_key", key: "pi-test-key" },
+    "openai-codex": { type: "oauth", access: "fake-access", refresh: "fake-refresh", expires: Date.now() + 3_600_000 },
+  }), { mode: 0o600 });
+  const session = await Yewholt.open(new MemoryStorage(), { home: join(dir, "state"), piDir: dir });
+  try {
+    assert.ok(session.availableModelReferences().includes("deepseek/deepseek-flash"));
+    assert.equal(session.availableModelReferences().some((model) => model.startsWith("openai-codex/")), false);
+  } finally {
+    await session.close();
+  }
+  const models = await loadModels({}, authPath);
+  assert.equal((await models.getAuth("deepseek"))?.auth.apiKey, "pi-test-key");
+  assert.equal(models.getProvider("openai-codex"), undefined);
+
+  const overridden = await loadModels({ DEEPSEEK_API_KEY: "env-test-key" }, authPath);
+  assert.equal((await overridden.getAuth("deepseek"))?.auth.apiKey, "env-test-key");
 });
 
 test("Anthropic registers an API key and refuses subscription tokens", async () => {
