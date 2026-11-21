@@ -4,6 +4,7 @@ import { configPath } from "./paths.js";
 export type YewholtConfig = {
   port: number;
   relayUrl: string;
+  externalRelayPubkey?: string;
   channelId: string | null;
   channelName: string;
 };

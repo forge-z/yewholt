@@ -99,19 +99,10 @@ async function serve(
   const drain = (phase: OutboxPhase) => publishOutbox(session, ownerSecret, owner, links, connectBot, phase);
   try {
     await owner.connect();
-    if (!config.channelId) {
-      const channelId = randomUUID();
-      const created = signEvent(ownerSecret, 9007, "", createChannelTags(channelId, config.channelName));
-      const result = await owner.publish(created);
-      if (!accepted(result)) throw new Error(`create channel: ${result.message}`);
-      config.channelId = channelId;
-      saveConfig(home, config);
-    }
-    const channelId = config.channelId;
-    await session.ensureOnboarding(channelId);
+    const channelId = config.externalRelayPubkey ? null : await ensureLocalChannel(home, session, config, owner, ownerSecret);
     let highWater = (await session.snapshot()).highWater;
     const botLinks = new BotLinks<BotRecord>({
-      relayPubkey: relayKey(home),
+      relayPubkey: config.externalRelayPubkey ?? relayKey(home),
       since: () => highWater || undefined,
       open: connectBot,
       onEvent: (event) => inbox.accept(event),
@@ -160,7 +151,7 @@ async function serve(
       void maintain(true)
         .catch((error: unknown) => console.error("outbox:", error instanceof Error ? error.message : error));
     });
-    owner.subscribe("channel", [{ kinds: [9], "#h": [channelId] }], inbox.accept);
+    if (channelId) owner.subscribe("channel", [{ kinds: [9], "#h": [channelId] }], inbox.accept);
     owner.subscribe("deploy-control", [{ kinds: [CONTROL_KIND], "#p": [control.pubkey] }], (event) => {
       if (!serving || stopping) return;
       work = work.then(async () => {
@@ -223,6 +214,19 @@ async function serve(
       await owner.close();
     }
   }
+}
+
+async function ensureLocalChannel(home: string, session: Yewholt, config: YewholtConfig, owner: RelayClient, ownerSecret: string) {
+  if (!config.channelId) {
+    const channelId = randomUUID();
+    const created = signEvent(ownerSecret, 9007, "", createChannelTags(channelId, config.channelName));
+    const result = await owner.publish(created);
+    if (!accepted(result)) throw new Error(`create channel: ${result.message}`);
+    config.channelId = channelId;
+    saveConfig(home, config);
+  }
+  await session.ensureOnboarding(config.channelId);
+  return config.channelId;
 }
 
 /** A bot's own NIP-42 connection and its owner's delegation. */

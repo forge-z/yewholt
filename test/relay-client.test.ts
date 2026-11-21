@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { WebSocketServer, type WebSocket } from "ws";
+import { controlEvent, decryptControl, verifiedEnvelope, type Confirmation } from "../src/control-protocol.js";
 import { RelayClient, relayDialTarget } from "../src/nostr-client.js";
 import { generateKeyPair, type NostrEvent } from "../src/nostr.js";
 import { botEvents, byKind, capture, PRIVATE } from "./helpers/fixture.js";
@@ -62,6 +70,43 @@ async function fakeRelay(immediateChallenge = false): Promise<{
 }
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 30));
+
+test("a standalone VM daemon joins an existing relay without onboarding and serves the DeepSeek catalog", async () => {
+  const relay = await fakeRelay(true);
+  const home = mkdtempSync(join(tmpdir(), "yewholt-existing-relay-"));
+  const provider = generateKeyPair();
+  const cli = fileURLToPath(new URL("../src/cli.js", import.meta.url));
+  const run = (args: string[]) => promisify(execFile)(process.execPath, [cli, ...args], {
+    env: { PATH: process.env.PATH, HOME: home, YEWHOLT_HOME: home, DEEPSEEK_API_KEY: "test-key" },
+    timeout: 25_000,
+  });
+  try {
+    await run(["install", "--relay", relay.url, "--relay-pubkey", generateKeyPair().pubkey]);
+    await run(["pair", "add", provider.pubkey, "--label", "Test Mac"]);
+    await run(["start"]);
+    const [, auth] = await relay.waitFor((frame) => frame[0] === "AUTH");
+    const daemon = (auth as NostrEvent).pubkey;
+    await relay.waitFor((frame) => frame[0] === "REQ" && frame[1] === "deploy-control");
+    assert.equal(relay.frames.some((frame) => frame[0] === "REQ" && frame[1] === "channel"), false);
+    assert.equal(relay.frames.some((frame) => frame[0] === "EVENT"), false);
+    const requestId = randomUUID();
+    relay.send(["EVENT", "deploy-control", controlEvent(provider.secret, daemon, "hosted-models",
+      { requestId, agentPubkey: daemon }, { offset: 0 })]);
+    const [, event] = await relay.waitFor((frame) => frame[0] === "EVENT");
+    const reply = verifiedEnvelope(event as NostrEvent, provider.pubkey, "confirmation");
+    assert.ok(reply);
+    const body = decryptControl(reply, provider.secret, daemon) as Confirmation;
+    assert.equal(body.ok, true);
+    assert.ok(body.catalog?.models.includes("deepseek/deepseek-v4-pro"));
+  } finally {
+    try {
+      await run(["stop"]);
+    } finally {
+      await relay.stop();
+      rmSync(home, { recursive: true, force: true });
+    }
+  }
+});
 
 test("relay loopback routing is opt-in and limited to the configured public WSS relay", () => {
   const relayUrl = "wss://relay.example:8443";

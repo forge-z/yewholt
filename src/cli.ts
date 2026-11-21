@@ -2,9 +2,11 @@
 import { spawn } from "node:child_process";
 import { chmodSync, mkdirSync, openSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { AgentStatus } from "./agents.js";
 import { loadConfig, saveConfig } from "./config.js";
+import { isPubkey } from "./control-protocol.js";
 import { ensureEnvFile, loadEnvFile } from "./env-file.js";
 import { readPid, runDaemon } from "./daemon.js";
 import { ensureOwnerKey } from "./session.js";
@@ -13,6 +15,7 @@ import { addPairing, listPairings, removePairing } from "./pairing.js";
 import { readKey } from "./keys.js";
 import { envFilePath, logPath, ownerKeyPath, pidPath, secretsDir, sqlitePath, statusPath, yewholtHome } from "./paths.js";
 import { compose, newRelaySecret, relayHealthy, waitForRelay, writeRelayEnv } from "./relay.js";
+import { normalizeRelay } from "./relay-url.js";
 import { Yewholt } from "./session.js";
 import { runHarness } from "./harness.js";
 import { route, usageText, withDefaultModel } from "./route.js";
@@ -34,7 +37,9 @@ async function main(): Promise<void> {
     }
   }
   // Harness arguments belong to pi, so `--home` is read only for Yewholt's own commands.
-  const home = (target.kind === "harness" ? undefined : flag("--home")) ?? yewholtHome();
+  const home = (target.kind === "harness" || (target.kind === "command" && target.command === "install")
+    ? undefined : flag("--home")) ?? yewholtHome();
+  if (target.kind === "command" && target.command === "install") return install(target.args);
   loadEnvFile(home);
   if (target.kind === "harness") return runHarness(withDefaultModel(target.args, process.env));
   if (target.kind === "usage") {
@@ -42,8 +47,6 @@ async function main(): Promise<void> {
     process.exit(target.exitCode);
   }
   switch (target.command) {
-    case "install":
-      return install(home);
     case "start":
       return start(home);
     case "stop":
@@ -92,30 +95,45 @@ function agents(home: string, rest: string[]): void {
     ({ name, pubkey, state, target: target ?? null, lastDeploy: lastDeploy ?? null })), null, 2));
 }
 
-async function install(home: string): Promise<void> {
+async function install(rest: string[]): Promise<void> {
+  const { values } = parseArgs({ args: rest, options: {
+    home: { type: "string" }, port: { type: "string" }, relay: { type: "string" }, "relay-pubkey": { type: "string" },
+  } });
+  const home = yewholtHome(values.home);
+  const externalRelayPubkey = values["relay-pubkey"];
+  const relay = values.relay === undefined ? undefined : normalizeRelay(values.relay);
+  if (values.relay !== undefined && (!relay || !isPubkey(externalRelayPubkey) || values.port !== undefined) ||
+      values.relay === undefined && externalRelayPubkey !== undefined) {
+    throw new Error("Use --relay <url> with --relay-pubkey <64 lowercase hex> instead of --port");
+  }
+  const url = relay ? new URL(relay) : undefined;
+  const port = url ? Number(url.port || (url.protocol === "wss:" ? 443 : 80)) : Number(values.port ?? "3000");
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Relay port must be 1-65535");
+  const relayUrl = relay ?? `ws://127.0.0.1:${port}`;
+  let existing;
+  try {
+    existing = loadConfig(home);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  if (existing && relay && (existing.relayUrl !== relay || existing.externalRelayPubkey !== externalRelayPubkey)) {
+    throw new Error("This home is already configured for another relay or mode; use a separate --home");
+  }
   mkdirSync(home, { recursive: true, mode: 0o700 });
   chmodSync(home, 0o700);
   mkdirSync(secretsDir(home), { recursive: true, mode: 0o700 });
-  const port = Number(flag("--port") ?? "3000");
-  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("--port must be 1-65535");
   const ownerPubkey = ensureOwnerKey(home);
-  const relayUrl = `ws://127.0.0.1:${port}`;
-  let existing = false;
-  try {
-    loadConfig(home);
-    existing = true;
-  } catch {
-    existing = false;
-  }
   if (!existing) {
-    writeRelayEnv(home, { port, relayUrl, ownerPubkey }, newRelaySecret());
-    saveConfig(home, { port, relayUrl, channelId: null, channelName: "yewholt" });
+    if (!relay) writeRelayEnv(home, { port, relayUrl, ownerPubkey }, newRelaySecret());
+    saveConfig(home, { port, relayUrl, channelId: null, channelName: "yewholt", externalRelayPubkey });
   }
+  const external = existing?.externalRelayPubkey ?? externalRelayPubkey;
   console.log(`Installed Yewholt in ${home}`);
-  console.log(`Owner pubkey: ${ownerPubkey}`);
-  console.log("Relay: stock Buzz compose (ghcr.io/block/buzz:0.3.0) with Postgres, Redis, and MinIO.");
+  console.log(`${external ? "Daemon" : "Owner"} pubkey: ${ownerPubkey}`);
+  console.log(external ? `Relay: ${existing?.relayUrl ?? relayUrl} (external). Admit the daemon pubkey to this relay.`
+    : "Relay: stock Buzz compose (ghcr.io/block/buzz:0.3.0) with Postgres, Redis, and MinIO.");
   const envFile = ensureEnvFile(home);
-  console.log("Back up secrets/ and relay/.env. Buzz has no key rotation; a lost secret is a lost identity.");
+  console.log(`Back up secrets/${external ? "" : " and relay/.env"}. Buzz has no key rotation; a lost secret is a lost identity.`);
   console.log(`Provider keys: ${envFile} (mode 0600). Paste a key, then yewholt start. Restart after changes.`);
   console.log("Next: yewholt start");
 }
@@ -123,8 +141,10 @@ async function install(home: string): Promise<void> {
 async function start(home: string): Promise<void> {
   const config = loadConfig(home);
   if (readPid(home)) throw new Error("daemon already running");
-  await compose(home, ["up", "-d"]);
-  await waitForRelay(config.port);
+  if (!config.externalRelayPubkey) {
+    await compose(home, ["up", "-d"]);
+    await waitForRelay(config.port);
+  }
   const log = openSync(logPath(home), "a");
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), "daemon", "--home", home], {
     detached: true,
@@ -154,7 +174,7 @@ async function stop(home: string): Promise<void> {
     if (readPid(home)) process.kill(pid, "SIGKILL");
   }
   try {
-    await compose(home, ["stop"]);
+    if (!loadConfig(home).externalRelayPubkey) await compose(home, ["stop"]);
   } catch (error) {
     console.error(error instanceof Error ? error.message : error);
   }
@@ -164,10 +184,10 @@ async function stop(home: string): Promise<void> {
 async function status(home: string): Promise<void> {
   const config = loadConfig(home);
   const pid = readPid(home);
-  const healthy = await relayHealthy(config.port);
-  console.log(`relay: ${healthy ? "healthy" : "down"} ${config.relayUrl}`);
+  const relay = config.externalRelayPubkey ? "external" : await relayHealthy(config.port) ? "healthy" : "down";
+  console.log(`relay: ${relay} ${config.relayUrl}`);
   console.log(`daemon: ${pid ? `running (${pid})` : "stopped"}`);
-  console.log(`channel: ${config.channelId ?? "(created on first start)"}`);
+  if (!config.externalRelayPubkey) console.log(`channel: ${config.channelId ?? "(created on first start)"}`);
   try {
     const raw = readFileSync(statusPath(home), "utf8");
     const status = JSON.parse(raw) as { isolation?: string };
@@ -199,7 +219,8 @@ async function admin(home: string, rest: string[]): Promise<void> {
     return;
   }
   if (sub === "channel") {
-    console.log(loadConfig(home).channelId ?? "(created on first start)");
+    const config = loadConfig(home);
+    console.log(config.externalRelayPubkey ? "(managed by Buzz)" : config.channelId ?? "(created on first start)");
     return;
   }
   if (sub === "budget") {

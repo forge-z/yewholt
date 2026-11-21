@@ -33,6 +33,14 @@ test("OpenCode Zen key registers Zen and Go, including free models", async () =>
   assert.equal(catalogHas(models, parseModelLabel("opencode/deepseek-v4.1-flash-free")), true);
 });
 
+test("DeepSeek models are present only when the daemon environment supplies a DeepSeek key", async () => {
+  const model = parseModelLabel("deepseek/deepseek-v4-pro");
+  assert.equal(catalogHas(await loadModels({}), model), false);
+  const models = await loadModels({ DEEPSEEK_API_KEY: "test-key" });
+  assert.deepEqual(models.getProviders().map((provider) => provider.id), ["deepseek"]);
+  assert.equal(catalogHas(models, model), true);
+});
+
 test("Anthropic registers an API key and refuses subscription tokens", async () => {
   assert.equal((await loadModels({ ANTHROPIC_OAUTH_TOKEN: "sk-ant-oat01-subscription" })).getProviders().length, 0);
   assert.equal((await loadModels({ ANTHROPIC_API_KEY: "sk-ant-oat01-subscription" })).getProviders().length, 0);
