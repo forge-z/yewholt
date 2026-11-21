@@ -18,6 +18,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { createToolSearchExtension } from "@earendil-works/pi-durable/tool-search";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
+import { PRESENCE, RUNTIME_PROFILE, presence, runtimeProfile, type AgentScan } from "./agents.js";
 import { ApprovalDecision, createGateExtension, type ApprovalAsk } from "./coding.js";
 import { loadPackages, piDir } from "./packages.js";
 import { physicalPath, WorkspaceEnv, type Roots } from "./workspace.js";
@@ -51,6 +52,7 @@ export type SessionOptions = {
   isolation?: WorkspaceIsolation;
   /** Pi's settings folder for `pi.durable` packages (default `PI_CODING_AGENT_DIR` or ~/.pi/agent). */
   piDir?: string;
+  now?: () => number;
 };
 
 /** A bot that gets the coding runtime: stored permissions include `code`, and never the Onboarding Specialist. */
@@ -70,11 +72,16 @@ type Coding = {
 
 export class Yewholt {
   private readonly memberChannels = new Map<string, ReadonlySet<string>>();
+  private readonly directChannels = new Map<string, ReadonlySet<string>>();
+  private readonly agentKeys = new Map<string, string>();
+  private readonly agentRuntime = new Map<string, { profile: number; presence: number }>();
+  private readonly ignoredShutdowns = new Set<string>();
+  private agentReconcile: Promise<void> = Promise.resolve();
   private outboxListener: (() => void) | undefined;
 
   private constructor(
     readonly harness: Harness,
-    private readonly options: Required<Pick<SessionOptions, "home" | "turnTokens" | "defaultLimit">> & { models: Models },
+    private readonly options: Required<Pick<SessionOptions, "home" | "turnTokens" | "defaultLimit" | "now">> & { models: Models },
     private readonly coding: Coding,
     private readonly isolation: WorkspaceIsolation,
   ) {}
@@ -117,6 +124,7 @@ export class Yewholt {
         home: options.home,
         turnTokens: options.turnTokens ?? Number(process.env.YEWHOLT_TURN_TOKENS ?? "1000"),
         defaultLimit: options.defaultLimit ?? Number(process.env.YEWHOLT_BUDGET_TOKENS ?? "100000"),
+        now: options.now ?? Date.now,
         models,
       },
       { registry, toolSearch, gate, packages: [], piDir: options.piDir ?? piDir() },
@@ -163,10 +171,13 @@ export class Yewholt {
    * Kept in memory only: stored scope and proposals are not changed. The daemon
    * replaces the set whenever the relay's member lists change.
    */
-  setMemberChannels(pubkey: string, channels: Iterable<string>): void {
+  setMemberChannels(pubkey: string, channels: Iterable<string>, direct: Iterable<string> = []): void {
     const set = new Set(channels);
     if (set.size === 0) this.memberChannels.delete(pubkey);
     else this.memberChannels.set(pubkey, set);
+    const conversations = new Set(direct);
+    if (conversations.size === 0) this.directChannels.delete(pubkey);
+    else this.directChannels.set(pubkey, conversations);
   }
 
   /** Stored scope ∪ relay membership, for the bot with this pubkey. */
@@ -181,6 +192,163 @@ export class Yewholt {
 
   async snapshot(): Promise<RegistryState> {
     return (await this.harness.snapshot(RegistryDoc, ctx)) ?? { bots: [], pending: null, processed: [], outbox: [], highWater: 0 };
+  }
+
+  botSecret(bot: Pick<BotRecord, "external" | "pubkey">): string {
+    if (!bot.external) return readKey(botKeyPath(this.options.home, bot.pubkey));
+    const secret = this.agentKeys.get(bot.pubkey);
+    if (!secret) throw new Error("external agent key unavailable");
+    return secret;
+  }
+
+  hasAgentKey(pubkey: string): boolean {
+    return this.agentKeys.has(pubkey);
+  }
+
+  reconcileAgents(scan: AgentScan): Promise<void> {
+    const run = this.agentReconcile.then(() => this.applyAgentFiles(scan));
+    this.agentReconcile = run.catch(() => undefined);
+    return run;
+  }
+
+  private async applyAgentFiles(scan: AgentScan): Promise<void> {
+    const previous = new Map((await this.snapshot()).bots.map((bot) => [bot.pubkey, bot]));
+    const valid = new Set<string>();
+    for (const definition of scan.definitions) {
+      const { pubkey, name, model, nsec, channelId, permissions, ownerPubkey, authTag, relayUrl, respondTo, respondToAllowlist, mtimeMs, fileVersion } = definition;
+      const old = previous.get(pubkey);
+      if (old && !old.external) continue;
+      valid.add(pubkey);
+      this.agentKeys.set(pubkey, nsec);
+      const fields = {
+        name, modelLabel: model.label, provider: model.provider, modelId: model.modelId, scope: channelId ? [channelId] : [],
+        permissions, external: true as const, ownerPubkey, authTag, relayUrl, respondTo, respondToAllowlist,
+      };
+      if (!old) {
+        const bot: BotRecord = {
+          ...fields, conversationId: 0, pubkey, status: "active", stopped: false, agentFileVersion: fileVersion,
+          role: "member", limitTokens: this.options.defaultLimit, spentTokens: 0, announced: true,
+        };
+        await this.createConversation(bot, (reg) => reg.bots.push(bot));
+        if (isCoder(bot)) this.isolation.prepare(pubkey);
+        continue;
+      }
+      const changed = Object.entries(fields).some(([key, value]) => JSON.stringify(old[key as keyof BotRecord]) !== JSON.stringify(value));
+      const wasProvisioned = old.status === "active" || old.status === "stopped";
+      if (!changed && wasProvisioned && old.agentFileVersion === fileVersion) continue;
+      if (changed) await this.syncAgent({ ...old, ...fields });
+      await this.harness.commit(async (tx) => {
+        const reg = await tx.doc(RegistryDoc);
+        const current = reg.bots.find((item) => item.pubkey === pubkey)!;
+        const stopped = current.stopped === true && (fileVersion === current.stoppedFileVersion || mtimeMs <= (current.stoppedAt ?? Infinity));
+        Object.assign(current, fields, { agentFileVersion: fileVersion, stopped, status: stopped ? "stopped" : "active" });
+      }, ctx);
+      if (changed || old.status !== "active") this.agentDisconnected(pubkey);
+    }
+    const missing = [...previous.values()].filter((bot) => bot.external && !valid.has(bot.pubkey));
+    if (missing.length === 0) return;
+    await this.harness.commit(async (tx) => {
+      const reg = await tx.doc(RegistryDoc);
+      for (const { pubkey } of missing) {
+        const bot = reg.bots.find((item) => item.pubkey === pubkey)!;
+        const status = scan.unavailable || scan.present.has(pubkey) ? "invalid" : "retired";
+        if (bot.status === status) continue;
+        discardAgentTraffic(reg, pubkey);
+        if (!bot.stopped && status === "retired") this.queueOffline(reg, pubkey);
+        bot.status = status;
+        this.agentDisconnected(pubkey);
+      }
+    }, ctx);
+  }
+
+  agentDisconnected(pubkey: string): void {
+    this.agentRuntime.delete(pubkey);
+  }
+
+  /** Only authenticated, connected external agents are eligible for an online update. */
+  async refreshAgentRuntime(connected: readonly string[]): Promise<boolean> {
+    const now = this.options.now();
+    const due = new Set(connected.filter((pubkey) => {
+      const last = this.agentRuntime.get(pubkey);
+      return !last || now - last.presence >= 60_000 || now - last.profile >= 600_000;
+    }));
+    if (due.size === 0) return false;
+    let queued = false;
+    await this.harness.commit(async (tx) => {
+      const reg = await tx.doc(RegistryDoc);
+      for (const bot of reg.bots) {
+        if (!bot.external || bot.status !== "active" || !due.has(bot.pubkey)) continue;
+        const secret = this.botSecret(bot);
+        const last = this.agentRuntime.get(bot.pubkey) ?? { profile: -Infinity, presence: -Infinity };
+        const createdAt = Math.floor(now / 1000);
+        if (now - last.profile >= 600_000) {
+          queueRuntime(reg, runtimeProfile(bot, secret, createdAt));
+          last.profile = now;
+          queued = true;
+        }
+        if (now - last.presence >= 60_000) {
+          queueRuntime(reg, presence(secret, "online", createdAt));
+          last.presence = now;
+          queued = true;
+        }
+        this.agentRuntime.set(bot.pubkey, last);
+      }
+    }, ctx);
+    return queued;
+  }
+
+  /** On process shutdown, advertise offline while the links are still usable. */
+  async offlineAgents(connected: readonly string[]): Promise<void> {
+    const online = new Set(connected);
+    if (online.size === 0) return;
+    await this.harness.commit(async (tx) => {
+      const reg = await tx.doc(RegistryDoc);
+      for (const bot of reg.bots) {
+        if (!bot.external || bot.status !== "active" || !online.has(bot.pubkey)) continue;
+        reg.outbox = reg.outbox.filter((event) => event.pubkey !== bot.pubkey ||
+          (event.kind !== RUNTIME_PROFILE && !(event.kind === PRESENCE && event.content === "online")));
+        this.queueOffline(reg, bot.pubkey);
+      }
+    }, ctx);
+  }
+
+  private queueOffline(reg: RegistryState, pubkey: string): void {
+    const secret = this.agentKeys.get(pubkey);
+    if (!secret) return;
+    const event = presence(secret, "offline", Math.floor(this.options.now() / 1000));
+    if (!reg.outbox.some((item) => item.id === event.id)) reg.outbox.push(event);
+  }
+
+  private async handleShutdown(message: HumanMessage): Promise<void> {
+    let rejected = false;
+    await this.harness.commit(async (tx) => {
+      const reg = await tx.doc(RegistryDoc);
+      for (const bot of reg.bots) {
+        if (!bot.external || !this.inScope(bot, message.channelId)) continue;
+        if (bot.status !== "active" || bot.shutdownEventIds?.includes(message.eventId)) continue;
+        if (bot.ownerPubkey !== message.authorPubkey) {
+          rejected = true;
+          continue;
+        }
+        bot.stopped = true;
+        bot.stoppedAt = this.options.now();
+        bot.stoppedFileVersion = bot.agentFileVersion;
+        bot.status = "stopped";
+        bot.shutdownEventIds = [...(bot.shutdownEventIds ?? []), message.eventId];
+        discardAgentTraffic(reg, bot.pubkey);
+        this.queueOffline(reg, bot.pubkey);
+        this.agentDisconnected(bot.pubkey);
+        remember(reg, message);
+      }
+    }, ctx);
+    if (rejected && !this.ignoredShutdowns.has(message.eventId)) {
+      this.ignoredShutdowns.add(message.eventId);
+      console.error("external agent shutdown ignored: author is not the agent owner");
+    }
+  }
+
+  private inScope(bot: BotRecord, channelId: string): boolean {
+    return effectiveScope(bot.scope, this.memberChannels.get(bot.pubkey)).includes(channelId);
   }
 
   /** First bot. Idempotent. Does not publish until the daemon drains the outbox. */
@@ -212,9 +380,13 @@ export class Yewholt {
   async handleHuman(message: HumanMessage): Promise<void> {
     const state = await this.snapshot();
     if (state.processed.includes(message.eventId)) return;
+    if (message.text.trim() === "!shutdown" && state.bots.some((bot) => bot.external && this.inScope(bot, message.channelId))) {
+      await this.handleShutdown(message);
+      return;
+    }
     if (state.bots.some((bot) => bot.pubkey === message.authorPubkey)) return;
 
-    const inScope = (bot: BotRecord) => effectiveScope(bot.scope, this.memberChannels.get(bot.pubkey)).includes(message.channelId);
+    const inScope = (bot: BotRecord) => this.inScope(bot, message.channelId);
     const onboarding = state.bots.find((bot) => bot.role === "onboarding" && bot.status === "active" && inScope(bot));
     // "@Onboarding Specialist aprovo" parses as "aprovo". A message that leads with
     // other bots only ("@Coder sim") is addressed to them and parses as before.
@@ -229,21 +401,29 @@ export class Yewholt {
       await this.handleOnboarding(onboarding, message, command);
       return;
     }
-    if (command) return;
-
-    const mentioned = state.bots.filter(
-      (bot) => bot.role !== "onboarding" && bot.status === "active" && inScope(bot) && messageMentions(message.text, bot),
-    );
-    for (const bot of mentioned) await this.handleMember(bot, message);
+    for (const bot of state.bots) {
+      if (bot.role === "onboarding" || bot.status !== "active" || !inScope(bot)) continue;
+      const direct = bot.external && this.directChannels.get(bot.pubkey)?.has(message.channelId);
+      const allowed = direct
+        ? bot.respondTo === "anyone" || (bot.respondTo === "allowlist" && bot.respondToAllowlist?.includes(message.authorPubkey))
+        : !command && messageMentions(message.text, bot);
+      if (allowed) await this.handleMember(bot, message);
+    }
   }
 
   async ackOutbox(ids: readonly string[]): Promise<void> {
     if (ids.length === 0) return;
     const drop = new Set(ids);
+    const retired: string[] = [];
     await this.harness.commit(async (tx) => {
       const reg = await tx.doc(RegistryDoc);
       reg.outbox = reg.outbox.filter((event) => !drop.has(event.id));
+      for (const bot of reg.bots) {
+        if (bot.external && bot.status === "retired" && this.agentKeys.has(bot.pubkey) &&
+            !reg.outbox.some((event) => event.pubkey === bot.pubkey)) retired.push(bot.pubkey);
+      }
     }, ctx);
+    for (const pubkey of retired) this.agentKeys.delete(pubkey);
   }
 
   async setBudget(name: string, limitTokens: number): Promise<void> {
@@ -257,29 +437,28 @@ export class Yewholt {
   }
 
   private async handleOnboarding(bot: BotRecord, message: HumanMessage, command: ParsedCommand | null): Promise<void> {
-    const ownerSecret = readKey(ownerKeyPath(this.options.home));
     if (!command) {
       await this.answerWithModel(bot, message);
       return;
     }
     if (command.type === "help") {
-      await this.reply(bot, message, helpText(), 0, ownerSecret);
+      await this.reply(bot, message, helpText(), 0);
       return;
     }
     if (command.type === "approve" || command.type === "reject") {
-      await this.resolveProposal(bot, message, command.type === "approve", ownerSecret);
+      await this.resolveProposal(bot, message, command.type === "approve");
       return;
     }
     if (!(await this.canSpend(bot, this.options.turnTokens))) {
-      await this.reply(bot, message, budgetText(bot), 0, ownerSecret);
+      await this.reply(bot, message, budgetText(bot), 0);
       return;
     }
     const proposal = this.proposalFrom(command, message.channelId, await this.snapshot());
     if ("error" in proposal) {
-      await this.reply(bot, message, proposal.error, this.options.turnTokens, ownerSecret);
+      await this.reply(bot, message, proposal.error, this.options.turnTokens);
       return;
     }
-    const summary = this.chatEvent(bot, message.channelId, proposal.summary, ownerSecret);
+    const summary = this.chatEvent(bot, message.channelId, proposal.summary);
     await this.harness.commit(async (tx) => {
       const reg = await tx.doc(RegistryDoc);
       reg.pending = proposal;
@@ -290,16 +469,16 @@ export class Yewholt {
     await this.noteOnly(bot, message, proposal.summary);
   }
 
-  private async resolveProposal(bot: BotRecord, message: HumanMessage, approve: boolean, ownerSecret: string): Promise<void> {
+  private async resolveProposal(bot: BotRecord, message: HumanMessage, approve: boolean): Promise<void> {
     const state = await this.snapshot();
     const pending = state.pending;
     if (!pending) {
-      await this.reply(bot, message, "There is no pending proposal.", 0, ownerSecret);
+      await this.reply(bot, message, "There is no pending proposal.", 0);
       return;
     }
     if (!approve) {
       const text = `Rejected proposal ${pending.id}.`;
-      const event = this.chatEvent(bot, message.channelId, text, ownerSecret);
+      const event = this.chatEvent(bot, message.channelId, text);
       await this.harness.commit(async (tx) => {
         const reg = await tx.doc(RegistryDoc);
         reg.pending = null;
@@ -328,14 +507,13 @@ export class Yewholt {
         message,
         `Approved proposal ${pending.id}. ${created.name} is in this channel.\npubkey: ${created.pubkey}\nmodel: ${created.modelLabel}\nscope: ${created.scope.join(", ")}\npermissions: ${created.permissions.join(", ")}`,
         0,
-        ownerSecret,
         false,
       );
       return;
     }
     await this.harness.commit(async (tx) => {
       const reg = await tx.doc(RegistryDoc);
-      const target = reg.bots.find((item) => item.name.toLowerCase() === pending.name.toLowerCase());
+      const target = reg.bots.find((item) => !item.external && item.name.toLowerCase() === pending.name.toLowerCase());
       if (!target) throw new Error(`bot ${pending.name} disappeared`);
       if (pending.action === "update-model") {
         target.modelLabel = pending.modelLabel;
@@ -353,31 +531,29 @@ export class Yewholt {
       reg.pending = null;
       remember(reg, message);
     }, ctx);
-    const updated = (await this.snapshot()).bots.find((item) => item.name.toLowerCase() === pending.name.toLowerCase())!;
+    const updated = (await this.snapshot()).bots.find((item) => !item.external && item.name.toLowerCase() === pending.name.toLowerCase())!;
     if (pending.action === "update-model" && updated.provider && updated.modelId) {
       const conversation = await this.harness.conversation(asConversation(updated.conversationId), ctx);
       await conversation?.configure({ model: { provider: updated.provider, modelId: updated.modelId }, instructions: instructionsFor(updated) }, ctx);
     } else if (pending.action === "update-scope" || pending.action === "update-permissions") {
       await this.syncAgent(updated);
     }
-    await this.reply(bot, message, `Approved proposal ${pending.id}.\n${describe(updated)}`, 0, ownerSecret, false);
+    await this.reply(bot, message, `Approved proposal ${pending.id}.\n${describe(updated)}`, 0, false);
   }
 
   private async handleMember(bot: BotRecord, message: HumanMessage): Promise<void> {
-    const ownerSecret = readKey(ownerKeyPath(this.options.home));
     if (!bot.permissions.includes("post")) {
       await this.noteOnly(bot, message, "Permission post is off, so this session will not publish.");
       return;
     }
     if (!(await this.canSpend(bot, this.options.turnTokens))) {
-      await this.reply(bot, message, budgetText(bot), 0, ownerSecret);
+      await this.reply(bot, message, budgetText(bot), 0);
       return;
     }
     await this.answerWithModel(bot, message);
   }
 
   private async answerWithModel(bot: BotRecord, message: HumanMessage): Promise<void> {
-    const ownerSecret = readKey(ownerKeyPath(this.options.home));
     // A package may add the provider this bot's model comes from.
     if (isCoder(bot)) await this.ensurePackages();
     const choice = { provider: bot.provider, modelId: bot.modelId, label: bot.modelLabel };
@@ -385,16 +561,16 @@ export class Yewholt {
       const text = bot.role === "onboarding"
         ? `${helpText()}\n\nThat message is not a command I handle offline. Set YEWHOLT_MODEL and a provider API key to answer free text.`
         : `${bot.name} is a durable session on ${choice.label || "an unset model"}. Free-text answers need a provider API key and a pi-ai catalog id (provider/modelId).`;
-      await this.reply(bot, message, text, 0, ownerSecret);
+      await this.reply(bot, message, text, 0);
       return;
     }
     if (!(await this.canSpend(bot, this.options.turnTokens))) {
-      await this.reply(bot, message, budgetText(bot), 0, ownerSecret);
+      await this.reply(bot, message, budgetText(bot), 0);
       return;
     }
     const conversation = await this.harness.conversation(asConversation(bot.conversationId), ctx);
     if (!conversation) {
-      await this.reply(bot, message, "This session has no conversation.", 0, ownerSecret);
+      await this.reply(bot, message, "This session has no conversation.", 0);
       return;
     }
     if (isCoder(bot)) {
@@ -419,7 +595,7 @@ export class Yewholt {
       const content = entry?.model?.[0] && "content" in entry.model[0] ? entry.model[0].content : undefined;
       answer = textOf(content) || answer;
     }
-    await this.reply(bot, message, answer, spent, ownerSecret);
+    await this.reply(bot, message, answer, spent);
   }
 
   private async createBot(input: {
@@ -447,16 +623,8 @@ export class Yewholt {
       spentTokens: 0,
       announced: true,
     };
-    const conversation = await this.harness.createConversation(
-      {
-        ownership: { kind: "ownerless" },
-        agent: agentChange(bot),
-      },
-      ctx,
-    );
-    bot.conversationId = conversation.id as unknown as number;
-    const ownerSecret = readKey(ownerKeyPath(this.options.home));
-    const events = buildIdentityEvents(ownerSecret, bot, input.channelId, keys.secret);
+    await this.createConversation(bot);
+    const events = buildIdentityEvents(readKey(ownerKeyPath(this.options.home)), bot, input.channelId, keys.secret);
     await this.harness.commit(async (tx) => {
       const reg = await tx.doc(RegistryDoc);
       reg.bots.push({ ...bot });
@@ -464,6 +632,21 @@ export class Yewholt {
     }, ctx);
     if (isCoder(bot)) this.isolation.prepare(bot.pubkey);
     return bot;
+  }
+
+  private async createConversation(bot: BotRecord, register?: (reg: RegistryState) => void): Promise<void> {
+    const conversation = await this.harness.createConversation(
+      {
+        ownership: { kind: "ownerless" },
+        agent: agentChange(bot),
+        init: register && (async (tx, id) => {
+          bot.conversationId = id as unknown as number;
+          register(await tx.doc(RegistryDoc));
+        }),
+      },
+      ctx,
+    );
+    bot.conversationId = conversation.id as unknown as number;
   }
 
   private proposalFrom(command: ParsedCommand, channelId: string, state: RegistryState): Proposal | { error: string } {
@@ -476,7 +659,9 @@ export class Yewholt {
       return proposal("create", name, model, scope, permissions);
     }
     if (command.type === "update-model" || command.type === "update-scope" || command.type === "update-permissions" || command.type === "stop" || command.type === "start") {
-      const target = state.bots.find((bot) => bot.name.toLowerCase() === command.name.toLowerCase());
+      const nameMatches = (bot: BotRecord) => bot.name.toLowerCase() === command.name.toLowerCase();
+      const target = state.bots.find((bot) => !bot.external && nameMatches(bot));
+      if (!target && state.bots.some(nameMatches)) return { error: "Update an external agent through its provisioning file." };
       if (!target) return { error: `No bot named ${command.name}.` };
       if (target.role === "onboarding" && (command.type === "stop" || command.type === "start")) {
         return { error: "The Onboarding Specialist stays up so approvals have somewhere to land." };
@@ -505,9 +690,9 @@ export class Yewholt {
     return fresh.spentTokens + cost <= fresh.limitTokens;
   }
 
-  private chatEvent(bot: BotRecord, channelId: string, text: string, ownerSecret: string): NostrEvent {
-    const secret = readKey(botKeyPath(this.options.home, bot.pubkey));
-    return signEvent(secret, 9, text, [["h", channelId], ownerAuthTag(ownerSecret, bot.pubkey, "kind=9")]);
+  private chatEvent(bot: BotRecord, channelId: string, text: string): NostrEvent {
+    const authTag = bot.authTag ?? ownerAuthTag(readKey(ownerKeyPath(this.options.home)), bot.pubkey, "kind=9");
+    return signEvent(this.botSecret(bot), 9, text, [["h", channelId], authTag]);
   }
 
   private async reply(
@@ -515,19 +700,28 @@ export class Yewholt {
     message: HumanMessage,
     text: string,
     cost: number,
-    ownerSecret: string,
     mark = true,
     also?: (reg: RegistryState) => void,
   ): Promise<void> {
     const fresh = (await this.snapshot()).bots.find((item) => item.pubkey === bot.pubkey) ?? bot;
+    if (fresh.external && fresh.status !== "active") {
+      if (also) await this.harness.commit(async (tx) => also(await tx.doc(RegistryDoc)), ctx);
+      return;
+    }
     if (!fresh.permissions.includes("post")) {
       if (also) await this.harness.commit(async (tx) => also(await tx.doc(RegistryDoc)), ctx);
       await this.noteOnly(fresh, message, text);
       return;
     }
-    const event = this.chatEvent(fresh, message.channelId, text, ownerSecret);
+    const event = this.chatEvent(fresh, message.channelId, text);
     await this.harness.commit(async (tx) => {
       const reg = await tx.doc(RegistryDoc);
+      const current = fresh.external ? reg.bots.find((item) => item.pubkey === fresh.pubkey) : fresh;
+      if (!current || current.status !== fresh.status || !current.permissions.includes("post") ||
+          (current.external && current.stoppedAt !== bot.stoppedAt)) {
+        also?.(reg);
+        return;
+      }
       if (cost > 0) charge(reg, fresh.pubkey, cost);
       if (mark) remember(reg, message);
       reg.outbox.push(event);
@@ -571,15 +765,18 @@ export class Yewholt {
   private async syncAgent(bot: BotRecord): Promise<void> {
     const conversation = await this.harness.conversation(asConversation(bot.conversationId), ctx);
     if (!conversation) return;
+    const change = bot.external
+      ? { ...agentChange(bot), model: bot.provider && bot.modelId ? { provider: bot.provider, modelId: bot.modelId } : null }
+      : { instructions: instructionsFor(bot) };
     if (isCoder(bot)) {
       await this.ensurePackages();
       this.isolation.prepare(bot.pubkey);
       const workspace = this.isolation.workspace(bot.pubkey);
-      await conversation.configure({ extensions: this.codeExtensions(), cwd: workspace, instructions: instructionsFor(bot) }, ctx);
+      await conversation.configure({ ...change, extensions: this.codeExtensions(), cwd: workspace }, ctx);
       return;
     }
     const selected = (await conversation.agent(ctx)).extensions.length > 0;
-    await conversation.configure(selected ? { instructions: instructionsFor(bot), extensions: null, cwd: null } : { instructions: instructionsFor(bot) }, ctx);
+    await conversation.configure(selected ? { ...change, extensions: null, cwd: null } : change, ctx);
   }
 
   private async codeTurn(bot: BotRecord, message: HumanMessage, conversation: Conversation): Promise<void> {
@@ -604,7 +801,6 @@ export class Yewholt {
 
   /** Submit (or find again, by request id) the turn's input, wait for its run, post the answer, drop the turn. */
   private async runTurn(turn: CodeTurn): Promise<void> {
-    const ownerSecret = readKey(ownerKeyPath(this.options.home));
     const bot = (await this.snapshot()).bots.find((item) => item.pubkey === turn.pubkey);
     const drop = (reg: RegistryState) => {
       reg.turns = (reg.turns ?? []).filter((item) => item.requestId !== turn.requestId);
@@ -614,6 +810,7 @@ export class Yewholt {
       await this.harness.commit(async (tx) => drop(await tx.doc(RegistryDoc)), ctx);
       return;
     }
+    if (bot.external && bot.status !== "active") return;
     const message: HumanMessage = {
       channelId: turn.channelId,
       authorPubkey: turn.author,
@@ -632,7 +829,7 @@ export class Yewholt {
       const content = entry?.model?.[0] && "content" in entry.model[0] ? entry.model[0].content : undefined;
       answer = textOf(content) || answer;
     }
-    await this.reply(bot, message, answer, spent, ownerSecret, true, drop);
+    await this.reply(bot, message, answer, spent, true, drop);
     this.notifyOutbox();
   }
 
@@ -649,7 +846,7 @@ export class Yewholt {
 
   private async coderFor(conversationId: ConversationId): Promise<BotRecord | undefined> {
     const bot = (await this.snapshot()).bots.find((item) => item.conversationId === (conversationId as unknown as number));
-    return bot && isCoder(bot) ? bot : undefined;
+    return bot && (!bot.external || bot.status === "active") && isCoder(bot) ? bot : undefined;
   }
 
   private async toolWorkspace(conversationId: ConversationId): Promise<(Roots & { homeAliases: string[] }) | { refusal: string } | undefined> {
@@ -673,13 +870,12 @@ export class Yewholt {
     const state = await this.snapshot();
     if ((state.approvals ?? []).some((item) => item.taskId === taskId && item.key === ask.key)) return;
     const bot = state.bots.find((item) => item.conversationId === (ask.conversationId as unknown as number));
-    if (!bot) return;
+    if (!bot || (bot.external && bot.status !== "active")) return;
     const turn = (state.turns ?? []).find((item) => item.pubkey === bot.pubkey);
     const channelId = turn?.channelId ?? bot.scope[0];
     if (!channelId) return;
-    const ownerSecret = readKey(ownerKeyPath(this.options.home));
     const id = randomUUID().slice(0, 8);
-    const event = this.chatEvent(bot, channelId, approvalText(bot, ask, id), ownerSecret);
+    const event = this.chatEvent(bot, channelId, approvalText(bot, ask, id));
     const request: ApprovalRequest = {
       id,
       pubkey: bot.pubkey,
@@ -730,7 +926,8 @@ export class Yewholt {
     leading: { text: string; mentioned: string[] },
     onboarding: BotRecord | undefined,
   ): Promise<boolean> {
-    const here = (state.approvals ?? []).filter((item) => item.channelId === message.channelId);
+    const here = (state.approvals ?? []).filter((item) => item.channelId === message.channelId &&
+      !state.bots.some((bot) => bot.pubkey === item.pubkey && bot.external && bot.status !== "active"));
     if (here.length === 0) return false;
     const word = parseCommand(leading.text);
     if (word?.type !== "approve" && word?.type !== "reject") return false;
@@ -753,7 +950,6 @@ export class Yewholt {
   }
 
   private async askWhich(state: RegistryState, message: HumanMessage, here: ApprovalRequest[], onboarding: BotRecord | undefined): Promise<void> {
-    const ownerSecret = readKey(ownerKeyPath(this.options.home));
     const lines = ["More than one request is waiting here, so I did not guess. Say which one:"];
     for (const item of here) {
       const bot = state.bots.find((candidate) => candidate.pubkey === item.pubkey);
@@ -763,7 +959,7 @@ export class Yewholt {
     lines.push("Or reply directly to the request message.");
     const poster = onboarding ?? state.bots.find((bot) => bot.role === "onboarding" && bot.status === "active" && bot.scope.includes(message.channelId))
       ?? state.bots.find((bot) => bot.pubkey === here[0]!.pubkey)!;
-    await this.reply(poster, message, lines.join("\n"), 0, ownerSecret);
+    await this.reply(poster, message, lines.join("\n"), 0);
   }
 
   private async resolveApproval(state: RegistryState, request: ApprovalRequest, message: HumanMessage, allow: boolean): Promise<void> {
@@ -781,8 +977,7 @@ export class Yewholt {
           ? `Approved. Running once:\n${request.subject}`
           : `Rejected. Not running:\n${request.subject}`
         : `That request was already answered or has ended (${result}); nothing more runs.`;
-    const ownerSecret = readKey(ownerKeyPath(this.options.home));
-    const event = bot && bot.permissions.includes("post") ? this.chatEvent(bot, message.channelId, text, ownerSecret) : undefined;
+    const event = bot && bot.permissions.includes("post") ? this.chatEvent(bot, message.channelId, text) : undefined;
     await this.harness.commit(async (tx) => {
       const reg = await tx.doc(RegistryDoc);
       reg.approvals = (reg.approvals ?? []).filter((item) => item.id !== request.id);
@@ -958,6 +1153,16 @@ function remember(reg: RegistryState, message: HumanMessage): void {
   if (!reg.processed.includes(message.eventId)) reg.processed.push(message.eventId);
   if (reg.processed.length > PROCESSED_CAP) reg.processed.splice(0, reg.processed.length - PROCESSED_CAP);
   if (message.createdAt > reg.highWater) reg.highWater = message.createdAt;
+}
+
+function discardAgentTraffic(reg: RegistryState, pubkey: string): void {
+  reg.outbox = reg.outbox.filter((event) => event.pubkey !== pubkey || (event.kind === PRESENCE && event.content === "offline"));
+}
+
+function queueRuntime(reg: RegistryState, event: NostrEvent): void {
+  reg.outbox = reg.outbox.filter((item) => item.pubkey !== event.pubkey || item.kind !== event.kind ||
+    (item.kind === PRESENCE && item.content === "offline"));
+  reg.outbox.push(event);
 }
 
 function budgetText(bot: BotRecord): string {

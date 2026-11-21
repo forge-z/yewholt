@@ -1,7 +1,8 @@
-import { MEMBER_LIST_KIND, effectiveScope, memberChannels, newestMemberLists } from "./membership.js";
+import { MEMBER_LIST_KIND, directChannels, effectiveScope, memberChannels, newestMemberLists } from "./membership.js";
 import { accepted } from "./nostr-client.js";
 import type { NostrEvent } from "./nostr.js";
 import type { HumanMessage } from "./session.js";
+import type { BotRecord } from "./registry.js";
 
 /** Relay-side bookkeeping between the daemon's connections and the session. No sockets here. */
 
@@ -21,7 +22,7 @@ export interface ChatClient {
   isOpen(): boolean;
 }
 
-export type LinkBot = { pubkey: string; name: string; scope: readonly string[]; status: string };
+export type LinkBot = Pick<BotRecord, "pubkey" | "name" | "status" | "external" | "relayUrl" | "authTag"> & { scope: readonly string[] };
 
 const SEEN_CAP = 10_000;
 
@@ -66,7 +67,7 @@ type LinkOptions = {
   /** NIP-01 `since` for kind 9 subscriptions (inclusive). Omitted when undefined or 0. */
   since?: () => number | undefined;
   onEvent: (event: NostrEvent) => void;
-  onMembership: (pubkey: string, channels: ReadonlySet<string>) => void;
+  onMembership: (pubkey: string, channels: ReadonlySet<string>, direct: ReadonlySet<string>) => void;
 };
 
 /**
@@ -77,9 +78,10 @@ type LinkOptions = {
  * - `chat:<channel>`: kind 9 `#h` = one effective channel each, so a relay CLOSED
  *   ("restricted: not a channel member") on one channel does not silence the others.
  */
-class BotLink {
+class BotLink<T extends LinkBot> {
   private lists = new Map<string, NostrEvent>();
   private member: ReadonlySet<string> = new Set();
+  private direct: ReadonlySet<string> = new Set();
   private stored: string[];
   /** Channel -> the exact subscription id currently open for it. */
   private readonly chat = new Map<string, string>();
@@ -90,7 +92,7 @@ class BotLink {
   private counter = 0;
 
   constructor(
-    readonly bot: LinkBot,
+    public bot: T,
     readonly client: ChatClient,
     private readonly options: LinkOptions,
   ) {
@@ -123,10 +125,12 @@ class BotLink {
     if (!relay || event?.kind !== MEMBER_LIST_KIND || event.pubkey !== relay) return;
     this.lists = newestMemberLists([...this.lists.values(), event], relay);
     const next = memberChannels(this.lists.values(), this.bot.pubkey, relay);
-    if (sameList([...next], [...this.member])) return;
+    const direct = this.bot.external ? directChannels(this.lists.values(), this.bot.pubkey, relay) : new Set<string>();
+    if (sameList([...next], [...this.member]) && sameList([...direct], [...this.direct])) return;
     for (const channel of next) if (!this.member.has(channel)) this.refused.delete(channel);
     this.member = next;
-    this.options.onMembership(this.bot.pubkey, next);
+    this.direct = direct;
+    this.options.onMembership(this.bot.pubkey, next, direct);
     this.refresh();
   };
 
@@ -168,21 +172,22 @@ class BotLink {
   }
 }
 
-export type BotLinksOptions = LinkOptions & {
+export type BotLinksOptions<T extends LinkBot = LinkBot> = LinkOptions & {
   /** Open and authenticate a connection with the bot's own key (and owner NIP-OA tag). */
-  open: (bot: LinkBot) => Promise<ChatClient>;
+  open: (bot: T) => Promise<ChatClient>;
+  onDisconnect?: (pubkey: string) => void;
 };
 
 /** Every active bot's persistent connection while `serve` runs. */
-export class BotLinks {
-  private readonly links = new Map<string, BotLink>();
+export class BotLinks<T extends LinkBot = LinkBot> {
+  private readonly links = new Map<string, BotLink<T>>();
   private chain: Promise<void> = Promise.resolve();
   private closed = false;
 
-  constructor(private readonly options: BotLinksOptions) {}
+  constructor(private readonly options: BotLinksOptions<T>) {}
 
   /** Open links for active bots, close links for bots that are not, apply stored scope changes. Serialized. */
-  sync(bots: readonly LinkBot[]): Promise<void> {
+  sync(bots: readonly T[]): Promise<void> {
     const run = this.chain.then(() => this.apply(bots));
     this.chain = run.catch(() => undefined);
     return run;
@@ -196,9 +201,13 @@ export class BotLinks {
     return this.links.get(pubkey)?.channels() ?? [];
   }
 
-  /** A bot whose open connection dropped. `serve` treats that like losing the owner connection. */
-  lost(): LinkBot | undefined {
-    for (const link of this.links.values()) if (!link.client.isOpen()) return link.bot;
+  connectedAgents(): string[] {
+    return [...this.links.values()].filter((link) => link.bot.external && link.client.isOpen()).map((link) => link.bot.pubkey);
+  }
+
+  /** A daemon-created bot whose connection dropped. External links reconnect independently. */
+  lost(): T | undefined {
+    for (const link of this.links.values()) if (!link.bot.external && !link.client.isOpen()) return link.bot;
     return undefined;
   }
 
@@ -209,15 +218,18 @@ export class BotLinks {
     for (const [pubkey, link] of [...this.links]) await this.drop(pubkey, link);
   }
 
-  private async apply(bots: readonly LinkBot[]): Promise<void> {
+  private async apply(bots: readonly T[]): Promise<void> {
     if (this.closed) return;
     const active = new Map(bots.filter((bot) => bot.status === "active").map((bot) => [bot.pubkey, bot]));
     for (const [pubkey, link] of [...this.links]) {
-      if (!active.has(pubkey)) await this.drop(pubkey, link);
+      const bot = active.get(pubkey);
+      if (!bot || (bot.external && (!link.client.isOpen() || bot.relayUrl !== link.bot.relayUrl ||
+          !sameList(bot.authTag ?? [], link.bot.authTag ?? [])))) await this.drop(pubkey, link);
     }
     for (const bot of active.values()) {
       const existing = this.links.get(bot.pubkey);
       if (existing) {
+        existing.bot = bot;
         existing.setStoredScope(bot.scope);
         continue;
       }
@@ -234,9 +246,10 @@ export class BotLinks {
     }
   }
 
-  private async drop(pubkey: string, link: BotLink): Promise<void> {
+  private async drop(pubkey: string, link: BotLink<T>): Promise<void> {
     this.links.delete(pubkey);
-    this.options.onMembership(pubkey, new Set());
+    this.options.onMembership(pubkey, new Set(), new Set());
+    this.options.onDisconnect?.(pubkey);
     try {
       await link.close();
     } catch {

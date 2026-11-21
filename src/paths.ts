@@ -18,6 +18,10 @@ export function botKeyPath(home: string, pubkey: string): string {
   return join(secretsDir(home), "bots", `${pubkey}.key`);
 }
 
+export function agentsDir(home: string): string {
+  return join(home, "agents");
+}
+
 export function sqlitePath(home: string): string {
   return join(home, "state", "sessions.sqlite");
 }

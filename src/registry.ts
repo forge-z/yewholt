@@ -15,6 +15,17 @@ export type BotRecord = {
   limitTokens: number;
   spentTokens: number;
   announced: boolean;
+  external?: true;
+  ownerPubkey?: string;
+  authTag?: string[];
+  relayUrl?: string;
+  respondTo?: string;
+  respondToAllowlist?: string[];
+  agentFileVersion?: string;
+  stopped?: boolean;
+  stoppedAt?: number;
+  stoppedFileVersion?: string;
+  shutdownEventIds?: string[];
 };
 
 export type Proposal = {
