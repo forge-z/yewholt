@@ -1,7 +1,12 @@
 import WebSocket from "ws";
-import { authEvent, type NostrEvent } from "./nostr.js";
+import { authEvent, pubkeyOf, type NostrEvent } from "./nostr.js";
 
 type OkResult = { ok: boolean; message: string };
+
+type Subscription = {
+  onEvent: (event: NostrEvent) => void;
+  onClosed?: (id: string, reason: string) => void;
+};
 
 /**
  * One NIP-42 connection. The daemon is a relay client, the same way a Buzz user is.
@@ -10,7 +15,9 @@ type OkResult = { ok: boolean; message: string };
 export class RelayClient {
   private socket: WebSocket | undefined;
   private readonly waiters = new Map<string, (result: OkResult) => void>();
-  private readonly listeners = new Set<(event: NostrEvent) => void>();
+  /** One handler per subscription id. EVENT frames go only to the id they name. */
+  private readonly subscriptions = new Map<string, Subscription>();
+  private readonly closedLogged = new Set<string>();
   private challenge: ((value: string) => void) | undefined;
   private authed: Promise<void> | undefined;
 
@@ -49,9 +56,25 @@ export class RelayClient {
     return result;
   }
 
-  subscribe(id: string, filters: readonly Record<string, unknown>[], onEvent: (event: NostrEvent) => void): void {
-    this.listeners.add(onEvent);
+  /**
+   * REQ under `id`. A second subscribe with the same id replaces the handler
+   * (and, per NIP-01, the relay replaces the filters). `onClosed` receives a
+   * relay CLOSED for this id; the subscription is dropped either way.
+   */
+  subscribe(
+    id: string,
+    filters: readonly Record<string, unknown>[],
+    onEvent: (event: NostrEvent) => void,
+    onClosed?: (id: string, reason: string) => void,
+  ): void {
+    this.subscriptions.set(id, { onEvent, onClosed });
     this.send(["REQ", id, ...filters]);
+  }
+
+  /** CLOSE `id` and drop its handler. Late EVENT frames for it are ignored. */
+  unsubscribe(id: string): void {
+    if (!this.subscriptions.delete(id)) return;
+    this.send(["CLOSE", id]);
   }
 
   async close(): Promise<void> {
@@ -82,9 +105,21 @@ export class RelayClient {
       waiter?.({ ok: rest[1] === true, message: typeof rest[2] === "string" ? rest[2] : "" });
       return;
     }
-    if (type === "EVENT" && rest[1] && typeof rest[1] === "object") {
-      const event = rest[1] as NostrEvent;
-      for (const listener of this.listeners) listener(event);
+    if (type === "EVENT" && typeof rest[0] === "string" && rest[1] && typeof rest[1] === "object") {
+      this.subscriptions.get(rest[0])?.onEvent(rest[1] as NostrEvent);
+      return;
+    }
+    if (type === "CLOSED" && typeof rest[0] === "string") {
+      const id = rest[0];
+      const reason = typeof rest[1] === "string" ? rest[1] : "";
+      const subscription = this.subscriptions.get(id);
+      this.subscriptions.delete(id);
+      const key = `${id}\n${reason}`;
+      if (!this.closedLogged.has(key)) {
+        this.closedLogged.add(key);
+        console.error(`relay CLOSED ${id} for ${pubkeyOf(this.secretHex).slice(0, 8)}: ${reason || "(no reason)"}`);
+      }
+      subscription?.onClosed?.(id, reason);
     }
   }
 

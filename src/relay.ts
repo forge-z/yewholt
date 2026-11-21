@@ -1,9 +1,9 @@
 import { spawn } from "node:child_process";
-import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
-import { generateKeyPair } from "./nostr.js";
+import { generateKeyPair, pubkeyOf } from "./nostr.js";
 import { relayDir } from "./paths.js";
 
 export type RelayConfig = {
@@ -104,4 +104,33 @@ export function createChannelTags(channelId: string, name: string): string[][] {
     ["visibility", "open"],
     ["channel_type", "stream"],
   ];
+}
+
+export type RelayKey = { ok: true; pubkey: string } | { ok: false; reason: string };
+
+/**
+ * Public key of the relay, derived from `BUZZ_RELAY_PRIVATE_KEY` in
+ * `$YEWHOLT_HOME/relay/.env` (written by `writeRelayEnv`). Buzz signs kind
+ * 39002 member lists with it. Only the public key leaves this function; the
+ * reason on failure never contains the value.
+ */
+export function readRelayPubkey(home: string): RelayKey {
+  let text: string;
+  try {
+    text = readFileSync(join(relayDir(home), ".env"), "utf8");
+  } catch {
+    return { ok: false, reason: "relay/.env is missing" };
+  }
+  let secret: string | undefined;
+  for (const line of text.split("\n")) {
+    const match = line.match(/^\s*(?:export\s+)?BUZZ_RELAY_PRIVATE_KEY\s*=(.*)$/);
+    if (match) secret = match[1]!.trim().replace(/^(["'])(.*)\1$/, "$2");
+  }
+  if (!secret) return { ok: false, reason: "BUZZ_RELAY_PRIVATE_KEY is not set in relay/.env" };
+  if (!/^[0-9a-f]{64}$/i.test(secret)) return { ok: false, reason: "BUZZ_RELAY_PRIVATE_KEY in relay/.env is not 64 hex characters" };
+  try {
+    return { ok: true, pubkey: pubkeyOf(secret.toLowerCase()) };
+  } catch {
+    return { ok: false, reason: "BUZZ_RELAY_PRIVATE_KEY in relay/.env is not a valid secp256k1 key" };
+  }
 }

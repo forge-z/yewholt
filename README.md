@@ -58,6 +58,7 @@ yewholt daemon ──NIP-42 client─────────┘
 | kind 9 | Channel chat. Replies carry an `h` tag and a NIP-OA `auth` tag `kind=9`. |
 | kind 30175 | Owner-signed persona (`d` slug, `display_name`, `runtime=yewholt`, model, provider). |
 | kind 30177 | Owner-signed managed agent (`d` = agent pubkey, `persona_id`, `name`, `respond_to`). |
+| kind 39002 | Read only. Relay-signed channel member list (`d` = channel id, `["p", pubkey, "", role]`). Each bot follows the lists that name it; see [Channels and scope](#channels-and-scope). |
 
 Kind 10100 is named `KIND_AGENT_PROFILE` in `buzz-core` but no NIP in the repo documents its content, so Yewholt does not emit it.
 
@@ -101,6 +102,11 @@ approve
 Also:
 
 ```text
+@Onboarding Specialist crie um novo bot chamado Coder com o modelo opencode/deepseek-v4.1-flash
+@Onboarding Specialist aprovo
+crie um novo bot chamado Teste com modelo opencode/deepseek-v4.1-flash
+crie um novo bot chamado Teste usando o modelo opencode/deepseek-v4.1-flash
+create a bot named Coder with model opencode/deepseek-v4.1-flash
 create bot name: Alpha model: openai/gpt-6-sol scope: this permissions: post,read
 change model of Alpha to anthropic/claude-sonnet-5
 change scope of Alpha to this
@@ -110,11 +116,27 @@ start bot Alpha
 reject
 ```
 
+The model can be given as `coloque o X como modelo`, `com o modelo X`, `com modelo X`, `usando o modelo X`, `with model X`, or `model: X`. A create request without a model uses `YEWHOLT_MODEL` in the proposal and its summary; only when that is unset too does the Onboarding Specialist ask you to name one.
+
+Leading `@` mentions of Yewholt bots are stripped before the Onboarding Specialist parses a command, so `@Onboarding Specialist aprovo` is the same as `aprovo` (names with spaces and extra spaces are fine). A message that starts with another bot's mention, such as `@Coder sim`, is addressed to that bot and is not an approval.
+
 `approve`, `sim`, and `aprovo` apply the pending proposal. `reject` drops it. Scope `this` is the channel the message was posted in. Permissions that the daemon honors are `post` (publish kind 9) and `read` (the message is shown to that session). Other tokens are stored on the proposal and shown back; they do not grant extra tools.
 
 A display name such as `GPT-6.2 Astra` is stored as requested and mapped to `openai/gpt-6.2-astra`. pi-ai will call it only when that provider and id exist in the catalog and the matching API key is set. Until then the session still exists, keeps its history, and says so when mentioned.
 
-Mention another bot by name or pubkey. The Onboarding Specialist listens to the whole channel. Other bots answer only when mentioned, and only while they are `active`.
+Mention another bot by name or pubkey. The Onboarding Specialist listens to the whole install channel. Other bots answer only when mentioned, and only while they are `active`. This holds in every channel a bot is a member of, see below.
+
+### Channels and scope
+
+A bot answers in every channel it is currently a member of, including private channels. Adding the bot to a channel from the Buzz app is the approval; removing it there stops it in that channel. Nothing else changes: the mention rules above still apply, a stopped bot stays silent, and the `post`/`read` permissions still decide what it may do. In a channel it only joined from the app, the Onboarding Specialist answers only when mentioned (`@Onboarding Specialist aprovo`), so ordinary chatter that starts with `sim` is not taken as an approval.
+
+How the daemon does it:
+
+- While the daemon runs, each active bot keeps its own connection, signed with its own key plus the owner's NIP-OA `auth` tag. The owner key cannot read private channels it is not in (the relay answers `CLOSED … restricted: not a channel member`), so each bot reads with its own key.
+- Each bot subscribes to kind 39002 with `#p` = its pubkey, plus `#d` = the channels it is in so the newer list that drops it is seen too. Only lists signed by the relay key count; that key is derived from `BUZZ_RELAY_PRIVATE_KEY` in `$YEWHOLT_HOME/relay/.env`. Per channel, only the newest list counts. Kind 9000/9001 events alone are not trusted. If the relay key is missing, the daemon logs it once and only the stored scope applies.
+- A bot's effective scope is its stored scope plus the channels those lists name. Stored records and proposals are not changed. `yewholt status` (`status.json`) shows both as `scope` and `channels`.
+- Each bot subscribes to kind 9 once per effective channel and re-subscribes when the set changes. A message seen on several connections is handled once. The channel is taken from the message's `h` tag. Replies go out on the replying bot's own connection, into that same channel.
+- Approving a create or start opens that bot's connection; approving a stop closes it. If a connection drops, the daemon restarts its relay loop and reopens every connection.
 
 ### Keys
 
@@ -193,7 +215,7 @@ None of these are required. A provider is registered only when its own credentia
 
 | Variable | Use |
 |---|---|
-| `YEWHOLT_MODEL` | Default `provider/modelId`, for example `opencode/big-pickle`. Also the harness default when no `--model` is given |
+| `YEWHOLT_MODEL` | Default `provider/modelId`, for example `opencode/big-pickle`. Used for a create request that names no model, and as the harness default when no `--model` is given |
 | `YEWHOLT_TURN_TOKENS` | Tokens charged for one interpreter turn (default 1000) |
 | `YEWHOLT_BUDGET_TOKENS` | Per-session cap (default 100000) |
 | `YEWHOLT_HOME` | State directory. The key file is `$YEWHOLT_HOME/.env` |
@@ -233,6 +255,9 @@ SQLite is opened with pi-durable's Node adapter (WAL, `synchronous=NORMAL`). The
 - NIP-OA test vector from `docs/nips/NIP-OA.md`
 - key files mode `0600` and signed kind 9 events
 - the Portuguese create example, approval, a second session, model change, and stop
+- every model phrase above, the verbatim `@Onboarding Specialist …` messages, leading-mention stripping, and the `YEWHOLT_MODEL` default for a create without a model
+- relay membership from a verbatim Buzz 0.3.0 capture (`test/fixtures/buzz-membership-20261121.json`): newest relay-signed 39002 per channel, removal, forged lists ignored, no relay key means stored scope only
+- the relay client against a loopback WebSocket stub: per-subscription routing, `unsubscribe`, `CLOSED` reasons; bot connections, re-subscription, and one-time handling of a message seen on two connections
 - a budget that blocks a second create and still allows `approve`
 - the kill -9 resume above
 - every pi-ai built-in provider registers only when its env credential resolves, including OpenCode Zen (`opencode/big-pickle`), and Claude/Codex subscription tokens do not
