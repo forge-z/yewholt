@@ -77,9 +77,13 @@ class BotLink {
   private lists = new Map<string, NostrEvent>();
   private member: ReadonlySet<string> = new Set();
   private stored: string[];
-  private readonly chat = new Set<string>();
+  /** Channel -> the exact subscription id currently open for it. */
+  private readonly chat = new Map<string, string>();
   private readonly refused = new Set<string>();
   private memberD: string[] = [];
+  private memberDId: string | undefined;
+  /** Fresh suffix per subscription, so a late CLOSED for an old REQ cannot match a live one. */
+  private counter = 0;
 
   constructor(
     readonly bot: LinkBot,
@@ -124,19 +128,21 @@ class BotLink {
 
   private refresh(): void {
     const want = this.channels();
-    for (const channel of [...this.chat]) {
+    for (const [channel, id] of [...this.chat]) {
       if (want.includes(channel)) continue;
       this.chat.delete(channel);
-      this.client.unsubscribe(`chat:${channel}`);
+      this.client.unsubscribe(id);
     }
     for (const channel of want) {
       if (this.chat.has(channel) || this.refused.has(channel)) continue;
       const filter: Record<string, unknown> = { kinds: [9], "#h": [channel] };
       const since = this.options.since?.();
       if (since) filter.since = since;
-      this.chat.add(channel);
-      this.client.subscribe(`chat:${channel}`, [filter], this.options.onEvent, () => {
+      const id = `chat:${channel}#${++this.counter}`;
+      this.chat.set(channel, id);
+      this.client.subscribe(id, [filter], this.options.onEvent, () => {
         // RelayClient already logged the reason. Do not retry until the relay lists us there.
+        if (this.chat.get(channel) !== id) return;
         this.chat.delete(channel);
         this.refused.add(channel);
       });
@@ -144,11 +150,15 @@ class BotLink {
     if (!this.options.relayPubkey) return;
     const d = want.filter((channel) => this.member.has(channel));
     if (sameList(d, this.memberD)) return;
-    if (this.memberD.length > 0) this.client.unsubscribe("members-d");
+    if (this.memberD.length > 0 && this.memberDId) this.client.unsubscribe(this.memberDId);
     this.memberD = d;
     if (d.length > 0) {
-      this.client.subscribe("members-d", [{ kinds: [MEMBER_LIST_KIND], "#d": d }], this.onList, () => {
+      const id = `members-d#${++this.counter}`;
+      this.memberDId = id;
+      this.client.subscribe(id, [{ kinds: [MEMBER_LIST_KIND], "#d": d }], this.onList, () => {
+        if (this.memberDId !== id) return;
         this.memberD = [];
+        this.memberDId = undefined;
       });
     }
   }

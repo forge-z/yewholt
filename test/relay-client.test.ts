@@ -141,6 +141,57 @@ test("RelayClient surfaces CLOSED to the subscription callback and logs it once 
   }
 });
 
+test("RelayClient ignores a relay CLOSED for an id it closed itself, even after re-subscribing", async (t) => {
+  const logged: string[] = [];
+  t.mock.method(console, "error", (...args: unknown[]) => {
+    logged.push(args.map(String).join(" "));
+  });
+  const relay = await fakeRelay();
+  const client = new RelayClient(relay.url, generateKeyPair().secret);
+  try {
+    await client.connect();
+    const closed: string[] = [];
+    const seen: string[] = [];
+    client.subscribe("x", [{ kinds: [9] }], (event) => seen.push(event.id), (id) => closed.push(id));
+    await relay.waitFor((frame) => frame[0] === "REQ" && frame[1] === "x");
+    client.unsubscribe("x");
+    await relay.waitFor((frame) => frame[0] === "CLOSE" && frame[1] === "x");
+    client.subscribe("x", [{ kinds: [9] }], (event) => seen.push(event.id), (id) => closed.push(id));
+    await relay.waitFor((frame) => frame[0] === "REQ" && frame[1] === "x" && relay.frames.filter((f) => f[0] === "REQ").length === 2);
+    // The live order from the Buzz relay: its CLOSED for our CLOSE lands after the new REQ.
+    relay.send(["CLOSED", "x", ""]);
+    relay.send(["EVENT", "x", byKind(9)]);
+    await tick();
+    assert.deepEqual(seen, [byKind(9).id], "the second handler still receives EVENTs");
+    assert.deepEqual(closed, [], "no onClosed for a CLOSED we asked for");
+    assert.deepEqual(logged, [], "our own CLOSE is not logged as a relay close");
+  } finally {
+    await client.close();
+    await relay.stop();
+  }
+});
+
+test("RelayClient still drops the handler and calls onClosed for a relay-initiated CLOSED", async (t) => {
+  t.mock.method(console, "error", () => undefined);
+  const relay = await fakeRelay();
+  const client = new RelayClient(relay.url, generateKeyPair().secret);
+  try {
+    await client.connect();
+    const closed: string[] = [];
+    const seen: string[] = [];
+    client.subscribe("never-unsubscribed", [{ kinds: [9] }], (event) => seen.push(event.id), (id) => closed.push(id));
+    await relay.waitFor((frame) => frame[0] === "REQ" && frame[1] === "never-unsubscribed");
+    relay.send(["CLOSED", "never-unsubscribed", "restricted: not a channel member"]);
+    relay.send(["EVENT", "never-unsubscribed", byKind(9)]);
+    await tick();
+    assert.deepEqual(closed, ["never-unsubscribed"]);
+    assert.deepEqual(seen, []);
+  } finally {
+    await client.close();
+    await relay.stop();
+  }
+});
+
 test("RelayClient keeps AUTH and publish OK handling", async () => {
   const relay = await fakeRelay();
   const client = new RelayClient(relay.url, generateKeyPair().secret, ["auth", "00".repeat(32), "", "00".repeat(64)]);
