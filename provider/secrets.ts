@@ -54,7 +54,8 @@ function fileCreate(path: string, value: string): string {
 }
 
 export class ProviderSecrets {
-  constructor(private readonly home = providerHome(), private readonly useKeychain = process.platform === "darwin") {}
+  constructor(private readonly home = providerHome(),
+    private readonly useKeychain = process.platform === "darwin" && process.env.YEWHOLT_PROVIDER_FILE_STORAGE !== "1") {}
 
   private get(account: string, generate?: () => string): string | undefined {
     const path = join(this.home, "secrets", account + ".json");
@@ -74,8 +75,8 @@ export class ProviderSecrets {
     return value === undefined ? undefined : fileCreate(path, value);
   }
 
-  identity(): string {
-    const value = this.get("identity", () => generateKeyPair().secret);
+  identity(create = true): string {
+    const value = this.get("identity", create ? () => generateKeyPair().secret : undefined);
     if (!value || !/^[a-f0-9]{64}$/.test(value)) throw new Error("Invalid provider identity");
     pubkeyOf(value);
     return value;

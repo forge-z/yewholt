@@ -21,14 +21,18 @@ export function syncDirectory(path: string): void {
 }
 
 export function writePrivateJson(path: string, contents: unknown): void {
+  writeAtomic(path, JSON.stringify(contents) + "\n", 0o600);
+}
+
+export function writeAtomic(path: string, contents: string, mode: number): void {
   const dir = dirname(path);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (!lstatSync(dir).isDirectory()) throw new Error("Invalid control state directory");
   const temporary = join(dir, `.${basename(path)}.${randomUUID()}.tmp`);
-  const fd = openSync(temporary, "wx", 0o600);
+  const fd = openSync(temporary, "wx", mode);
   try {
     try {
-      writeFileSync(fd, JSON.stringify(contents) + "\n");
+      writeFileSync(fd, contents);
       fsyncSync(fd);
     } finally {
       closeSync(fd);

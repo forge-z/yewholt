@@ -65,7 +65,7 @@ async function main() {
   const agent = provisioning(request.agent);
   assert.notEqual(agent.pubkey, daemonPubkey);
   const env = { PATH: process.env.PATH, HOME: home, XDG_CONFIG_HOME: join(home, "xdg"),
-    YEWHOLT_HOME: home, YEWHOLT_PROVIDER_HOME: providerHome, YEWHOLT_MODEL: "test/offline" };
+    YEWHOLT_HOME: home, YEWHOLT_PROVIDER_HOME: providerHome, YEWHOLT_PROVIDER_FILE_STORAGE: "1", YEWHOLT_MODEL: "test/offline" };
   const agentFile = join(agentsDir(home), agent.pubkey + ".json");
   const daemonLog = join(home, "daemon.log"), pidFile = join(home, "integration-daemon.pid");
   const start = "umask 077; " + [process.execPath, cli, "daemon"].map(shq).join(" ") +

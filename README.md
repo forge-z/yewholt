@@ -303,12 +303,66 @@ confirmation and the agent's kind 10100 and online kind 20001, then checks retry
 deduplication, revocation and secret-free output. The script stops its daemon.
 Remove its disposable home and stop the Phase 0 Compose stack before reusing the port.
 
+### Buzz desktop targets
+
+Run `npm run build` first. On the Mac running Buzz, install the provider and
+configure a target for each daemon:
+
+```sh
+yewholt provider install
+yewholt targets add my-vm --relay wss://relay.example --daemon <daemon-owner-pubkey> --label "My VM"
+yewholt targets add my-mac --local --label "This Mac"
+yewholt targets list
+yewholt targets doctor my-vm     # omit the ID to check all targets
+```
+
+Use lowercase target IDs containing letters, digits, hyphens or underscores,
+starting with a letter or digit. The CLI writes each target file with mode
+`0600` and creates an executable `buzz-backend-yewholt-<id>` in
+`~/.local/bin`. Buzz discovers those shims and shows the labels as provider
+names. Use `YEWHOLT_PROVIDER_BIN_DIR` to override the bin directory (e.g. for
+tests). The shims call a single `yewholt-provider-engine` entry that points
+to the built checkout and installed Node executable. Run `provider install`
+again after moving either. An existing entry not managed by Yewholt is not
+overwritten.
+
+`provider install` and `yewholt pair` print the same provider public key.
+Admit it to the relay and run `yewholt pair add <providerPubkey> --label "My Mac"`
+on each remote daemon. The daemon's existing `pair add/list/remove` commands
+are unchanged.
+
+For remote targets, optionally append one of:
+
+```text
+--wake command --cmd '/path/to/trusted-wake-script'
+--wake instabox --account acc_example --machine m_example
+```
+
+Store InstaBox credentials separately in Keychain or the private fallback
+file described below; don't pass them as CLI arguments. For disposable tests
+on macOS, `YEWHOLT_PROVIDER_FILE_STORAGE=1` opts out of the real Keychain; set
+`YEWHOLT_PROVIDER_HOME` to a disposable directory too.
+
+`targets list` reports the last recorded confirmation, deploy and failure,
+and counts distinct agent pubkeys successfully deployed **from this provider**.
+It is not a live count and does not decrease on daemon shutdown. For relay targets,
+`doctor` tests the WebSocket connection and NIP-42 authentication, reports
+connect-plus-auth latency, and marks confirmations from the last ten minutes as
+recent pairing evidence. Control v1 has no ping or version query; an
+authenticated relay connection or a prior confirmation does not prove the daemon
+is online or still paired. Local diagnostics use the daemon PID file.
+Non-secret evidence is stored under the provider config directory's `status/`.
+
+`yewholt targets remove my-vm` removes only that target file and shim. Moving
+an agent in Buzz by choosing a different **Run on** target does not stop its
+old daemon instance; shut down or remove that provisioning separately.
+
 ### Buzz backend provider engine
 
 Build with `npm run build`, then invoke `node dist/provider/engine.js <targetId>`.
 The engine reads one JSON object to EOF and emits exactly one JSON object on
-stdout. An error also exits nonzero. No shims or target-management commands
-are installed by the engine.
+stdout. An error also exits nonzero. The engine itself does not install
+entries or manage targets; the CLI does that.
 
 ```sh
 printf '%s\n' '{"op":"info","request_id":"302444a9-c561-47a5-b6b4-34be8f9b894c"}' |
@@ -316,7 +370,8 @@ printf '%s\n' '{"op":"info","request_id":"302444a9-c561-47a5-b6b4-34be8f9b894c"}
 node dist/provider/engine.js my-vm < /path/to/private-deploy.json
 ```
 
-`info` reports protocol version 1 without opening any target or secret. The
+`info` reports protocol version 1 without opening any target or secret. When
+invoked by a generated shim, it uses that shim's public display label. The
 engine has no app-set configuration fields: use `"provider_config": {}` in
 `deploy`, along with a lowercase UUID `request_id` and the Buzz `agent` package.
 The package's own `private_key_nsec` (NIP-19 nsec or 64 hex), signed `auth_tag`,
@@ -415,6 +470,17 @@ daemon stopped (allow at least 120 seconds). An optional fourth argument
 accepts a file containing a complete Buzz-shaped deploy request using the
 disposable loopback relay and an agent attested by an admitted owner. Use only
 disposable identities; remove the printed home after the script stops the daemon.
+
+To exercise the CLI and installed shim against the same disposable relay:
+
+```sh
+node dist/test/spike-provider-cli.js ws://127.0.0.1:13000 "$spike_home/owner.key" \
+  yewholt-phase0-relay-1
+```
+
+The script installs into a disposable home, pairs and admits the provider,
+deploys an app-shaped package through the generated shim, and verifies active
+status, `list`, `doctor` and removal without removing the agent file.
 
 ### Coding bots (`code`)
 

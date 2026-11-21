@@ -26,6 +26,13 @@ main().catch((error: unknown) => {
 
 async function main(): Promise<void> {
   const target = route(args);
+  if (target.kind === "command") {
+    const { command, args } = target;
+    if (command === "provider" || command === "targets" || (command === "pair" && !args.length)) {
+      const { providerCommand } = await import("../provider/cli.js");
+      return providerCommand(command, args);
+    }
+  }
   // Harness arguments belong to pi, so `--home` is read only for Yewholt's own commands.
   const home = (target.kind === "harness" ? undefined : flag("--home")) ?? yewholtHome();
   loadEnvFile(home);
