@@ -32,6 +32,16 @@ export function memberChannels(events: Iterable<NostrEvent>, botPubkey: string, 
   return new Set(channels.sort());
 }
 
+/** Two distinct members on the newest trusted list make a direct conversation. */
+export function directChannels(events: Iterable<NostrEvent>, botPubkey: string, relayPubkey: string | null): Set<string> {
+  const channels: string[] = [];
+  for (const [channel, event] of newestMemberLists(events, relayPubkey)) {
+    const members = new Set(event.tags.filter((tag) => tag[0] === "p" && tag[1]).map((tag) => tag[1]));
+    if (members.size === 2 && members.has(botPubkey)) channels.push(channel);
+  }
+  return new Set(channels.sort());
+}
+
 /** Stored scope first, then member channels not already in it. Stored records are not changed. */
 export function effectiveScope(stored: readonly string[], member: ReadonlySet<string> | undefined): string[] {
   const out = [...new Set(stored)];

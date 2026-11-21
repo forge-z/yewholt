@@ -45,11 +45,15 @@ export function ownerAuthTag(ownerSecretHex: string, agentPubkey: string, condit
 
 /** Verify a NIP-OA tag against an event pubkey and created_at. Returns the owner pubkey or null. */
 export function verifyAuthTag(tag: readonly string[], eventPubkey: string, createdAt: number, kind: number): string | null {
+  return authConditionsMatch(tag[2] ?? "", createdAt, kind) ? verifyAuthSignature(tag, eventPubkey) : null;
+}
+
+/** Verify the delegation itself. A consumer of a particular event also checks its conditions. */
+export function verifyAuthSignature(tag: readonly string[], eventPubkey: string): string | null {
   if (tag.length !== 4 || tag[0] !== "auth") return null;
   const [, owner, conditions, sig] = tag;
   if (!owner || !sig || owner === eventPubkey) return null;
   if (!/^[0-9a-f]{64}$/.test(owner) || !/^[0-9a-f]{128}$/.test(sig)) return null;
-  if (!authConditionsMatch(conditions ?? "", createdAt, kind)) return null;
   const preimage = `nostr:agent-auth:${eventPubkey}:${conditions ?? ""}`;
   const digest = sha256(text.encode(preimage));
   const ok = schnorr.verify(hexToBytes(sig), digest, hexToBytes(owner));

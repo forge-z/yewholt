@@ -2,13 +2,16 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
+import { AgentFiles, PRESENCE, agentStatuses, type AgentDiagnostics, type AgentScan } from "./agents.js";
 import { loadConfig, saveConfig, type YewholtConfig } from "./config.js";
 import { WorkspaceIsolation } from "./isolation.js";
 import { readKey } from "./keys.js";
 import { BotLinks, Inbox, publishAll } from "./bridge.js";
 import { accepted, RelayClient } from "./nostr-client.js";
-import { ownerAuthTag, pubkeyOf, signEvent } from "./nostr.js";
-import { botKeyPath, ownerKeyPath, pidPath, sqlitePath, statusPath } from "./paths.js";
+import { ownerAuthTag, pubkeyOf, signEvent, type NostrEvent } from "./nostr.js";
+import { defaultModel } from "./models.js";
+import { ownerKeyPath, pidPath, sqlitePath, statusPath } from "./paths.js";
+import type { BotRecord } from "./registry.js";
 import { createChannelTags, readRelayPubkey } from "./relay.js";
 import { ensureOwnerKey, Yewholt } from "./session.js";
 
@@ -35,13 +38,31 @@ export async function runDaemon(home: string): Promise<void> {
   ensureOwnerKey(home);
   const session = await Yewholt.open(await openNodeSqliteStorage(sqlitePath(home)), { home, isolation });
   const ownerSecret = readKey(ownerKeyPath(home));
-  // Code bots' turns a previous process left open (for example a call parked on an approval)
-  // continue here; their replies reach the relay through the outbox listener set in serve().
-  void session.resumeTurns().catch((error: unknown) => console.error("resume:", error instanceof Error ? error.message : error));
   try {
+    const files = new AgentFiles(home, {
+      relayUrl: loadConfig(home).relayUrl,
+      model: defaultModel() ?? { provider: "", modelId: "", label: "unset" },
+    });
+    let latest: AgentDiagnostics | undefined;
+    let pending: AgentScan | null = null;
+    const reconcile = async () => {
+      pending = files.poll() ?? pending;
+      if (!pending) return false;
+      await session.reconcileAgents(pending);
+      latest = { invalid: pending.invalid, unavailable: pending.unavailable };
+      pending = null;
+      return true;
+    };
+    let resumed = false;
     while (!stopping) {
       try {
-        await serve(home, session, ownerSecret);
+        await reconcile();
+        if (!resumed) {
+          resumed = true;
+          // Reattach to durable turns after their external keys and stop states are reconciled.
+          void session.resumeTurns().catch((error: unknown) => console.error("resume:", error instanceof Error ? error.message : error));
+        }
+        await serve(home, session, ownerSecret, reconcile, () => latest);
       } catch (error) {
         console.error("relay loop:", error instanceof Error ? error.message : error);
         await sleep(2000);
@@ -53,13 +74,19 @@ export async function runDaemon(home: string): Promise<void> {
   }
 }
 
-async function serve(home: string, session: Yewholt, ownerSecret: string): Promise<void> {
+async function serve(
+  home: string, session: Yewholt, ownerSecret: string,
+  reconcile: () => Promise<boolean>, agentDiagnostics: () => AgentDiagnostics | undefined,
+): Promise<void> {
   const config = loadConfig(home);
-  await writeStatus(home, session, config.relayUrl, config.channelId);
+  await writeStatus(home, session, config, agentDiagnostics());
   const owner = new RelayClient(config.relayUrl, ownerSecret);
-  let links: BotLinks | undefined;
-  await owner.connect();
+  let links: BotLinks<BotRecord> | undefined;
+  let work = Promise.resolve();
+  let serving = true;
+  const drain = (phase: OutboxPhase) => publishOutbox(session, ownerSecret, owner, links, config, phase);
   try {
+    await owner.connect();
     if (!config.channelId) {
       const channelId = randomUUID();
       const created = signEvent(ownerSecret, 9007, "", createChannelTags(channelId, config.channelName));
@@ -70,62 +97,120 @@ async function serve(home: string, session: Yewholt, ownerSecret: string): Promi
     }
     const channelId = config.channelId;
     await session.ensureOnboarding(channelId);
-    await publishOutbox(home, session, ownerSecret, owner, links, config);
     let highWater = (await session.snapshot()).highWater;
-    const botLinks = new BotLinks({
+    const botLinks = new BotLinks<BotRecord>({
       relayPubkey: relayKey(home),
       since: () => highWater || undefined,
-      open: (bot) => openBot(home, ownerSecret, config.relayUrl, bot.pubkey),
+      open: (bot) => openBot(session, ownerSecret, config.relayUrl, bot),
       onEvent: (event) => inbox.accept(event),
-      onMembership: (pubkey, channels) => session.setMemberChannels(pubkey, channels),
+      onMembership: (pubkey, channels, direct) => session.setMemberChannels(pubkey, channels, direct),
+      onDisconnect: (pubkey) => session.agentDisconnected(pubkey),
     });
     links = botLinks;
-    const sync = async () => {
-      const state = await session.snapshot();
-      highWater = state.highWater;
-      await botLinks.sync(state.bots);
+    let nextRetry = performance.now() + 2000;
+    const maintain = (requestedSync: boolean, poll = false) => {
+      if (!serving) return Promise.resolve();
+      const run = work.then(async () => {
+        const changed = poll && await reconcile();
+        let retry = false;
+        if (poll && performance.now() >= nextRetry) {
+          nextRetry = performance.now() + 2000;
+          retry = (await session.snapshot()).bots.some((bot) => bot.external);
+        }
+        const sync = requestedSync || changed || retry;
+        if (sync) {
+          // Finish local identity events and external offline events before changing links.
+          await drain("before-sync");
+          const state = await session.snapshot();
+          highWater = state.highWater;
+          await botLinks.sync(state.bots);
+        }
+        // This also runs without incoming messages, on the normal daemon tick.
+        const queued = await session.refreshAgentRuntime(botLinks.connectedAgents());
+        if (sync || queued) await drain("connected-agents");
+        if (sync || queued) await writeStatus(home, session, config, agentDiagnostics(), botLinks);
+      });
+      work = run.catch(() => undefined);
+      return run;
     };
     // One inbox for every connection: a message seen by several bots is handled once.
     // The channel comes from the event's h tag.
     const inbox = new Inbox((message) => {
+      if (!serving) return;
       void session
         .handleHuman(message)
-        .then(() => publishOutbox(home, session, ownerSecret, owner, links, config))
-        .then(sync)
-        .then(() => writeStatus(home, session, config.relayUrl, channelId, links))
+        .then(() => maintain(true))
         .catch((error: unknown) => console.error("turn:", error instanceof Error ? error.message : error));
     });
-    await sync();
-    await writeStatus(home, session, config.relayUrl, channelId, links);
+    await maintain(true);
     // Approval requests and resumed code turns commit outside a chat message's handling.
     session.setOutboxListener(() => {
-      void publishOutbox(home, session, ownerSecret, owner, links, config)
-        .then(() => writeStatus(home, session, config.relayUrl, channelId, links))
+      void maintain(true)
         .catch((error: unknown) => console.error("outbox:", error instanceof Error ? error.message : error));
     });
     owner.subscribe("channel", [{ kinds: [9], "#h": [channelId] }], inbox.accept);
     while (!stopping && owner.isOpen()) {
       const lost = botLinks.lost();
       if (lost) throw new Error(`bot connection lost: ${lost.name}`);
+      await maintain(false, true);
       await sleep(500);
     }
   } finally {
+    serving = false;
     session.setOutboxListener(undefined);
-    await links?.closeAll();
-    await owner.close();
+    try {
+      await work;
+      if (stopping && links) {
+        await session.offlineAgents(links.connectedAgents());
+        await drain("offline");
+        await writeStatus(home, session, config, agentDiagnostics());
+      }
+    } finally {
+      await links?.closeAll();
+      await owner.close();
+    }
   }
 }
 
-/** A bot's own NIP-42 connection: its key plus the owner's unconstrained NIP-OA tag. */
-async function openBot(home: string, ownerSecret: string, relayUrl: string, pubkey: string): Promise<RelayClient> {
-  const client = new RelayClient(relayUrl, readKey(botKeyPath(home, pubkey)), ownerAuthTag(ownerSecret, pubkey, ""));
+/** A bot's own NIP-42 connection and its owner's delegation. */
+async function openBot(session: Yewholt, ownerSecret: string, relayUrl: string, bot: BotRecord): Promise<RelayClient> {
+  const authTag = bot.authTag ?? ownerAuthTag(ownerSecret, bot.pubkey, "");
+  const client = bot.external
+    ? new ExternalRelayClient(bot.relayUrl ?? relayUrl, session.botSecret(bot), authTag)
+    : new RelayClient(relayUrl, session.botSecret(bot), authTag);
   try {
-    await client.connect();
+    if (bot.external) await agentRelayDeadline(client.connect());
+    else await client.connect();
   } catch (error) {
     await client.close();
+    if (bot.external) throw new Error("external agent relay authentication failed");
     throw error;
   }
   return client;
+}
+
+class ExternalRelayClient extends RelayClient {
+  override async publish(event: NostrEvent) {
+    try {
+      const result = await agentRelayDeadline(super.publish(event));
+      return accepted(result) ? { ok: true, message: "" } : { ok: false, message: "external agent event rejected" };
+    } catch {
+      await this.close();
+      return { ok: false, message: "external agent relay did not acknowledge event" };
+    }
+  }
+}
+
+async function agentRelayDeadline<T>(operation: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("external agent relay timed out")), 5000); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 let relayKeyWarned = false;
@@ -141,40 +226,52 @@ function relayKey(home: string): string | null {
   return null;
 }
 
-/**
- * Drain the outbox. Each event goes out on its signer's own connection: the owner's,
- * or the bot's persistent link. A bot without a link (just created, or stopped) gets
- * a temporary connection, as before.
- */
+type OutboxPhase = "before-sync" | "connected-agents" | "offline";
+
+/** Publish local traffic and offline presence before link changes, then traffic on active external links. */
 async function publishOutbox(
-  home: string,
   session: Yewholt,
   ownerSecret: string,
   owner: RelayClient,
-  links: BotLinks | undefined,
+  links: BotLinks<BotRecord> | undefined,
   config: YewholtConfig,
+  phase: OutboxPhase,
 ): Promise<void> {
   const state = await session.snapshot();
   const ownerPubkey = pubkeyOf(ownerSecret);
+  const bots = new Map(state.bots.map((bot) => [bot.pubkey, bot]));
+  const pendingOffline = new Set(state.outbox.filter((event) => event.kind === PRESENCE && event.content === "offline").map((event) => event.pubkey));
+  const events = state.outbox.filter((event) => {
+    const bot = bots.get(event.pubkey);
+    const offline = event.kind === PRESENCE && event.content === "offline";
+    if (!bot?.external) return phase === "before-sync";
+    if (!session.hasAgentKey(bot.pubkey)) return false;
+    if (phase !== "connected-agents") return offline;
+    return !pendingOffline.has(bot.pubkey) && bot.status === "active" && links?.client(bot.pubkey)?.isOpen() === true;
+  });
+  if (events.length === 0) return;
   const acked = await publishAll(
-    state.outbox,
+    events,
     ownerPubkey,
     (pubkey) => (pubkey === ownerPubkey ? owner : links?.client(pubkey)),
     async (pubkey) => {
       if (pubkey === ownerPubkey) throw new Error("owner connection is closed");
-      return openBot(home, ownerSecret, config.relayUrl, pubkey);
+      const bot = bots.get(pubkey);
+      if (!bot) throw new Error("bot record unavailable");
+      return openBot(session, ownerSecret, config.relayUrl, bot);
     },
   );
   await session.ackOutbox(acked);
 }
 
-async function writeStatus(home: string, session: Yewholt, relayUrl: string, channelId: string | null, links?: BotLinks): Promise<void> {
+async function writeStatus(home: string, session: Yewholt, config: YewholtConfig, diagnostics?: AgentDiagnostics, links?: BotLinks<BotRecord>): Promise<void> {
   const state = await session.snapshot();
   const body = {
     pid: process.pid,
     isolation: session.isolationStatus(),
-    relayUrl,
-    channelId,
+    relayUrl: config.relayUrl,
+    channelId: config.channelId,
+    agents: agentStatuses(state.bots, diagnostics),
     bots: state.bots.map((bot) => ({
       name: bot.name,
       pubkey: bot.pubkey,

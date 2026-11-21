@@ -45,6 +45,7 @@ yewholt daemon ──NIP-42 client─────────┘
 - **Daemon.** A Node process. It opens one pi-durable `Harness` on a SQLite file and calls `resume()` after every start, so a crashed run continues from the last committed step.
 - **Bot.** One ownerless pi-durable conversation (its own instructions, model, and transcript) plus its own Nostr key. The Onboarding Specialist is the first bot, not a router.
 - **Bridge.** The daemon authenticates to the relay with NIP-42, like any other client. It reads kind 9 channel messages and publishes kind 9 replies, kind 0 profiles, and the membership events below. It does not embed the relay.
+- **Buzz agent provisioning.** `src/agents.ts` reads and validates provider-written files for agents created in the Buzz desktop app. The daemon reconciles those files with the durable bot registry and publishes the agents' runtime profile and presence.
 
 ### What the wire uses
 
@@ -139,6 +140,28 @@ How the daemon does it:
 - A bot's effective scope is its stored scope plus the channels those lists name. Stored records and proposals are not changed. `yewholt status` (`status.json`) shows both as `scope` and `channels`.
 - Each bot subscribes to kind 9 once per effective channel and re-subscribes when the set changes. A message seen on several connections is handled once. The channel is taken from the message's `h` tag. Replies go out on the replying bot's own connection, into that same channel.
 - Approving a create or start opens that bot's connection; approving a stop closes it. If a connection drops, the daemon restarts its relay loop and reopens every connection.
+
+### Agents created in the Buzz desktop app
+
+The Buzz desktop app creates and owns these agents. Its backend provider runs on the owner's Mac and writes one file over SSH to `$YEWHOLT_HOME/agents/<agent-pubkey>.json` on the daemon host. The provider sets mode `0600` and replaces the file atomically. The provider holds the agent's `nsec` by design because it provisions the runtime that signs as that agent. Yewholt loads that key from the provisioning file into memory and keeps it out of the bot registry, status output, and agent key files.
+
+| Field | Value |
+|---|---|
+| `name` | Required nonempty agent name. |
+| `nsec` | Required agent secret key as 64 lowercase hex digits. Its public key must match the filename. |
+| `authTag` | Required `["auth", "<owner pubkey>", "<conditions>", "<Schnorr signature>"]`. The owner's key must differ from the agent's. The signature covers `sha256("nostr:agent-auth:<agent pubkey>:<conditions>")`. |
+| `relayUrl` | WebSocket relay URL. Defaults to the daemon's relay URL. |
+| `model` | Object with `provider`, `modelId`, and `label`. Defaults to the daemon model configured by `YEWHOLT_MODEL`. |
+| `permissions` | String array. Defaults to `["post", "read"]`. Add `"code"` to give the agent the coding tools and workspace described below. |
+| `respondTo` | DM response policy. Defaults to `"anyone"`. |
+| `respondToAllowlist` | Array of lowercase hex user public keys for the `"allowlist"` policy. Defaults to `[]`. |
+| `channelId` | Optional first channel. Relay membership adds channels to this starting scope. |
+
+Buzz publishes the kind 0 profile with its NIP-OA tag, kind 30175 persona, kind 30177 registration, and kind 9030 and 9000 membership events. Yewholt signs in as the agent with the supplied auth tag and publishes its kind 10100 runtime profile, kind 20001 presence, and kind 9 replies. It sends the profile and online presence after connecting, then refreshes them every 10 minutes and 60 seconds, respectively.
+
+Yewholt recognizes a DM when the newest trusted kind 39002 member list contains exactly two distinct members. An external agent can answer a human DM without a mention. The `anyone` policy accepts any human sender, `allowlist` accepts listed public keys, and other policies refuse the DM. In a group channel, address the agent with an `@mention`. Daemon-created member bots still require an `@mention` in every channel.
+
+The Buzz owner can stop an external agent with a message containing exactly `!shutdown` after trimming whitespace. Yewholt queues offline presence and closes the agent's subscriptions. The provider can restart it by replacing the file with a valid copy whose modification time is newer than the stop. A removed file retires the durable record and triggers offline presence when the daemon has the loaded key. Run `yewholt status` or read `status.json` to see each agent's active, stopped, retired, or invalid state.
 
 ### Coding bots (`code`)
 

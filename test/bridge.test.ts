@@ -261,6 +261,48 @@ test("bot link: a dropped bot connection is reported so serve can restart", asyn
   assert.equal(h.links.lost()?.pubkey, CODER);
 });
 
+test("external bot link forwards its auth record, tracks DM changes, and reconnects on relay changes", async () => {
+  const direct = new Map<string, string[]>();
+  const opened: LinkBot[] = [];
+  const clients: FakeClient[] = [];
+  const links = new BotLinks({
+    relayPubkey: RELAY,
+    open: async (bot) => {
+      opened.push(bot);
+      const client = new FakeClient(bot.pubkey);
+      clients.push(client);
+      return client;
+    },
+    onEvent: () => undefined,
+    onMembership: (pubkey, _channels, DMs) => direct.set(pubkey, [...DMs]),
+  });
+  const bot = { ...coderBot, external: true as const, relayUrl: "wss://first.invalid", authTag: ["auth", OWNER, "", "fixture"] };
+  await links.sync([bot]);
+  assert.equal(opened[0], bot);
+  assert.deepEqual(links.connectedAgents(), [CODER]);
+  const client = clients[0]!;
+  const base = byKind(39002, PRIVATE);
+  const dm = { ...base, tags: [["d", PRIVATE], ["p", CODER], ["p", OWNER]] };
+  client.emit("members", dm);
+  assert.deepEqual(direct.get(CODER), [PRIVATE]);
+  client.emit(client.id("members-d")!, { ...dm, tags: [...dm.tags, ["p", "ab".repeat(32)]], created_at: dm.created_at + 1 });
+  assert.deepEqual(direct.get(CODER), []);
+  assert.ok(client.has(`chat:${PRIVATE}`));
+
+  client.open = false;
+  assert.equal(links.lost(), undefined);
+  await links.sync([bot]);
+  assert.equal(client.closed, true);
+  assert.deepEqual(links.connectedAgents(), [CODER]);
+  const reconfigured = { ...bot, relayUrl: "wss://second.invalid" };
+  await links.sync([reconfigured]);
+  assert.equal(clients[1]?.closed, true);
+  assert.equal(opened[2], reconfigured);
+  await links.sync([{ ...reconfigured, status: "stopped" }]);
+  assert.deepEqual(links.connectedAgents(), []);
+  assert.equal(clients[2]?.closed, true);
+});
+
 test("publishAll: each event goes out on its signer's own connection, owner first, temporary links closed", async () => {
   const owner = new FakeClient(OWNER);
   const coder = new FakeClient(CODER);
