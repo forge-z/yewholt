@@ -172,9 +172,9 @@ export class AgentFiles {
     private readonly now: () => number = () => performance.now(),
   ) {}
 
-  poll(): AgentScan | null {
+  poll(force = false): AgentScan | null {
     const now = this.now();
-    if (now < this.nextPoll) return null;
+    if (!force && now < this.nextPoll) return null;
     this.nextPoll = now + 2000;
     let stamp: string;
     try {
@@ -183,7 +183,7 @@ export class AgentFiles {
     } catch {
       stamp = "unavailable";
     }
-    if (stamp === this.stamp) return null;
+    if (!force && stamp === this.stamp) return null;
     const scan = listAgents(this.home, this.defaults);
     // Retry directory errors even when the directory's mtime has not changed.
     this.stamp = scan.unavailable ? undefined : stamp;

@@ -209,6 +209,23 @@ export class Yewholt {
     return this.agentKeys.has(pubkey);
   }
 
+  async forgetRemovedAgent(pubkey: string): Promise<void> {
+    this.agentKeys.delete(pubkey);
+    await this.harness.commit(async (tx) => {
+      const reg = await tx.doc(RegistryDoc);
+      reg.outbox = reg.outbox.filter((event) => event.pubkey !== pubkey);
+    }, ctx);
+  }
+
+  async updateHostedName(pubkey: string, name: string): Promise<void> {
+    await this.harness.commit(async (tx) => {
+      const reg = await tx.doc(RegistryDoc);
+      const bot = reg.bots.find((item) => item.external && item.pubkey === pubkey);
+      if (bot) bot.name = name;
+    }, ctx);
+    this.agentRuntime.delete(pubkey);
+  }
+
   reconcileAgents(scan: AgentScan): Promise<void> {
     const run = this.agentReconcile.then(() => this.applyAgentFiles(scan));
     this.agentReconcile = run.catch(() => undefined);
@@ -1274,4 +1291,3 @@ export function chmodHome(home: string): void {
     // installed later
   }
 }
-

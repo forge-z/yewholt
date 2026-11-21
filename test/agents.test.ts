@@ -328,6 +328,22 @@ test("owner shutdown is durable, requires newer provisioning, and cannot be repl
   });
 });
 
+test("hosted profile rename does not reactivate a stopped external agent", async () => {
+  await withAgent(async (f, session) => {
+    f.write({ channelId: PRIVATE });
+    await reconcile(f, session);
+    await session.handleHuman(say("owner-stop", "!shutdown", f.owner.pubkey));
+    const before = (await session.snapshot()).bots[0]!;
+    assert.equal(before.status, "stopped");
+    await session.updateHostedName(before.pubkey, "New hosted name");
+    const after = (await session.snapshot()).bots[0]!;
+    assert.equal(after.name, "New hosted name");
+    assert.equal(after.status, "stopped");
+    assert.equal(after.agentFileVersion, before.agentFileVersion);
+    assert.equal(after.stoppedFileVersion, before.stoppedFileVersion);
+  });
+});
+
 test("stranger shutdown is ignored and logged once", async (t) => {
   const log = t.mock.method(console, "error", () => undefined);
   await withAgent(async (f, session) => {

@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 import { fileURLToPath } from "node:url";
 import { record } from "../src/control-files.js";
-import { controlEvent, isRequestId } from "../src/control-protocol.js";
+import { controlEvent, isRequestId, type ControlType } from "../src/control-protocol.js";
+import type { NostrEvent } from "../src/nostr.js";
 import { deployLocal } from "./local.js";
 import { provisioning } from "./package.js";
 import { waitForConfirmation, type RelayWait } from "./relay.js";
 import { ProviderSecrets } from "./secrets.js";
 import { recordOutcome } from "./status.js";
-import { loadTarget, validId, type Wake } from "./target.js";
+import { loadTarget, validId, type Target, type Wake } from "./target.js";
 import { runWake } from "./wake.js";
 
 const WINDOW_MS = 120_000;
@@ -30,6 +31,26 @@ type Services = {
 };
 
 const fail = (error: string) => ({ ok: false as const, error });
+
+export async function sendControl(target: Extract<Target, { transport: "relay" }>, secret: string,
+  op: Exclude<ControlType, "confirmation">, requestId: string, agentPubkey: string, body: unknown,
+  services: Pick<Services, "wait" | "wake">, event?: NostrEvent) {
+  event ??= controlEvent(secret, target.daemonPubkey, op, { requestId, agentPubkey }, body);
+  const wait = () => services.wait(target, secret, event!, requestId, agentPubkey, WINDOW_MS);
+  let result = await wait();
+  let wakeFailed = false;
+  if (result === "timeout") {
+    if (target.wake) {
+      try {
+        await services.wake(target.wake, requestId, WINDOW_MS);
+      } catch {
+        wakeFailed = true;
+      }
+    }
+    result = await wait();
+  }
+  return { result, wakeFailed };
+}
 
 export async function handle(targetId: unknown, input: unknown, overrides?: Partial<Services>) {
   if (!record(input) || !isRequestId(input.request_id)) return fail("Invalid request");
@@ -67,20 +88,7 @@ export async function handle(targetId: unknown, input: unknown, overrides?: Part
       return success;
     }
     const secret = services.identity();
-    const event = controlEvent(secret, target.daemonPubkey, "deploy", { requestId, agentPubkey: agent.pubkey }, agent.file);
-    const wait = () => services.wait(target, secret, event, requestId, agent.pubkey, WINDOW_MS);
-    let result = await wait();
-    let wakeFailed = false;
-    if (result === "timeout") {
-      if (target.wake) {
-        try {
-          await services.wake(target.wake, requestId, WINDOW_MS);
-        } catch {
-          wakeFailed = true;
-        }
-      }
-      result = await wait();
-    }
+    const { result, wakeFailed } = await sendControl(target, secret, "deploy", requestId, agent.pubkey, agent.file, services);
     if (result === "confirmed") {
       services.report(targetId, target, { pubkey: agent.pubkey });
       return success;

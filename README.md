@@ -303,7 +303,68 @@ confirmation and the agent's kind 10100 and online kind 20001, then checks retry
 deduplication, revocation and secret-free output. The script stops its daemon.
 Remove its disposable home and stop the Phase 0 Compose stack before reusing the port.
 
-### Buzz desktop targets
+### Buzz 1.0.6: Yewholt remote agents
+
+Buzz Desktop 1.0.6 no longer discovers `buzz-backend-*` programs. Instead, the
+Yewholt plugin registers a remote harness through the app's agent API. Update
+the paired daemon to this version first. On the Mac, use Node ≥22.19.0 to
+build the checkout and run `yewholt provider install` (or
+`node dist/src/cli.js provider install`). No Docker or daemon is needed on the Mac.
+Keep the checkout and Node executable in place; reinstall the provider after
+moving either.
+
+1. Keep the existing relay target and pairing, or create one with the
+   commands below. Open that same relay as a community in Buzz. A daemon
+   that uses loopback for that relay does not have to change its configuration.
+2. In Buzz, open **Settings → Plugins → Manage plugins → Add → Browse**.
+   Pick the directory printed as `Buzz plugin folder:` (by default
+   `~/.config/yewholt/buzz-plugin`). Review and approve the declared
+   `yewholt-buzz-bridge` process. The plugin is trusted app code.
+3. On that community, create an agent with **Harness → Remote → Yewholt** and
+   select the relay target (e.g. `instabox`). Code execution is opt-in and
+   still requires the daemon's Linux isolation and existing approval rules.
+   The daemon supplies the model, and direct replies are limited to the
+   attested owner by default. The existing DM and mention flow still depends
+   on relay admission and channel membership.
+4. Compare the agent pubkey with `yewholt agents list` on the daemon. Edit
+   name and picture in Buzz, or delete the agent there before removing its
+   target. Editing does not restart a stopped agent. The daemon continues
+   publishing runtime/presence kinds `10100` and `20001`; Buzz 1.0.6
+   classifies hosted agents by type, so its UI is not a daemon heartbeat.
+
+The bridge reserves a private identity on the Mac until activation is
+confirmed, then retains only the non-secret binding and owner proof under
+`hosted/` in the provider directory. It sends the key to the paired daemon
+over encrypted kind `1059`; plugin JavaScript receives only the public
+identity. Keep that Mac's provider state to manage the agent later; Buzz does
+not supply a target or agent secret for edits and removal. The bridge reuses
+the provider identity and wake hooks. The daemon publishes a kind `0` profile
+carrying Buzz's NIP-OA owner attestation; Buzz writes its own agent listing.
+Removal unlinks provisioning, retires the runtime, clears its in-process
+signing key, and writes a durable tombstone under
+`$YEWHOLT_HOME/state/hosted-agents/`. Backups made before removal can still
+contain the key; do not restore them over a running installation.
+
+| Component | Status for Buzz 1.0.6 | Action |
+| --- | --- | --- |
+| Phase 0 relay and encrypted kind `1059`; Phase 1 daemon pairing | Reused | Same relay, fail-closed provider allowlist, and confirmation channel; new hosted operation types. |
+| PR #8 agent provisioning, isolation, chat and `!shutdown` | Adapted | Same private agent files and runtime; hosted profiles and tombstones are separate so profile edits do not reactivate stopped agents. |
+| Phase 2 provider transport, Keychain and wake | Reused | Shared by the bridge and legacy engine. |
+| Phase 2 `info`/`deploy` JSON contract and older Buzz `docs/remote-agents.md` | Legacy | Still supported for earlier Buzz builds and direct provider callers; not the 1.0.6 plugin contract. |
+| Phase 3 target files, `targets list/doctor`, and `pair` | Reused | The plugin selects relay targets; `doctor` supplies historical confirmation evidence, not a live daemon probe. |
+| Phase 3 `buzz-backend-*` shims and `--local` | Legacy for Buzz UI | Still installed and usable in the old provider flow; the 1.0.6 plugin uses the new bridge and lists only relay targets. |
+
+For an opt-in check against the disposable loopback Phase 0 relay:
+
+```sh
+node dist/test/spike-hosted-provider.js ws://127.0.0.1:13000 "$spike_home/owner.key" yewholt-phase0-relay-1
+```
+
+This exercises the installed bridge, daemon, and relay, not the Mac UI. It
+uses a new daemon home (printed on stdout) and adds, then removes, its
+temporary provider member. Do not use it against an existing community.
+
+### Configure Buzz desktop targets
 
 Run `npm run build` first. On the Mac running Buzz, install the provider and
 configure a target for each daemon:
@@ -318,9 +379,9 @@ yewholt targets doctor my-vm     # omit the ID to check all targets
 
 Use lowercase target IDs containing letters, digits, hyphens or underscores,
 starting with a letter or digit. The CLI writes each target file with mode
-`0600` and creates an executable `buzz-backend-yewholt-<id>` in
-`~/.local/bin`. Buzz discovers those shims and shows the labels as provider
-names. Use `YEWHOLT_PROVIDER_BIN_DIR` to override the bin directory (e.g. for
+`0600` and creates a legacy executable `buzz-backend-yewholt-<id>` in
+`~/.local/bin`. Earlier Buzz builds discover those shims. Use
+`YEWHOLT_PROVIDER_BIN_DIR` to override the bin directory (e.g. for
 tests). The shims call a single `yewholt-provider-engine` entry that points
 to the built checkout and installed Node executable. Run `provider install`
 again after moving either. An existing entry not managed by Yewholt is not
@@ -345,7 +406,7 @@ on macOS, `YEWHOLT_PROVIDER_FILE_STORAGE=1` opts out of the real Keychain; set
 
 `targets list` reports the last recorded confirmation, deploy and failure,
 and counts distinct agent pubkeys successfully deployed **from this provider**.
-It is not a live count and does not decrease on daemon shutdown. For relay targets,
+It is not a live count and does not decrease on shutdown or deletion. For relay targets,
 `doctor` tests the WebSocket connection and NIP-42 authentication, reports
 connect-plus-auth latency, and marks confirmations from the last ten minutes as
 recent pairing evidence. Control v1 has no ping or version query; an
@@ -353,11 +414,10 @@ authenticated relay connection or a prior confirmation does not prove the daemon
 is online or still paired. Local diagnostics use the daemon PID file.
 Non-secret evidence is stored under the provider config directory's `status/`.
 
-`yewholt targets remove my-vm` removes only that target file and shim. Moving
-an agent in Buzz by choosing a different **Run on** target does not stop its
-old daemon instance; shut down or remove that provisioning separately.
+`yewholt targets remove my-vm` removes only that target file and shim; it
+does not stop agents. Keep the original target until their removal is confirmed.
 
-### Buzz backend provider engine
+### Legacy Buzz backend provider engine
 
 Build with `npm run build`, then invoke `node dist/provider/engine.js <targetId>`.
 The engine reads one JSON object to EOF and emits exactly one JSON object on

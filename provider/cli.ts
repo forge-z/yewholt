@@ -59,7 +59,8 @@ export async function providerCommand(command: "provider" | "targets" | "pair", 
     if (command === "pair") return printPairing();
     if (command === "provider") {
       if (args.length !== 1 || args[0] !== "install") throw new CliError("Usage: yewholt provider install");
-      installProvider();
+      const plugin = installProvider();
+      console.log("Buzz plugin folder: " + plugin);
       return printPairing();
     }
     const [sub, id, ...rest] = args;

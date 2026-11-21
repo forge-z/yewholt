@@ -49,9 +49,10 @@ export async function runDaemon(home: string): Promise<void> {
     const control = new DeployControl(home, ownerSecret, defaults);
     let latest: AgentDiagnostics | undefined;
     let pending: AgentScan | null = null;
-    const reconcile = async () => {
-      pending = files.poll() ?? pending;
+    const reconcile = async (force = false) => {
+      pending = files.poll(force) ?? pending;
       if (!pending) return false;
+      pending.definitions = pending.definitions.filter((agent) => control.reconcileHosted(agent));
       await session.reconcileAgents(pending);
       latest = { invalid: pending.invalid, unavailable: pending.unavailable };
       pending = null;
@@ -80,7 +81,7 @@ export async function runDaemon(home: string): Promise<void> {
 
 async function serve(
   home: string, session: Yewholt, ownerSecret: string, control: DeployControl,
-  reconcile: () => Promise<boolean>, agentDiagnostics: () => AgentDiagnostics | undefined,
+  reconcile: (force?: boolean) => Promise<boolean>, agentDiagnostics: () => AgentDiagnostics | undefined,
 ): Promise<void> {
   const config = loadConfig(home);
   await writeStatus(home, session, config, control.pubkey, agentDiagnostics());
@@ -158,7 +159,32 @@ async function serve(
       work = work.then(async () => {
         if (!serving || stopping || !owner.isOpen()) return;
         const reply = await control.handle(event, async (pubkey) =>
-          (await session.snapshot()).bots.some((bot) => bot.pubkey === pubkey && !bot.external));
+          (await session.snapshot()).bots.some((bot) => bot.pubkey === pubkey && !bot.external), {
+          publishProfile: async (agent, profile) => {
+            const client = new RelayClient(agent.relayUrl, agent.nsec, agent.authTag, false);
+            try {
+              await agentRelayDeadline(client.connect());
+              const result = await agentRelayDeadline(client.publish(profile));
+              if (!accepted(result)) throw new Error("hosted profile rejected");
+            } finally {
+              await client.close();
+            }
+          },
+          updateName: async (pubkey, name) => {
+            await session.updateHostedName(pubkey, name);
+            await writeStatus(home, session, config, control.pubkey, agentDiagnostics(), botLinks);
+          },
+          reconcileRemoval: async (pubkey) => {
+            await reconcile(true);
+            try {
+              await drain("before-sync");
+            } finally {
+              await session.forgetRemovedAgent(pubkey);
+            }
+            await botLinks.sync((await session.snapshot()).bots);
+            await writeStatus(home, session, config, control.pubkey, agentDiagnostics(), botLinks);
+          },
+        });
         if (!reply) return;
         const result = await agentRelayDeadline(owner.publish(reply));
         if (!accepted(result)) console.error("control: confirmation rejected by relay");
