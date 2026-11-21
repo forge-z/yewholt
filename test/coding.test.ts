@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { MemoryStorage, type ConversationId } from "@earendil-works/pi-durable";
-import { instructionsFor, type Yewholt } from "../src/session.js";
+import { createModels } from "@earendil-works/pi-ai/models";
+import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
+import { ensureOwnerKey, failureReason, instructionsFor, parseAdmins, type Yewholt } from "../src/session.js";
 import { workspaceDir } from "../src/workspace.js";
 import { WorkspaceIsolation, type IsolationProbe } from "../src/isolation.js";
 import type { BotRecord } from "../src/registry.js";
@@ -17,11 +19,12 @@ const ELSEWHERE = "44444444-4444-4444-8444-444444444444";
 async function withCoding(
   fn: (session: Yewholt, home: string) => Promise<void>,
   isolationFor?: (home: string) => WorkspaceIsolation,
+  opts: { admins?: readonly string[]; models?: Parameters<typeof openSession>[3] } = {},
 ): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "yewholt-code-"));
   const home = join(root, "state");
   const piDir = emptyPiDir();
-  const session = await openSession(new MemoryStorage(), home, piDir, undefined, isolationFor?.(home));
+  const session = await openSession(new MemoryStorage(), home, piDir, opts.models, isolationFor?.(home), opts.admins);
   try {
     await session.ensureOnboarding(CHANNEL);
     await fn(session, home);
@@ -362,4 +365,64 @@ test("isolation: each failed check blocks bash, read, write and edit with the st
     assert.equal(logs.length, 1);
     assert.deepEqual(await approvals(session), []);
   }, (home) => new WorkspaceIsolation(home, { YEWHOLT_WORKSPACES: testWorkspaces(home) }, probe, undefined, (message) => logs.push(message)));
+});
+
+test("approval: only the owner or an admin answers; anyone else's aprovo runs nothing", async () => {
+  const ADMIN = "cd".repeat(32);
+  await withCoding(async (session, home) => {
+    const coder = await createBot(session, "Coder", "post,read,code");
+    const ran = join(workspaceDir(testWorkspaces(home), coder.pubkey), "gated.txt");
+    const turn = session.handleHuman(human("o1", "@Coder run: rm -rf junk; echo ran >> gated.txt"));
+    await waitUntil(async () => (await approvals(session)).length === 1, "the approval request");
+
+    // HUMAN is a channel member but neither the owner nor an admin here.
+    await session.handleHuman(human("o2", "aprovo"));
+    await session.handleHuman(human("o3", "@Coder sim"));
+    assert.equal((await approvals(session)).length, 1);
+    assert.equal(existsSync(ran), false);
+    assert.match(await lastReply(session, coder), /Only the owner or an admin can answer approval .*still waiting/);
+
+    await session.handleHuman(human("o4", "aprovo", { authorPubkey: ADMIN.toUpperCase() }));
+    await turn;
+    assert.equal(readFileSync(ran, "utf8"), "ran\n");
+
+    // The install owner's key answers too.
+    const second = session.handleHuman(human("o5", "@Coder run: rm -rf junk; echo again >> gated.txt"));
+    await waitUntil(async () => (await approvals(session)).length === 1, "the second approval request");
+    await session.handleHuman(human("o6", "aprovo", { authorPubkey: ensureOwnerKey(home) }));
+    await second;
+    assert.equal(readFileSync(ran, "utf8"), "ran\nagain\n");
+  }, undefined, { admins: [ADMIN] });
+});
+
+test("approval: YEWHOLT_ADMINS takes hex pubkeys separated by commas or spaces and skips the rest", () => {
+  const a = "ab".repeat(32);
+  const b = "CD".repeat(32);
+  assert.deepEqual(parseAdmins(`${a}, ${b}  npub1xyz,short`), [a, b.toLowerCase()]);
+  assert.deepEqual(parseAdmins(undefined), []);
+});
+
+test("model failure: the reply says why (reason and provider error), not only that it failed", async () => {
+  const faux = fauxProvider({ provider: "faux", models: [{ id: "faux-1" }] });
+  const key = "sk-" + "x".repeat(40);
+  faux.setResponses(Array.from({ length: 50 }, () => fauxAssistantMessage("", { stopReason: "error", errorMessage: `429 FreeUsageLimitError: free quota used (key ${key})` })));
+  const models = createModels();
+  models.setProvider(faux.provider);
+  await withCoding(async (session) => {
+    const plain = await createBot(session, "Plain", "post,read");
+    const coder = await createBot(session, "Coder", "post,read,code");
+    await session.handleHuman(human("f1", "@Plain hello"));
+    await session.handleHuman(human("f2", "@Coder hello"));
+    for (const bot of [plain, coder]) {
+      const reply = await lastReply(session, bot);
+      assert.match(reply, /^I could not answer that \(model_error: 429 FreeUsageLimitError: free quota used/);
+      assert.ok(!reply.includes(key), reply);
+    }
+  }, undefined, { models });
+});
+
+test("model failure: reasons without detail, JSON detail and long detail stay one short line", () => {
+  assert.equal(failureReason("no_model"), "no_model");
+  assert.equal(failureReason("faulted", { code: 1 }), 'faulted: {"code":1}');
+  assert.ok(failureReason("model_error", "a b\n".repeat(400)).length < 320);
 });

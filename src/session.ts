@@ -13,6 +13,7 @@ import {
   type EnvTarget,
   type Extension,
   type Registry,
+  type SettledSubmissionRecord,
   type Storage,
   type TaskId,
 } from "@earendil-works/pi-durable";
@@ -53,6 +54,8 @@ export type SessionOptions = {
   /** Pi's settings folder for `pi.durable` packages (default `PI_CODING_AGENT_DIR` or ~/.pi/agent). */
   piDir?: string;
   now?: () => number;
+  /** Pubkeys besides the owner that may answer code-bot approvals (default `YEWHOLT_ADMINS`). */
+  admins?: readonly string[];
 };
 
 /** A bot that gets the coding runtime: stored permissions include `code`, and never the Onboarding Specialist. */
@@ -81,7 +84,7 @@ export class Yewholt {
 
   private constructor(
     readonly harness: Harness,
-    private readonly options: Required<Pick<SessionOptions, "home" | "turnTokens" | "defaultLimit" | "now">> & { models: Models },
+    private readonly options: Required<Pick<SessionOptions, "home" | "turnTokens" | "defaultLimit" | "now">> & { models: Models; admins: ReadonlySet<string> },
     private readonly coding: Coding,
     private readonly isolation: WorkspaceIsolation,
   ) {}
@@ -126,6 +129,7 @@ export class Yewholt {
         defaultLimit: options.defaultLimit ?? Number(process.env.YEWHOLT_BUDGET_TOKENS ?? "100000"),
         now: options.now ?? Date.now,
         models,
+        admins: new Set((options.admins ?? parseAdmins(process.env.YEWHOLT_ADMINS)).map((key) => key.toLowerCase())),
       },
       { registry, toolSearch, gate, packages: [], piDir: options.piDir ?? piDir() },
       options.isolation ?? new WorkspaceIsolation(options.home),
@@ -589,13 +593,27 @@ export class Yewholt {
     const settled = await submission.wait(ctx);
     const after = tokensOf(await this.harness.snapshot(UsageDoc, conversation.id, ctx));
     const spent = Math.max(this.options.turnTokens, after - before);
-    let answer = "I could not answer that.";
+    const answer = await this.answerText(bot, conversation, settled);
+    await this.reply(bot, message, answer, spent);
+  }
+
+  /** The model's text, or why the run gave none (`model_error: 429 ...`, `no_model`), also logged. */
+  private async answerText(bot: BotRecord, conversation: Conversation, settled: SettledSubmissionRecord): Promise<string> {
+    let reason: string;
+    let detail: unknown;
     if (settled.status === "done" && settled.type === "input") {
       const entry = await conversation.commit((tx) => tx.entry(settled.answer), ctx);
       const content = entry?.model?.[0] && "content" in entry.model[0] ? entry.model[0].content : undefined;
-      answer = textOf(content) || answer;
+      const text = textOf(content);
+      if (text) return text;
+      reason = "empty_answer";
+    } else {
+      reason = settled.status === "unanswered" ? settled.reason : settled.status;
+      detail = settled.status === "unanswered" ? settled.detail : undefined;
     }
-    await this.reply(bot, message, answer, spent);
+    const why = failureReason(reason, detail);
+    console.error(`turn: ${bot.name} (${bot.provider}/${bot.modelId}) got no answer: ${why}`);
+    return `I could not answer that (${why}).`;
   }
 
   private async createBot(input: {
@@ -823,12 +841,7 @@ export class Yewholt {
     const settled = await submission.wait(ctx);
     const after = tokensOf(await this.harness.snapshot(UsageDoc, conversation.id, ctx));
     const spent = Math.max(this.options.turnTokens, after - before);
-    let answer = "I could not answer that.";
-    if (settled.status === "done" && settled.type === "input") {
-      const entry = await conversation.commit((tx) => tx.entry(settled.answer), ctx);
-      const content = entry?.model?.[0] && "content" in entry.model[0] ? entry.model[0].content : undefined;
-      answer = textOf(content) || answer;
-    }
+    const answer = await this.answerText(bot, conversation, settled);
     await this.reply(bot, message, answer, spent, true, drop);
     this.notifyOutbox();
   }
@@ -945,8 +958,33 @@ export class Yewholt {
         return true;
       }
     }
+    if (!this.mayApprove(state, chosen!, message.authorPubkey)) {
+      await this.refuseApprover(state, chosen!, message);
+      return true;
+    }
     await this.resolveApproval(state, chosen!, message, word.type === "approve");
     return true;
+  }
+
+  /** The install owner, the external agent's owner, or an admin from `YEWHOLT_ADMINS`. */
+  private mayApprove(state: RegistryState, request: ApprovalRequest, author: string): boolean {
+    const who = author.toLowerCase();
+    if (this.options.admins.has(who)) return true;
+    const bot = state.bots.find((item) => item.pubkey === request.pubkey);
+    if (bot?.external && bot.ownerPubkey === who) return true;
+    try {
+      return pubkeyOf(readKey(ownerKeyPath(this.options.home))) === who;
+    } catch {
+      return false;
+    }
+  }
+
+  private async refuseApprover(state: RegistryState, request: ApprovalRequest, message: HumanMessage): Promise<void> {
+    console.error(`approval ${request.id} ignored: ${message.authorPubkey} is not the owner or an admin`);
+    const bot = state.bots.find((item) => item.pubkey === request.pubkey);
+    const text = `Only the owner or an admin can answer approval ${request.id}. Nothing changed; it is still waiting.`;
+    if (bot) await this.reply(bot, message, text, 0);
+    else await this.harness.commit(async (tx) => remember(await tx.doc(RegistryDoc), message), ctx);
   }
 
   private async askWhich(state: RegistryState, message: HumanMessage, here: ApprovalRequest[], onboarding: BotRecord | undefined): Promise<void> {
@@ -1182,6 +1220,26 @@ function messageMentions(text: string, bot: BotRecord): boolean {
 function tokensOf(state: { models: Record<string, { totalTokens?: number }>; tools: Record<string, { totalTokens?: number }> } | undefined): number {
   if (!state) return 0;
   return [...Object.values(state.models), ...Object.values(state.tools)].reduce((sum, usage) => sum + (usage.totalTokens ?? 0), 0);
+}
+
+const MAX_REASON = 300;
+
+/** One line for the chat and the log. Long token-like runs (API keys) are masked. */
+export function failureReason(reason: string, detail?: unknown): string {
+  const raw = detail === undefined || detail === null ? "" : typeof detail === "string" ? detail : JSON.stringify(detail);
+  let text = raw.replace(/\s+/g, " ").trim().replace(/[A-Za-z0-9_\-]{32,}/g, "[redacted]");
+  if (text.length > MAX_REASON) text = `${text.slice(0, MAX_REASON)}…`;
+  return text ? `${reason}: ${text}` : reason;
+}
+
+/** `YEWHOLT_ADMINS`: hex pubkeys separated by commas or spaces. Anything else is skipped with a warning. */
+export function parseAdmins(value: string | undefined): string[] {
+  const admins: string[] = [];
+  for (const item of (value ?? "").split(/[\s,]+/).filter(Boolean)) {
+    if (/^[0-9a-fA-F]{64}$/.test(item)) admins.push(item.toLowerCase());
+    else console.error(`YEWHOLT_ADMINS: skipped ${item.slice(0, 12)}…, not a 64-hex pubkey`);
+  }
+  return admins;
 }
 
 function textOf(content: unknown): string {
