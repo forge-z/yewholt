@@ -528,12 +528,31 @@ If the daemon and Buzz relay share an InstaBox VM but the VM cannot reach
 its own public WebSocket endpoint, keep `relayUrl` in the daemon's
 `config.json` set to the public `wss://…instabox.tech` address used by Buzz
 and the Mac target. In the **daemon's** `$YEWHOLT_HOME/.env` (not the
-relay Compose `.env`), set `YEWHOLT_LOCAL_PORT=3000`, using the actual
-host port of the local relay. Restart only the daemon. It opens the
+relay Compose `.env`), set `YEWHOLT_LOCAL_PORT` to the local WebSocket
+listener's port. Restart only the daemon to apply it. It opens the
 WebSocket to `ws://127.0.0.1:<port>` with the public `Host` header and
 signs NIP-42 AUTH for the original public URL. Use this only when both
 routes lead to the same relay. Other relay URLs and the Mac provider are
 unchanged. With the variable unset, the daemon connects directly as before.
+
+For an InstaBox VM using the Host-rewriting proxy, publish the relay on
+**loopback port 3001** (`BUZZ_HTTP_PORT=127.0.0.1:3001` in the relay Compose environment;
+the container still listens on 3000). Run the proxy on **port 3000**:
+
+```sh
+YEWHOLT_PUBLIC_HOST=3000-your-machine.instabox.tech node scripts/host-proxy.mjs
+```
+
+Set `YEWHOLT_PUBLIC_HOST` to the public relay hostname, without the
+`wss://` prefix. The proxy listens on all interfaces on port 3000 by
+default and forwards HTTP and WebSocket upgrades to `127.0.0.1:3001`.
+Override those ports with `YEWHOLT_PROXY_LISTEN` and
+`YEWHOLT_PROXY_TARGET` if needed. With the default proxy ports, set
+`YEWHOLT_LOCAL_PORT=3000` in the daemon's `.env` so the daemon connects
+through the same proxy. A plain Compose deployment and `yewholt install`
+both default to publishing the relay on host port 3000; that conflicts
+with the proxy's listener. Do not start a second proxy or change the ports
+on a running InstaBox deployment that already uses this layout.
 
 **Verification.** `npm test` runs the offline provider checks. With the
 disposable Phase 0 Compose relay already running, also run:
