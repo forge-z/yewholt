@@ -7,7 +7,8 @@ const CONTROL_TAG = "yewholt-control";
 const MAX_CONTENT = 48 * 1024;
 const hexKey = /^[0-9a-f]{64}$/;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-export type ControlType = "deploy" | "confirmation";
+export type HostedOperation = "hosted-activate" | "hosted-profile" | "hosted-remove";
+export type ControlType = "deploy" | "confirmation" | HostedOperation;
 export type ControlEnvelope = ControlContext & {
   version: 1;
   type: ControlType;

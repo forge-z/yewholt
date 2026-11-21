@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
+import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { loadAgent, validateAgent, type AgentProvisioning } from "./agents.js";
 import { readJson, record, writePrivateJson } from "./control-files.js";
 import { controlEvent, decryptControl, verifiedEnvelope, type Confirmation, type ControlEnvelope } from "./control-protocol.js";
+import { HostedControl, hostedLastDeploy, type HostedEffects } from "./hosted-control.js";
 import { pubkeyOf, type NostrEvent } from "./nostr.js";
 import { readPairing } from "./pairing.js";
 import { agentsDir } from "./paths.js";
@@ -37,12 +39,20 @@ function loadLedger(home: string): Ledger {
 }
 
 export function lastDeploys(home: string): Map<string, number> {
+  let deploys = new Map<string, number>();
   try {
-    return new Map(Object.entries(loadLedger(home).agents)
+    deploys = new Map(Object.entries(loadLedger(home).agents)
       .filter(([, head]) => !head.pending && head.lastDeploy > 0).map(([agent, head]) => [agent, head.lastDeploy]));
-  } catch {
-    return new Map();
-  }
+  } catch { /* No legacy deploy evidence. */ }
+  try {
+    for (const name of readdirSync(join(home, "state", "hosted-agents"))) {
+      if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
+      const pubkey = name.slice(0, -5);
+      const at = hostedLastDeploy(home, pubkey);
+      if (at) deploys.set(pubkey, at);
+    }
+  } catch { /* No hosted deploy evidence. */ }
+  return deploys;
 }
 
 function provisioningFile({ name, nsec, authTag, relayUrl, model, permissions, respondTo, respondToAllowlist, channelId }: AgentProvisioning) {
@@ -58,14 +68,23 @@ function digest(file: ReturnType<typeof provisioningFile>): string {
 
 export class DeployControl {
   readonly pubkey: string;
+  private readonly hosted: HostedControl;
 
   constructor(private readonly home: string, private readonly secret: string,
     private readonly defaults: Defaults, private readonly now = () => Date.now()) {
     this.pubkey = pubkeyOf(secret);
+    this.hosted = new HostedControl(home, defaults);
   }
 
-  async handle(event: NostrEvent, reserved: (pubkey: string) => Promise<boolean>): Promise<NostrEvent | null> {
-    const envelope = verifiedEnvelope(event, this.pubkey, "deploy");
+  reconcileHosted(agent: AgentProvisioning): boolean {
+    return this.hosted.reconcile(agent);
+  }
+
+  async handle(event: NostrEvent, reserved: (pubkey: string) => Promise<boolean>, effects?: HostedEffects): Promise<NostrEvent | null> {
+    const envelope = verifiedEnvelope(event, this.pubkey, "deploy") ??
+      verifiedEnvelope(event, this.pubkey, "hosted-activate") ??
+      verifiedEnvelope(event, this.pubkey, "hosted-profile") ??
+      verifiedEnvelope(event, this.pubkey, "hosted-remove");
     if (!envelope) return null;
     const confirmation: Confirmation = { job: envelope.requestId, agentPubkey: envelope.agentPubkey, ok: false };
     const now = this.now();
@@ -83,9 +102,13 @@ export class DeployControl {
         }
         if (!confirmation.error) {
           const isReserved = envelope.agentPubkey === this.pubkey || await reserved(envelope.agentPubkey);
-          const currentPairing = readPairing(this.home, event.pubkey);
-          if (!currentPairing || currentPairing.pairedAt !== pairing.pairedAt) confirmation.error = "provider not paired";
-          else confirmation.error = this.apply(event, envelope, body, isReserved, now);
+          const authorized = () => readPairing(this.home, event.pubkey)?.pairedAt === pairing.pairedAt;
+          if (!authorized()) confirmation.error = "provider not paired";
+          else if (envelope.type === "deploy") confirmation.error = this.hosted.manages(envelope.agentPubkey)
+            ? "agent is managed by hosted control" : this.apply(event, envelope, body, isReserved, now);
+          else if (envelope.type !== "confirmation" && effects) {
+            confirmation.error = await this.hosted.apply(envelope.type, event, envelope, body, isReserved, now, effects, authorized);
+          } else confirmation.error = "hosted control unavailable";
         }
       }
     } catch {

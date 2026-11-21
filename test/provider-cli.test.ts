@@ -44,7 +44,7 @@ test("provider install, target add, shim info, pair and remove end to end", (t) 
   assert.match(initial.stdout, /Provider pubkey: [a-f0-9]{64}/);
   const pair = run("pair");
   assert.equal(pair.status, 0);
-  assert.equal(pair.stdout, initial.stdout);
+  assert.equal(initial.stdout, `Buzz plugin folder: ${join(config, "buzz-plugin")}\n${pair.stdout}`);
   assert.equal(run("pair", "list").stdout.trim(), "[]");
   const label = "Mac's $(ignored)";
   assert.equal(run("targets", "add", "mac", "--local", "--label", label).status, 0);

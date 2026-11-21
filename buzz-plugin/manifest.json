@@ -1,0 +1,9 @@
+{
+  "id": "forge-z.yewholt",
+  "name": "Yewholt",
+  "apiVersion": 1,
+  "description": "Run Buzz agents on paired Yewholt targets.",
+  "host": {
+    "processes": [{ "id": "provider", "program": "yewholt-buzz-bridge" }]
+  }
+}

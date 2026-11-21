@@ -74,9 +74,20 @@ export function removeShim(id: string): void {
   if (managed(shimPath(id))) unlinkSync(shimPath(id));
 }
 
-export function installProvider(): void {
+export function installProvider(): string {
   const targets = targetIds().map((id) => ({ id, target: loadTarget(id) }));
   targets.forEach(({ id }) => verifyShim(id));
   installEngine();
   targets.forEach(({ id, target }) => installShim(id, target));
+  const bridge = fileURLToPath(new URL("./bridge.js", import.meta.url));
+  install(join(providerBin(), "yewholt-buzz-bridge"), [
+    "export YEWHOLT_PROVIDER_HOME=" + quote(resolve(providerHome())),
+    "exec " + [process.execPath, bridge].map(quote).join(" ") + ' "$@"',
+  ]);
+  const plugin = join(resolve(providerHome()), "buzz-plugin");
+  for (const name of ["manifest.json", "plugin.js"]) {
+    const source = new URL("../../buzz-plugin/" + name, import.meta.url);
+    writeAtomic(join(plugin, name), readFileSync(source, "utf8"), 0o600);
+  }
+  return plugin;
 }
