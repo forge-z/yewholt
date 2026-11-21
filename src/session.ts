@@ -13,7 +13,8 @@ import {
 import { catalogHas, defaultModel, loadModels, parseModelLabel, type ModelChoice } from "./models.js";
 import { readKey, writeKey } from "./keys.js";
 import { generateKeyPair, ownerAuthTag, pubkeyOf, signEvent, type NostrEvent } from "./nostr.js";
-import { helpText, parseCommand, type ParsedCommand } from "./parser.js";
+import { effectiveScope } from "./membership.js";
+import { helpText, parseCommand, stripLeadingMentions, type ParsedCommand } from "./parser.js";
 import { botKeyPath, ownerKeyPath } from "./paths.js";
 import { RegistryDoc, type BotRecord, type Proposal, type RegistryState } from "./registry.js";
 
@@ -36,6 +37,8 @@ export type SessionOptions = {
 };
 
 export class Yewholt {
+  private readonly memberChannels = new Map<string, ReadonlySet<string>>();
+
   private constructor(
     readonly harness: Harness,
     private readonly options: Required<Pick<SessionOptions, "home" | "turnTokens" | "defaultLimit">> & { models: Models },
@@ -59,6 +62,23 @@ export class Yewholt {
       defaultLimit: options.defaultLimit ?? Number(process.env.YEWHOLT_BUDGET_TOKENS ?? "100000"),
       models,
     });
+  }
+
+  /**
+   * Channels the relay lists this bot in (trusted kind 39002, see membership.ts).
+   * Kept in memory only: stored scope and proposals are not changed. The daemon
+   * replaces the set whenever the relay's member lists change.
+   */
+  setMemberChannels(pubkey: string, channels: Iterable<string>): void {
+    const set = new Set(channels);
+    if (set.size === 0) this.memberChannels.delete(pubkey);
+    else this.memberChannels.set(pubkey, set);
+  }
+
+  /** Stored scope ∪ relay membership, for the bot with this pubkey. */
+  async effectiveScope(pubkey: string): Promise<string[]> {
+    const bot = (await this.snapshot()).bots.find((item) => item.pubkey === pubkey);
+    return effectiveScope(bot?.scope ?? [], this.memberChannels.get(pubkey));
   }
 
   async close(): Promise<void> {
@@ -100,16 +120,24 @@ export class Yewholt {
     if (state.processed.includes(message.eventId)) return;
     if (state.bots.some((bot) => bot.pubkey === message.authorPubkey)) return;
 
-    const onboarding = state.bots.find((bot) => bot.role === "onboarding" && bot.status === "active" && bot.scope.includes(message.channelId));
-    const command = parseCommand(message.text);
-    if (onboarding && (command || messageMentions(message.text, onboarding))) {
+    const inScope = (bot: BotRecord) => effectiveScope(bot.scope, this.memberChannels.get(bot.pubkey)).includes(message.channelId);
+    const onboarding = state.bots.find((bot) => bot.role === "onboarding" && bot.status === "active" && inScope(bot));
+    // "@Onboarding Specialist aprovo" parses as "aprovo". A message that leads with
+    // other bots only ("@Coder sim") is addressed to them and parses as before.
+    const leading = stripLeadingMentions(message.text, state.bots.map((bot) => bot.name));
+    const forOnboarding = leading.mentioned.some((name) => state.bots.some((bot) => bot.role === "onboarding" && bot.name === name));
+    const command = parseCommand(forOnboarding || leading.mentioned.length === 0 ? leading.text : message.text);
+    // The Onboarding Specialist listens to the whole channel in its stored scope (the
+    // install channel). In a channel it only joined from the app it needs a mention.
+    const listening = onboarding && (onboarding.scope.includes(message.channelId) ? command : command && forOnboarding);
+    if (onboarding && (listening || messageMentions(message.text, onboarding))) {
       await this.handleOnboarding(onboarding, message, command);
       return;
     }
     if (command) return;
 
     const mentioned = state.bots.filter(
-      (bot) => bot.role !== "onboarding" && bot.status === "active" && bot.scope.includes(message.channelId) && messageMentions(message.text, bot),
+      (bot) => bot.role !== "onboarding" && bot.status === "active" && inScope(bot) && messageMentions(message.text, bot),
     );
     for (const bot of mentioned) await this.handleMember(bot, message);
   }
@@ -335,8 +363,8 @@ export class Yewholt {
 
   private proposalFrom(command: ParsedCommand, channelId: string, state: RegistryState): Proposal | { error: string } {
     if (command.type === "create") {
-      if (!command.modelLabel) return { error: "Name a model. Example: crie um novo bot e coloque o GPT-6.2 Astra como modelo" };
-      const model = parseModelLabel(command.modelLabel);
+      const model = command.modelLabel ? parseModelLabel(command.modelLabel) : defaultModel();
+      if (!model) return { error: "Name a model. Example: crie um novo bot e coloque o GPT-6.2 Astra como modelo" };
       const name = uniqueName(command.name ?? "Novo bot", state.bots);
       const scope = resolveScope(command.scope, channelId);
       const permissions = command.permissions ?? ["post", "read"];

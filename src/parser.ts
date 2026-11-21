@@ -62,7 +62,7 @@ function field(text: string, key: string): string | null {
 }
 
 function named(text: string): string | null {
-  const match = text.match(/\b(?:named|chamado|chamada)\s+(.+?)(?=\s+e\s|\s+com\s|\s+model[o]?\b|$)/i);
+  const match = text.match(/\b(?:named|chamado|chamada)\s+(.+?)(?=\s+e\s|\s+com\s|\s+usando\s|\s+using\s|\s+with\s|\s+model[o]?\b|$)/i);
   return match ? match[1]!.trim() : null;
 }
 
@@ -71,6 +71,9 @@ function modelPhrase(text: string): string | null {
   if (explicit) return explicit;
   const pt = text.match(/coloque\s+o\s+(.+?)\s+como\s+modelo/i);
   if (pt) return pt[1]!.trim();
+  // "com o modelo X", "com modelo X", "usando o modelo X", "with model X", "using model X".
+  const phrase = text.match(/\b(?:com(?:\s+o)?|usando(?:\s+o)?|with|using)\s+(?:the\s+)?modelo?\s+(.+?)(?=\s+(?:scope|escopo|permissions|permiss[õo]es)\b|\s+\w+\s*[:=]|$)/i);
+  if (phrase) return phrase[1]!.trim().replace(/[.,;!?]+$/, "") || null;
   const en = text.match(/\bmodel\s+(.+?)(?=\s+scope\b|\s+permissions\b|$)/i);
   return en ? en[1]!.trim() : null;
 }
@@ -94,4 +97,28 @@ export function helpText(): string {
     "Stop or start: stop bot Alpha / start bot Alpha",
     "Each bot is one durable session with its own Nostr key, model, scope, and token budget.",
   ].join("\n");
+}
+
+/**
+ * Strip leading `@<display name>` mentions of known bots ("@Onboarding Specialist  aprovo").
+ * Names may contain spaces; the longest name wins; matching is case-insensitive and the
+ * name must end at a space, `,`/`:` or the end of the text. Returns the rest of the text
+ * and the canonical names that were stripped, in order.
+ */
+export function stripLeadingMentions(input: string, names: readonly string[]): { text: string; mentioned: string[] } {
+  const known = [...new Set(names.filter((name) => name.trim()))].sort((a, b) => b.length - a.length);
+  let text = input.trim();
+  const mentioned: string[] = [];
+  for (;;) {
+    if (!text.startsWith("@")) break;
+    const name = known.find((candidate) => new RegExp(`^@${escapeRegExp(candidate)}(?=$|[\\s,:])`, "i").test(text));
+    if (!name) break;
+    mentioned.push(name);
+    text = text.slice(1 + name.length).replace(/^[\s,:]+/, "");
+  }
+  return { text, mentioned };
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
