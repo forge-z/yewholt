@@ -8,14 +8,19 @@ const MAX_CONTENT = 48 * 1024;
 const hexKey = /^[0-9a-f]{64}$/;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export type HostedOperation = "hosted-activate" | "hosted-profile" | "hosted-remove";
-export type ControlType = "deploy" | "confirmation" | HostedOperation;
+export type ControlType = "deploy" | "confirmation" | "hosted-models" | HostedOperation;
 export type ControlEnvelope = ControlContext & {
   version: 1;
   type: ControlType;
   issuedAt: number;
   ciphertext: string;
 };
-export type Confirmation = { job: string; ok: boolean; agentPubkey: string; error?: string };
+export type ModelPage = { models: string[]; next?: number };
+export type Confirmation = { job: string; ok: boolean; agentPubkey: string; error?: string; catalog?: ModelPage };
+
+export function isModelReference(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 256 && /^[a-z0-9_-]+\/[^\s\x00-\x1f\x7f]+$/i.test(value);
+}
 
 export function isPubkey(value: unknown): value is string {
   if (typeof value !== "string" || !hexKey.test(value)) return false;

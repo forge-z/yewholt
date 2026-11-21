@@ -17,6 +17,8 @@ export type HostedEffects = {
   publishProfile: (agent: AgentProvisioning, event: NostrEvent) => Promise<void>;
   updateName: (pubkey: string, name: string) => Promise<void>;
   reconcileRemoval: (pubkey: string) => Promise<void>;
+  models?: () => string[];
+  hasModel?: (choice: AgentProvisioning["model"]) => boolean;
 };
 
 const statePath = (home: string, pubkey: string) => join(home, "state", "hosted-agents", pubkey + ".json");
@@ -106,6 +108,9 @@ export class HostedControl {
       }
       if (state?.activated) {
         return lstatSync(path, { throwIfNoEntry: false }) ? undefined : "hosted provisioning is missing";
+      }
+      if (record(body.agent) && body.agent.model !== undefined && !effects.hasModel?.(provisioning.model)) {
+        return "selected model is not available on the daemon";
       }
       agent = provisioning;
       if (!state) {

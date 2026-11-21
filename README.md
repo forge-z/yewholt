@@ -320,13 +320,19 @@ moving either.
    Pick the directory printed as `Buzz plugin folder:` (by default
    `~/.config/yewholt/buzz-plugin`). Review and approve the declared
    `yewholt-buzz-bridge` process. The plugin is trusted app code.
-3. On that community, create an agent with **Harness → Remote → Yewholt** and
-   select the relay target (e.g. `instabox`). Code execution is opt-in and
-   still requires the daemon's Linux isolation and existing approval rules.
-   The daemon supplies the model, and direct replies are limited to the
-   attested owner by default. The existing DM and mention flow still depends
-   on relay admission and channel membership.
-4. Compare the agent pubkey with `yewholt agents list` on the daemon. Edit
+3. With that community selected in Buzz, create an agent with **Harness →
+   Remote → Yewholt** and select the relay target (e.g. `instabox`). If
+   the relay addresses differ, switch or join the target's community first;
+   `yewholt targets list` shows its relay address. Choosing a target is not
+   a way to move an agent listing to another Buzz community.
+4. Select a model from the daemon's catalog or keep **Daemon default**
+   (`YEWHOLT_MODEL` on the daemon). Catalog discovery uses the paired
+   control channel and does not wake a stopped VM. If the list is empty,
+   configure a supported provider credential in the daemon's `.env` and
+   restart only that daemon; credentials on the Mac are not used. Code
+   execution is opt-in and still requires Linux isolation and approvals.
+   Direct replies are limited to the attested owner by default.
+5. Compare the agent pubkey with `yewholt agents list` on the daemon. Edit
    name and picture in Buzz, or delete the agent there before removing its
    target. Editing does not restart a stopped agent. The daemon continues
    publishing runtime/presence kinds `10100` and `20001`; Buzz 1.0.6
