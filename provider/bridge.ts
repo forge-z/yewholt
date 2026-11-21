@@ -12,7 +12,7 @@ import { targetIds } from "./install.js";
 import { waitForConfirmation, type RelayWait } from "./relay.js";
 import { ProviderSecrets } from "./secrets.js";
 import { recordOutcome } from "./status.js";
-import { InvalidTargetRelay, loadTarget, privateJson, providerHome, relayUrl, validId } from "./target.js";
+import { InvalidTargetRelay, loadTarget, privateJson, providerHome, relayUrl, validId, type Target } from "./target.js";
 import { runWake } from "./wake.js";
 
 type Binding = {
@@ -94,11 +94,7 @@ function provision(input: Record<string, unknown>, community: string) {
   return { ...ok, pubkey, picture };
 }
 
-async function modelCatalog(id: unknown, wait: RelayWait) {
-  if (!validId(id)) return fail("Select a Yewholt relay target");
-  const target = loadTarget(id);
-  if (target.transport !== "relay") return fail("Select a Yewholt relay target");
-  const secret = new ProviderSecrets().identity();
+async function modelCatalog(target: Extract<Target, { transport: "relay" }>, secret: string, wait: RelayWait) {
   const models: string[] = [];
   const deadline = Date.now() + 15_000;
   for (let pages = 0, offset = 0; pages < 12 && Date.now() < deadline; pages++) {
@@ -128,11 +124,16 @@ export async function bridge(input: unknown, wait: RelayWait = waitForConfirmati
       }));
       return { ...ok, targets: Object.keys(relays), ...(input.details === true && { relays }) };
     }
-    if (input.op === "models") return await modelCatalog(input.target, wait);
+    if (input.op === "models") {
+      if (!validId(input.target)) return fail("Select a Yewholt relay target");
+      const target = loadTarget(input.target);
+      if (target.transport !== "relay") return fail("Select a Yewholt relay target");
+      return await modelCatalog(target, new ProviderSecrets().identity(), wait);
+    }
     const { op, community, pubkey } = input;
     if (!relayUrl(community)) return fail("Invalid Buzz community");
     if (op === "provision") return provision(input, community);
-    if ((op !== "activate" && op !== "profile" && op !== "remove") || !isPubkey(pubkey)) {
+    if ((op !== "activate" && op !== "profile" && op !== "remove" && op !== "model") || !isPubkey(pubkey)) {
       return fail("Invalid Yewholt request");
     }
     const path = agentPath(pubkey);
@@ -163,18 +164,47 @@ export async function bridge(input: unknown, wait: RelayWait = waitForConfirmati
       // Persist the proof before sending so an interrupted activation can still be removed.
       writePrivateJson(path, { ...binding, authTag });
     }
-    if (!authTag) return fail("Activate the Yewholt agent before editing its profile");
+    if (!authTag) return fail("Activate the Yewholt agent before editing it");
     const owner = authTag[1]!;
     const context = { community, owner, authTag };
+    const secrets = new ProviderSecrets();
+    const secret = secrets.identity();
+    const wake = (config: Parameters<typeof runWake>[0], requestId: string, timeout: number) =>
+      runWake(config, requestId, timeout, (account) => secrets.instabox(account));
+    if (op === "model") {
+      const model = input.model;
+      if (model !== undefined && !isModelReference(model)) return fail("Invalid Yewholt model");
+      const requestId = randomUUID();
+      let current: unknown;
+      let refusal: unknown;
+      const confirm = (body: Record<string, unknown>) => {
+        current = body.model;
+        refusal = body.error;
+      };
+      if (model === undefined) {
+        const event = controlEvent(secret, target.daemonPubkey, "hosted-model", { requestId, agentPubkey: pubkey }, context);
+        const result = await wait(target, secret, event, requestId, pubkey, 15_000, confirm);
+        if (result !== "confirmed" || (current !== null && !isModelReference(current))) {
+          return fail("Could not read the agent's model. Check that the daemon is updated, online and paired, then retry.");
+        }
+        const catalog = await modelCatalog(target, secret, wait);
+        return catalog.ok ? { ...catalog, model: current } : catalog;
+      }
+      const result = await sendControl(target, secret, "hosted-model", requestId, pubkey, { ...context, model }, {
+        wait: (target, secret, event, requestId, agent, ms) => wait(target, secret, event, requestId, agent, ms, confirm),
+        wake,
+      });
+      if (result.result === "confirmed" && isModelReference(current)) return { ...ok, model: current };
+      if (refusal === "selected model is not available on the daemon") return fail("The selected model is no longer available on the daemon.");
+      return fail(result.result === "refused" ? "The daemon refused the model change. Reopen this tab and try again."
+        : "The daemon did not confirm the model change. Reopen this tab to check the current model.");
+    }
     const body = op === "activate" ? { ...context, name: binding.name, picture: binding.picture, agent: {
       name: binding.name, nsec: binding.secret, authTag, permissions: ["post", "read", ...(binding.code ? ["code"] : [])],
       respondTo: "allowlist", respondToAllowlist: [owner],
       model: binding.model ? parseModelLabel(binding.model) : undefined,
     } } : op === "profile" ? { ...context, name: input.name, picture: input.picture } : context;
-    const secrets = new ProviderSecrets();
-    const result = await sendControl(target, secrets.identity(), `hosted-${op}`, randomUUID(), pubkey, body, {
-      wait, wake: (config, requestId, timeout) => runWake(config, requestId, timeout, (account) => secrets.instabox(account)),
-    });
+    const result = await sendControl(target, secret, `hosted-${op}`, randomUUID(), pubkey, body, { wait, wake });
     if (result.result !== "confirmed") {
       recordOutcome(binding.target, target, { failure: result.result === "refused" ? "refused" : result.wakeFailed ? "wake" : "timeout" });
       return fail(result.result === "refused" ? "Yewholt operation refused by the relay or daemon"

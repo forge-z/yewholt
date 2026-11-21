@@ -355,12 +355,15 @@ moving either.
    API-key login or `DEEPSEEK_API_KEY` enables the built-in `deepseek/*` models.
    Code execution is opt-in and still requires Linux isolation and approvals.
    Direct replies are limited to the attested owner by default.
-5. Compare the agent pubkey with `yewholt agents list` on the daemon. Edit
+5. Open the hosted agent in Buzz and select **Model**. Choose a model from
+   the agent's paired daemon and select **Save model**. This keeps the agent's
+   identity, conversation history, workspace and permissions. The change
+   applies to subsequent turns; it does not restart a stopped agent. Load the
+   tab from the Mac that manages the agent, with the daemon online.
+6. Compare the agent pubkey with `yewholt agents list` on the daemon. Edit
    name and picture in Buzz, or delete the agent there before removing its
-   target. The model picker is currently creation-only: Buzz 1.0.6 sends
-   no hosted model setting through its profile edit. Editing name or
-   picture does not restart a stopped agent. The daemon continues
-   publishing runtime/presence kinds `10100` and `20001`; Buzz 1.0.6
+   target. Editing name or picture does not restart a stopped agent.
+   The daemon continues publishing runtime/presence kinds `10100` and `20001`; Buzz 1.0.6
    classifies hosted agents by type, so its UI is not a daemon heartbeat.
 
 The bridge reserves a private identity on the Mac until activation is
@@ -371,6 +374,11 @@ identity. Keep that Mac's provider state to manage the agent later; Buzz does
 not supply a target or agent secret for edits and removal. The bridge reuses
 the provider identity and wake hooks. The daemon publishes a kind `0` profile
 carrying Buzz's NIP-OA owner attestation; Buzz writes its own agent listing.
+Model changes use the same paired, owner-attested channel. The daemon stores
+the new model separately from the provisioning file, so editing it cannot
+serve as new provisioning for a stopped agent. Upgrade the daemon and rerun
+`yewholt provider install` from the updated build on the Mac to get the
+matching bridge and plugin.
 Removal unlinks provisioning, retires the runtime, clears its in-process
 signing key, and writes a durable tombstone under
 `$YEWHOLT_HOME/state/hosted-agents/`. Backups made before removal can still
@@ -391,7 +399,8 @@ For an opt-in check against the disposable loopback Phase 0 relay:
 node dist/test/spike-hosted-provider.js ws://127.0.0.1:13000 "$spike_home/owner.key" yewholt-phase0-relay-1
 ```
 
-This exercises the installed bridge, daemon, and relay, not the Mac UI. It
+This exercises provisioning, model and profile edits, and removal through the
+installed bridge, daemon, and relay, not the Mac UI. It
 uses a new daemon home (printed on stdout) and adds, then removes, its
 temporary provider member. Do not use it against an existing community.
 

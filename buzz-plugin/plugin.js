@@ -122,6 +122,73 @@ export function apply(ctx) {
     );
   }
 
+  function ModelConfiguration({ agent }) {
+    const context = { op: "model", pubkey: agent.pubkey, community: agent.relay };
+    const [settings, setSettings] = useState(null);
+    const [model, setModel] = useState("");
+    const [retry, setRetry] = useState(0);
+    const [saving, setSaving] = useState(false);
+    const [saved, setSaved] = useState(false);
+    const [error, setError] = useState("");
+    useEffect(() => {
+      const controller = new AbortController();
+      request(context, controller.signal).then(({ model, models }) => {
+        if (controller.signal.aborted) return;
+        setSettings({ model, models });
+        setModel(model ?? "");
+      }, (error) => {
+        if (!controller.signal.aborted) setError(error.message);
+      });
+      return () => controller.abort();
+    }, [agent.pubkey, agent.relay, retry]);
+
+    if (!settings) return error
+      ? h("div", null, h("p", { role: "alert" }, error),
+        h("button", { type: "button", onClick: () => { setError(""); setRetry((value) => value + 1); } }, "Retry"))
+      : h("p", { role: "status" }, "Loading models from Yewholt…");
+
+    const save = async (event) => {
+      event.preventDefault();
+      if (saving || model === settings.model || !settings.models.includes(model)) return;
+      setSaving(true);
+      setError("");
+      try {
+        const { model: applied } = await request({ ...context, model }, new AbortController().signal);
+        setSettings({ ...settings, model: applied });
+        setModel(applied);
+        setSaved(true);
+      } catch (error) {
+        setError(error.message);
+      } finally {
+        setSaving(false);
+      }
+    };
+    return h("form", { onSubmit: save },
+      h("p", null, `Current model: ${settings.model ?? "None configured"}`),
+      h("label", null, "Model ", h("select", {
+        value: model, disabled: saving || !settings.models.length,
+        onChange: (event) => { setModel(event.target.value); setSaved(false); setError(""); },
+      },
+      !settings.model ? h("option", { value: "", disabled: true }, "Select a model") : null,
+      settings.model && !settings.models.includes(settings.model)
+        ? h("option", { value: settings.model, disabled: true }, `${settings.model} (unavailable)`) : null,
+      ...settings.models.map((id) => h("option", { key: id, value: id }, id)))),
+      " ", h("button", { type: "submit", disabled: saving || model === settings.model || !settings.models.includes(model) },
+        saving ? "Saving…" : "Save model"),
+      error ? h("p", { role: "alert" }, error)
+        : saving ? h("p", { role: "status" }, "Saving to Yewholt…")
+        : saved ? h("p", { role: "status" }, "Model saved.")
+        : !settings.models.length ? h("p", null, "No models are configured on this daemon.") : null,
+    );
+  }
+
+  ctx.agents.registerTab({
+    id: "model",
+    title: "Model",
+    when: (agent) => agent.type === "forge-z.yewholt/yewholt" && agent.place === "hosted" && !agent.unfinished && !agent.deleting,
+    component: ({ agent }) => h(ModelConfiguration, { key: JSON.stringify([agent.relay, agent.pubkey]), agent }),
+  });
+
   ctx.agents.register({
     id: "yewholt",
     title: "Yewholt",
