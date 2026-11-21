@@ -9,7 +9,7 @@ import { DeployControl, lastDeploys } from "./deploy-control.js";
 import { WorkspaceIsolation } from "./isolation.js";
 import { readKey } from "./keys.js";
 import { BotLinks, Inbox, publishAll } from "./bridge.js";
-import { accepted, RelayClient } from "./nostr-client.js";
+import { accepted, RelayClient, type RelayLoopback } from "./nostr-client.js";
 import { ownerAuthTag, pubkeyOf, signEvent, type NostrEvent } from "./nostr.js";
 import { defaultModel } from "./models.js";
 import { ownerKeyPath, pidPath, sqlitePath, statusPath } from "./paths.js";
@@ -20,6 +20,11 @@ import { ensureOwnerKey, Yewholt } from "./session.js";
 let stopping = false;
 
 export async function runDaemon(home: string): Promise<void> {
+  const localPort = process.env.YEWHOLT_LOCAL_PORT?.trim();
+  const loopbackPort = localPort ? Number(localPort) : undefined;
+  if (loopbackPort !== undefined && (!/^\d+$/.test(localPort ?? "") || loopbackPort < 1 || loopbackPort > 65535)) {
+    throw new Error("YEWHOLT_LOCAL_PORT must be a port number from 1 to 65535");
+  }
   const isolation = new WorkspaceIsolation(home);
   isolation.start();
   mkdirSync(dirname(sqlitePath(home)), { recursive: true });
@@ -67,7 +72,7 @@ export async function runDaemon(home: string): Promise<void> {
           // Reattach to durable turns after their external keys and stop states are reconciled.
           void session.resumeTurns().catch((error: unknown) => console.error("resume:", error instanceof Error ? error.message : error));
         }
-        await serve(home, session, ownerSecret, control, reconcile, () => latest);
+        await serve(home, session, ownerSecret, control, reconcile, () => latest, loopbackPort);
       } catch (error) {
         console.error("relay loop:", error instanceof Error ? error.message : error);
         await sleep(2000);
@@ -81,15 +86,17 @@ export async function runDaemon(home: string): Promise<void> {
 
 async function serve(
   home: string, session: Yewholt, ownerSecret: string, control: DeployControl,
-  reconcile: (force?: boolean) => Promise<boolean>, agentDiagnostics: () => AgentDiagnostics | undefined,
+  reconcile: (force?: boolean) => Promise<boolean>, agentDiagnostics: () => AgentDiagnostics | undefined, loopbackPort?: number,
 ): Promise<void> {
   const config = loadConfig(home);
   await writeStatus(home, session, config, control.pubkey, agentDiagnostics());
-  const owner = new RelayClient(config.relayUrl, ownerSecret);
+  const loopback = loopbackPort === undefined ? undefined : { relayUrl: config.relayUrl, port: loopbackPort };
+  const owner = new RelayClient(config.relayUrl, ownerSecret, undefined, true, loopback);
+  const connectBot = (bot: BotRecord) => openBot(session, ownerSecret, config.relayUrl, bot, loopback);
   let links: BotLinks<BotRecord> | undefined;
   let work = Promise.resolve();
   let serving = true;
-  const drain = (phase: OutboxPhase) => publishOutbox(session, ownerSecret, owner, links, config, phase);
+  const drain = (phase: OutboxPhase) => publishOutbox(session, ownerSecret, owner, links, connectBot, phase);
   try {
     await owner.connect();
     if (!config.channelId) {
@@ -106,7 +113,7 @@ async function serve(
     const botLinks = new BotLinks<BotRecord>({
       relayPubkey: relayKey(home),
       since: () => highWater || undefined,
-      open: (bot) => openBot(session, ownerSecret, config.relayUrl, bot),
+      open: connectBot,
       onEvent: (event) => inbox.accept(event),
       onMembership: (pubkey, channels, direct) => session.setMemberChannels(pubkey, channels, direct),
       onDisconnect: (pubkey) => session.agentDisconnected(pubkey),
@@ -163,7 +170,7 @@ async function serve(
           models: () => session.availableModelReferences(),
           hasModel: (choice) => session.hasModel(choice),
           publishProfile: async (agent, profile) => {
-            const client = new RelayClient(agent.relayUrl, agent.nsec, agent.authTag, false);
+            const client = new RelayClient(agent.relayUrl, agent.nsec, agent.authTag, false, loopback);
             try {
               await agentRelayDeadline(client.connect());
               const result = await agentRelayDeadline(client.publish(profile));
@@ -219,11 +226,12 @@ async function serve(
 }
 
 /** A bot's own NIP-42 connection and its owner's delegation. */
-async function openBot(session: Yewholt, ownerSecret: string, relayUrl: string, bot: BotRecord): Promise<RelayClient> {
+async function openBot(session: Yewholt, ownerSecret: string, relayUrl: string, bot: BotRecord,
+  loopback?: RelayLoopback): Promise<RelayClient> {
   const authTag = bot.authTag ?? ownerAuthTag(ownerSecret, bot.pubkey, "");
   const client = bot.external
-    ? new ExternalRelayClient(bot.relayUrl ?? relayUrl, session.botSecret(bot), authTag)
-    : new RelayClient(relayUrl, session.botSecret(bot), authTag);
+    ? new ExternalRelayClient(bot.relayUrl ?? relayUrl, session.botSecret(bot), authTag, true, loopback)
+    : new RelayClient(relayUrl, session.botSecret(bot), authTag, true, loopback);
   try {
     if (bot.external) await agentRelayDeadline(client.connect());
     else await client.connect();
@@ -280,7 +288,7 @@ async function publishOutbox(
   ownerSecret: string,
   owner: RelayClient,
   links: BotLinks<BotRecord> | undefined,
-  config: YewholtConfig,
+  connectBot: (bot: BotRecord) => Promise<RelayClient>,
   phase: OutboxPhase,
 ): Promise<void> {
   const state = await session.snapshot();
@@ -304,7 +312,7 @@ async function publishOutbox(
       if (pubkey === ownerPubkey) throw new Error("owner connection is closed");
       const bot = bots.get(pubkey);
       if (!bot) throw new Error("bot record unavailable");
-      return openBot(session, ownerSecret, config.relayUrl, bot);
+      return connectBot(bot);
     },
   );
   await session.ackOutbox(acked);

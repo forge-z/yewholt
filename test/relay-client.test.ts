@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import { WebSocketServer, type WebSocket } from "ws";
-import { RelayClient } from "../src/nostr-client.js";
+import { RelayClient, relayDialTarget } from "../src/nostr-client.js";
 import { generateKeyPair, type NostrEvent } from "../src/nostr.js";
 import { botEvents, byKind, capture, PRIVATE } from "./helpers/fixture.js";
 
@@ -10,6 +10,7 @@ import { botEvents, byKind, capture, PRIVATE } from "./helpers/fixture.js";
 async function fakeRelay(immediateChallenge = false): Promise<{
   url: string;
   frames: unknown[][];
+  hosts: string[];
   send: (frame: unknown[]) => void;
   waitFor: (pred: (frame: unknown[]) => boolean) => Promise<unknown[]>;
   stop: () => Promise<void>;
@@ -17,9 +18,11 @@ async function fakeRelay(immediateChallenge = false): Promise<{
   const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await new Promise<void>((resolve) => server.once("listening", () => resolve()));
   const frames: unknown[][] = [];
+  const hosts: string[] = [];
   const waiters: Array<{ pred: (frame: unknown[]) => boolean; resolve: (frame: unknown[]) => void }> = [];
   let peer: WebSocket | undefined;
-  server.on("connection", (socket) => {
+  server.on("connection", (socket, request) => {
+    hosts.push(request.headers.host ?? "");
     peer = socket;
     // Like a real relay, the challenge comes a moment after the upgrade.
     const challenge = () => socket.send(JSON.stringify(["AUTH", "challenge-1"]));
@@ -41,6 +44,7 @@ async function fakeRelay(immediateChallenge = false): Promise<{
   return {
     url: `ws://127.0.0.1:${port}`,
     frames,
+    hosts,
     send: (frame) => peer?.send(JSON.stringify(frame)),
     waitFor: (pred) => {
       const hit = frames.find(pred);
@@ -58,6 +62,35 @@ async function fakeRelay(immediateChallenge = false): Promise<{
 }
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 30));
+
+test("relay loopback routing is opt-in and limited to the configured public WSS relay", () => {
+  const relayUrl = "wss://relay.example:8443";
+  const other = "wss://other.example";
+  const local = "ws://127.0.0.1:3000";
+  const port = 4300;
+  assert.deepEqual(relayDialTarget(relayUrl), { url: relayUrl });
+  assert.deepEqual(relayDialTarget(relayUrl, { relayUrl, port }), {
+    url: "ws://127.0.0.1:4300", headers: { Host: "relay.example:8443" },
+  });
+  assert.deepEqual(relayDialTarget(other, { relayUrl, port }), { url: other });
+  assert.deepEqual(relayDialTarget(local, { relayUrl: local, port }), { url: local });
+});
+
+test("RelayClient dials loopback with the public Host and signs AUTH for the public URL", async () => {
+  const relay = await fakeRelay(true);
+  const relayUrl = "wss://relay.example:8443";
+  const loopback = { relayUrl, port: Number(new URL(relay.url).port) };
+  const client = new RelayClient(relayUrl, generateKeyPair().secret, undefined, true, loopback);
+  try {
+    await client.connect(2000);
+    const [, auth] = await relay.waitFor((frame) => frame[0] === "AUTH");
+    assert.deepEqual(relay.hosts, ["relay.example:8443"]);
+    assert.deepEqual((auth as NostrEvent).tags, [["relay", relayUrl], ["challenge", "challenge-1"]]);
+  } finally {
+    await client.close();
+    await relay.stop();
+  }
+});
 
 test("RelayClient routes EVENT frames to the subscription that asked for them only", async () => {
   const relay = await fakeRelay();

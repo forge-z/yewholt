@@ -3,6 +3,15 @@ import { authEvent, pubkeyOf, type NostrEvent } from "./nostr.js";
 
 type OkResult = { ok: boolean; message: string };
 
+export type RelayLoopback = { relayUrl: string; port: number };
+
+export function relayDialTarget(url: string, loopback?: RelayLoopback): { url: string; headers?: { Host: string } } {
+  if (loopback?.relayUrl !== url) return { url };
+  const relay = new URL(url);
+  if (relay.protocol !== "wss:" || ["127.0.0.1", "localhost", "[::1]"].includes(relay.hostname)) return { url };
+  return { url: `ws://127.0.0.1:${loopback.port}`, headers: { Host: relay.host } };
+}
+
 type Subscription = {
   onEvent: (event: NostrEvent) => void;
   onClosed?: (id: string, reason: string) => void;
@@ -28,10 +37,12 @@ export class RelayClient {
     private readonly secretHex: string,
     private readonly authTag?: string[],
     private readonly logClosed = true,
+    private readonly loopback?: RelayLoopback,
   ) {}
 
   async connect(timeoutMs = 15_000, onOpen?: () => void): Promise<void> {
-    const socket = new WebSocket(this.url);
+    const target = relayDialTarget(this.url, this.loopback);
+    const socket = new WebSocket(target.url, target.headers ? { headers: target.headers } : undefined);
     this.socket = socket;
     if (onOpen) socket.once("open", onOpen);
     socket.on("message", (data) => this.onFrame(data.toString()));
