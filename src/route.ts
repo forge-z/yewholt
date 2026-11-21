@@ -1,5 +1,5 @@
 /** Commands that drive the Buzz daemon. Their behaviour is unchanged by the harness. */
-export const DAEMON_COMMANDS = ["install", "start", "stop", "status", "admin", "daemon"] as const;
+export const DAEMON_COMMANDS = ["install", "start", "stop", "status", "admin", "daemon", "pair", "agents"] as const;
 export type DaemonCommand = (typeof DAEMON_COMMANDS)[number];
 
 export type Route =
@@ -53,6 +53,10 @@ Usage:
   yewholt status [--home dir]
   yewholt admin keys|bots|channel [--home dir]
   yewholt admin budget <name> <tokens> [--home dir]
+  yewholt pair add <providerPubkey> --label <label> [--home dir]
+  yewholt pair list [--home dir]
+  yewholt pair remove <providerPubkey> [--home dir]
+  yewholt agents list [--home dir]
   yewholt help                   Show this message
 `;
 }

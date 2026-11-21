@@ -4,9 +4,10 @@ import { readFileSync } from "node:fs";
 import WebSocket from "ws";
 import { RelayClient } from "../src/nostr-client.js";
 import { generateKeyPair, ownerAuthTag, pubkeyOf, signEvent, unixNow, verifyEvent, type NostrEvent } from "../src/nostr.js";
-import { open, seal } from "./helpers/control-spike-crypto.js";
+import { open, seal } from "../src/control-crypto.js";
 
 const kinds = [30079, 1059, 4] as const;
+const purpose = "yewholt-control-spike-v1";
 type Kind = (typeof kinds)[number];
 type Filter = { kinds: Kind[]; "#p": string[] };
 type Ack = Awaited<ReturnType<RelayClient["publish"]>>;
@@ -90,14 +91,14 @@ function controlEvent(kind: Kind, providerSecret: string, daemonPubkey: string, 
   if (kind === 4) tags.push(["t", "yewholt-control-spike"]);
   const signer = kind === 1059 ? generateKeyPair().secret : providerSecret;
   const body = kind === 1059 ? JSON.stringify(signEvent(providerSecret, 30079, payload, tags, createdAt)) : payload;
-  const content = JSON.stringify({ ...context, ciphertext: seal(body, signer, daemonPubkey, context) });
+  const content = JSON.stringify({ ...context, ciphertext: seal(body, signer, daemonPubkey, context, purpose) });
   return { event: signEvent(signer, kind, content, tags, createdAt), payload };
 }
 
 function decrypt(received: NostrEvent, daemonSecret: string, provider: string): string {
   assert.ok(verifyEvent(received), "invalid outer signature");
   const { agentPubkey, requestId, ciphertext } = JSON.parse(received.content);
-  const plaintext = open(ciphertext, daemonSecret, received.pubkey, { agentPubkey, requestId });
+  const plaintext = open(ciphertext, daemonSecret, received.pubkey, { agentPubkey, requestId }, purpose);
   if (received.kind !== 1059) {
     assert.equal(received.pubkey, provider);
     return plaintext;

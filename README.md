@@ -222,6 +222,87 @@ The startup override binds the unmodified Compose bundle to loopback only. The s
 the publish/replay/authentication matrix, not keys or payloads. Remove the disposable
 `$spike_home` directory afterward.
 
+#### Multi-VM daemon provisioning (Phase 1)
+
+The daemon now accepts encrypted provisioning from a paired provider through the Buzz
+relay, without SSH or an inbound daemon port. The macOS provider and target management
+are separate phases. The provider is trusted code: it receives the agent's private key
+by design and can provision or replace agents on each daemon that pairs with it.
+
+```sh
+yewholt admin keys                                 # use this daemon's owner pubkey as daemonPubkey
+yewholt pair add <providerPubkey> --label "My Mac"
+yewholt pair list
+yewholt pair remove <providerPubkey>
+yewholt agents list
+```
+
+The daemon uses its existing install owner key as its control identity. Use a distinct
+install key per daemon on a shared relay. Both daemon and provider connections must
+authenticate via NIP-42 and be admitted to the relay: register their public keys as
+members using the relay's member administration, or use NIP-OA delegation from an
+admitted owner where the relay allows it (as the local test below does for the provider).
+Admission to the relay does **not** grant deploy permission. Pair entries are local to
+`$YEWHOLT_HOME/state/pairings/<provider-pubkey>.json`, never editable via chat, and
+an empty list refuses all deploys. Pair changes take effect without restarting;
+removing a key does not stop its existing agents.
+
+`agents list` reads the daemon's last status snapshot and shows only external agents,
+their state, the local target pubkey, and the last applied control deploy time (null
+for provisioned files not installed by the control channel). The snapshot can be stale
+while the daemon is stopped.
+
+**Wire protocol v1.** Both directions use kind `1059`, with
+`["p","<recipient pubkey>"]` and `["t","yewholt-control"]`. This is a Yewholt
+protocol carried by a Buzz kind, not NIP-44 or NIP-59. Unlike the Phase 0 transport
+probe, the designated sender signs the outer event directly, so the daemon can verify
+the provider signature and inspect the pairing **before** decrypting the request.
+The signed content is a JSON envelope:
+
+```json
+{"version":1,"type":"deploy","issuedAt":1795274778000,"agentPubkey":"<64 lowercase hex>","requestId":"<lowercase UUID>","ciphertext":"<base64>"}
+```
+
+- `issuedAt` is Unix milliseconds and `created_at` is the same time in whole
+  seconds. Use synchronized clocks. Requests before the current pairing or more than
+  60 seconds in the future are denied. Newer requests for an agent take precedence
+  over older ones on replay; ties use the smaller Nostr event ID.
+- Ciphertext encodes `salt (32) || nonce (12) || tag (16) || AES-GCM ciphertext`.
+  The AES-256 key comes from secp256k1 ECDH (shared x coordinate), HKDF-SHA256 with that
+  salt, and UTF-8 info `yewholt-control-v1/deploy` or
+  `yewholt-control-v1/confirmation`. The AAD is the 32 raw agent-pubkey bytes
+  followed by the UTF-8 request UUID. The metadata is signed but not confidential.
+- The deploy plaintext is the provisioning object described above. For compatibility
+  `channelId: null` means no channel. Only recognized provisioning fields are saved;
+  `env_vars` and `system_prompt` are not runtime inputs in this phase. The daemon
+  validates the payload and atomically installs it with mode `0600`. Existing file
+  reconciliation manages the runtime.
+- The reply has `type: "confirmation"`, the same agent pubkey and request ID,
+  and plaintext `{job, ok, agentPubkey, error?}`, with `job` equal to `requestId`.
+  Success confirms durable provisioning, not that the agent is already online.
+  Errors are fixed strings, never supplied payload data. Only **signed** requests
+  with identifiable addresses and jobs get replies.
+- `$YEWHOLT_HOME/state/control.json` stores job outcomes keyed by provider and
+  request ID, the latest deploy ordering per agent, and a digest to recover an
+  interrupted write. It carries no provisioning plaintext. A known job can be
+  re-confirmed without rewriting the agent file; a new job with the same normalized
+  payload leaves the file untouched. A changed payload replaces the file and uses
+  the existing conversation for that agent.
+
+**Local integration.** Bring up the disposable Phase 0 Compose relay and leave it
+running. From this repository, run:
+
+```sh
+npm run build
+node dist/test/spike-daemon-control.js ws://127.0.0.1:13000 "$spike_home/owner.key"
+```
+
+The fake provider uses ephemeral test identities and a new daemon home, prints the
+home path for cleanup, publishes a deploy before the daemon starts, checks its
+confirmation and the agent's kind 10100 and online kind 20001, then checks retry,
+deduplication, revocation and secret-free output. The script stops its daemon.
+Remove its disposable home and stop the Phase 0 Compose stack before reusing the port.
+
 ### Coding bots (`code`)
 
 A bot whose stored permissions include `code` is a coding agent. It reads, writes, edits, and runs shell commands in its own workspace, and asks in the chat before anything on the approval list below. A bot without `code` has no tools and behaves as before. The Onboarding Specialist never gets `code`: a proposal that gives it `code` is refused.
