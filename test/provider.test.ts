@@ -139,7 +139,7 @@ test("local deploy golden JSON validates Buzz identity and atomically writes a s
   assert.equal(call({ ...request, agent: { ...agent, private_key_nsec: other.secret,
     auth_tag: JSON.stringify(ownerAuthTag(owner.secret, other.pubkey)) } }).status, 1);
   assert.deepEqual(readdirSync(join(home, "agents")), [agentPubkey + ".json"]);
-  assert.deepEqual(readdirSync(provider), ["targets"]);
+  assert.deepEqual(readdirSync(provider), ["status", "targets"]);
 });
 
 test("relay deploy waits two 120s windows, wakes only on timeout, and reuses the exact encrypted event", async () => {
@@ -151,6 +151,7 @@ test("relay deploy waits two 120s windows, wakes only on timeout, and reuses the
   const services: NonNullable<Parameters<typeof handle>[2]> = {
     loadTarget: () => ({ ...relay, wake }),
     identity: () => provider.secret,
+    report: () => {},
     wake: async (config, id, timeout) => {
       assert.deepEqual([config, id, timeout], [wake, request.request_id, 120_000]);
       attempts.push("wake");

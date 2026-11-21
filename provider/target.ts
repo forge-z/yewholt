@@ -56,8 +56,15 @@ function parseWake(value: unknown): Wake | undefined {
 }
 
 export function loadTarget(id: string, home = providerHome()): Target {
+  return validateTarget(id, privateJson(targetFile(id, home)));
+}
+
+export function targetFile(id: string, home = providerHome()): string {
   if (!validId(id)) throw new Error("Invalid target id");
-  const value = privateJson(join(home, "targets", id + ".json"));
+  return join(home, "targets", id + ".json");
+}
+
+export function validateTarget(id: string, value: unknown): Target {
   if (record(value) && value.id === id && typeof value.label === "string" && value.label.trim()) {
     const { transport, label, relay, daemonPubkey } = value;
     if (transport === "local" && only(value, ["id", "label", "transport"])) return { transport, label };

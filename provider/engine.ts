@@ -6,6 +6,7 @@ import { deployLocal } from "./local.js";
 import { provisioning } from "./package.js";
 import { waitForConfirmation, type RelayWait } from "./relay.js";
 import { ProviderSecrets } from "./secrets.js";
+import { recordOutcome } from "./status.js";
 import { loadTarget, validId, type Wake } from "./target.js";
 import { runWake } from "./wake.js";
 
@@ -25,6 +26,7 @@ type Services = {
   wait: RelayWait;
   wake: (config: Wake, requestId: string, timeoutMs: number) => Promise<void>;
   local: typeof deployLocal;
+  report: typeof recordOutcome;
 };
 
 const fail = (error: string) => ({ ok: false as const, error });
@@ -32,7 +34,10 @@ const fail = (error: string) => ({ ok: false as const, error });
 export async function handle(targetId: unknown, input: unknown, overrides?: Partial<Services>) {
   if (!record(input) || !isRequestId(input.request_id)) return fail("Invalid request");
   if (!validId(targetId)) return fail("Invalid target id");
-  if (input.op === "info") return info;
+  if (input.op === "info") {
+    const label = process.env.YEWHOLT_PROVIDER_DISPLAY_NAME;
+    return label && label.length <= 120 && !/[\x00-\x1f\x7f]/.test(label) ? { ...info, name: label } : info;
+  }
   if (input.op !== "deploy") return fail("Unsupported operation");
   if (!record(input.provider_config) || Object.keys(input.provider_config).length !== 0) return fail("Invalid provider configuration");
   const { request_id: requestId } = input;
@@ -40,7 +45,7 @@ export async function handle(targetId: unknown, input: unknown, overrides?: Part
   const services: Services = {
     loadTarget, identity: () => secrets.identity(), wait: waitForConfirmation,
     wake: (config, id, timeout) => runWake(config, id, timeout, (account) => secrets.instabox(account)),
-    local: deployLocal, ...overrides,
+    local: deployLocal, report: recordOutcome, ...overrides,
   };
   let target, agent;
   try {
@@ -51,12 +56,14 @@ export async function handle(targetId: unknown, input: unknown, overrides?: Part
   try {
     agent = provisioning(input.agent);
   } catch {
+    services.report(targetId, target, { failure: "package" });
     return fail("Invalid agent provisioning package");
   }
   const success = { ok: true as const, agent_id: agent.pubkey };
   try {
     if (target.transport === "local") {
       services.local(requestId, agent.pubkey, agent.file);
+      services.report(targetId, target, { pubkey: agent.pubkey });
       return success;
     }
     const secret = services.identity();
@@ -74,10 +81,18 @@ export async function handle(targetId: unknown, input: unknown, overrides?: Part
       }
       result = await wait();
     }
-    if (result === "confirmed") return success;
-    if (result === "refused") return fail("Deploy refused by the relay or daemon");
+    if (result === "confirmed") {
+      services.report(targetId, target, { pubkey: agent.pubkey });
+      return success;
+    }
+    if (result === "refused") {
+      services.report(targetId, target, { failure: "refused" });
+      return fail("Deploy refused by the relay or daemon");
+    }
+    services.report(targetId, target, { failure: wakeFailed ? "wake" : "timeout" });
     return fail(wakeFailed ? "Wake failed and no daemon confirmation was received" : "No daemon confirmation received");
   } catch {
+    services.report(targetId, target, { failure: "deploy" });
     return fail("Deploy failed");
   }
 }

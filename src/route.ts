@@ -1,10 +1,12 @@
 /** Commands that drive the Buzz daemon. Their behaviour is unchanged by the harness. */
 export const DAEMON_COMMANDS = ["install", "start", "stop", "status", "admin", "daemon", "pair", "agents"] as const;
 export type DaemonCommand = (typeof DAEMON_COMMANDS)[number];
+const PROVIDER_COMMANDS = ["provider", "targets"] as const;
+type ProviderCommand = (typeof PROVIDER_COMMANDS)[number];
 
 export type Route =
   | { kind: "harness"; args: string[] }
-  | { kind: "command"; command: DaemonCommand; args: string[] }
+  | { kind: "command"; command: DaemonCommand | ProviderCommand; args: string[] }
   | { kind: "usage"; exitCode: 0 | 1 };
 
 /** Positional subcommands of the pi CLI. They take no `--model`. */
@@ -19,6 +21,7 @@ export function route(argv: string[]): Route {
   if (command === undefined) return { kind: "harness", args: [] };
   if (command === "code") return { kind: "harness", args: rest };
   if (command === "help" || command === "--help" || command === "-h") return { kind: "usage", exitCode: 0 };
+  if (command === "provider" || command === "targets") return { kind: "command", command, args: rest };
   if ((DAEMON_COMMANDS as readonly string[]).includes(command)) {
     return { kind: "command", command: command as DaemonCommand, args: rest };
   }
@@ -53,6 +56,13 @@ Usage:
   yewholt status [--home dir]
   yewholt admin keys|bots|channel [--home dir]
   yewholt admin budget <name> <tokens> [--home dir]
+  yewholt provider install
+  yewholt targets add <id> (--relay <url> --daemon <pubkey> | --local) [--label <label>]
+    [--wake command --cmd <command> | --wake instabox --account <id> --machine <id>]
+  yewholt targets list
+  yewholt targets remove <id>
+  yewholt targets doctor [id]
+  yewholt pair                    Show the provider pubkey and pairing instructions
   yewholt pair add <providerPubkey> --label <label> [--home dir]
   yewholt pair list [--home dir]
   yewholt pair remove <providerPubkey> [--home dir]

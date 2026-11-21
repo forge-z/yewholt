@@ -30,15 +30,16 @@ export class RelayClient {
     private readonly logClosed = true,
   ) {}
 
-  async connect(): Promise<void> {
+  async connect(timeoutMs = 15_000, onOpen?: () => void): Promise<void> {
     const socket = new WebSocket(this.url);
     this.socket = socket;
+    if (onOpen) socket.once("open", onOpen);
     socket.on("message", (data) => this.onFrame(data.toString()));
     let timer: NodeJS.Timeout | undefined;
     let authId: string | undefined;
     try {
       await new Promise<void>((resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(`AUTH timed out for ${this.url}`)), 15_000);
+        timer = setTimeout(() => reject(new Error(`AUTH timed out for ${this.url}`)), timeoutMs);
         socket.once("error", reject);
         socket.once("close", () => reject(new Error(`Socket closed before AUTH completed for ${this.url}`)));
         this.challenge = (value) => {
