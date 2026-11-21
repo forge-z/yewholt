@@ -12,9 +12,10 @@ import { readKey } from "./keys.js";
 import { envFilePath, logPath, ownerKeyPath, pidPath, secretsDir, sqlitePath, statusPath, yewholtHome } from "./paths.js";
 import { compose, newRelaySecret, relayHealthy, waitForRelay, writeRelayEnv } from "./relay.js";
 import { Yewholt } from "./session.js";
+import { runHarness } from "./harness.js";
+import { route, usageText, withDefaultModel } from "./route.js";
 
 const args = process.argv.slice(2);
-const command = args[0];
 
 main().catch((error: unknown) => {
   console.error(error instanceof Error ? error.message : error);
@@ -22,29 +23,29 @@ main().catch((error: unknown) => {
 });
 
 async function main(): Promise<void> {
-  const home = flag("--home") ?? yewholtHome();
+  const target = route(args);
+  // Harness arguments belong to pi, so `--home` is read only for Yewholt's own commands.
+  const home = (target.kind === "harness" ? undefined : flag("--home")) ?? yewholtHome();
   loadEnvFile(home);
-  if (command === "install") return install(home);
-  if (command === "start") return start(home);
-  if (command === "stop") return stop(home);
-  if (command === "status") return status(home);
-  if (command === "admin") return admin(home, args.slice(1));
-  if (command === "daemon") return runDaemon(home);
-  usage();
-  process.exit(command ? 1 : 0);
-}
-
-function usage(): void {
-  console.log(`Yewholt: durable agents on Buzz
-
-Usage:
-  yewholt install [--home dir] [--port 3000]
-  yewholt start [--home dir]
-  yewholt stop [--home dir]
-  yewholt status [--home dir]
-  yewholt admin keys|bots|channel [--home dir]
-  yewholt admin budget <name> <tokens> [--home dir]
-`);
+  if (target.kind === "harness") return runHarness(withDefaultModel(target.args, process.env));
+  if (target.kind === "usage") {
+    console.log(usageText());
+    process.exit(target.exitCode);
+  }
+  switch (target.command) {
+    case "install":
+      return install(home);
+    case "start":
+      return start(home);
+    case "stop":
+      return stop(home);
+    case "status":
+      return status(home);
+    case "admin":
+      return admin(home, target.args);
+    case "daemon":
+      return runDaemon(home);
+  }
 }
 
 async function install(home: string): Promise<void> {

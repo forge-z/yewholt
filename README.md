@@ -1,10 +1,34 @@
 # Yewholt
 
-**Yewholt: durable agents on Buzz.**
+**Yewholt: a pi coding harness, and durable agents on Buzz.**
 
-Yewholt is a headless daemon that runs durable coding agents behind [Buzz](https://github.com/block/buzz). It is not a Buzz fork and it has no UI. The stock Buzz relay runs unmodified on the same host. The stock Buzz app (Mac or iOS, in [block/buzz-app](https://github.com/block/buzz-app)) talks only to that relay. Each bot is a Nostr member of a channel, the same way a person is.
+Yewholt has two roles:
+
+1. **Coding harness.** Type `yewholt` in any directory and it opens an interactive [pi](https://pi.dev) coding-agent session on that directory. It is the same harness as the `pi` CLI and it loads the same pi packages (extensions, skills, prompt templates, themes). See [Harness](#harness).
+2. **Durable bots on Buzz.** A headless daemon that runs durable coding agents behind [Buzz](https://github.com/block/buzz). The daemon is not a Buzz fork and has no UI of its own. The stock Buzz relay runs unmodified on the same host. The stock Buzz app (Mac or iOS, in [block/buzz-app](https://github.com/block/buzz-app)) talks only to that relay. Each bot is a Nostr member of a channel, the same way a person is.
 
 Calendar, email, MCP, cron, memory, kanban, and browser tools are out of core. They belong in later Buzz plugins.
+
+## Harness
+
+```bash
+cd ~/src/some-project
+yewholt                       # interactive pi session on this directory
+yewholt code -p "summarise this repo"
+yewholt code --model anthropic/claude-sonnet-5
+yewholt code --help           # every harness flag
+```
+
+`yewholt` with no arguments opens the harness in the current directory. `yewholt code [args...]` forwards every following argument to it unchanged, so any `pi` flag or subcommand works after `code` (`yewholt code install <source>`, `yewholt code --version`).
+
+Yewholt calls the public `main()` export of `@earendil-works/pi-coding-agent`, the function the `pi` bin runs. It does not ship its own TUI or spawn a `pi` binary. Settings, sessions, and pi packages come from the same `~/.pi/agent` directory as `pi`, so anything installed with `pi install` is available in `yewholt`, and the other way round.
+
+Yewholt adds two defaults and nothing else:
+
+- `$YEWHOLT_HOME/.env` (default `~/.yewholt/.env`) is loaded first, so the provider keys the bots use also work in the harness. A variable set in the shell wins.
+- If `YEWHOLT_MODEL` is set and you pass no `--model`, Yewholt passes `--model $YEWHOLT_MODEL`. A `--model` on the command line wins. Pi subcommands such as `install` or `config` get no default model.
+
+`--home` is not read in harness mode; set `YEWHOLT_HOME` to point at another state directory.
 
 ## Architecture
 
@@ -51,6 +75,7 @@ The information-flow broker in `docs/practical-information-flow-for-buzz-agents.
 npm install
 npm run build
 npm link          # optional, puts `yewholt` on PATH
+yewholt           # the coding harness, see Harness
 yewholt install   # ~/.yewholt, owner key, relay .env
 yewholt start     # official compose, then the daemon
 yewholt status
@@ -168,7 +193,7 @@ None of these are required. A provider is registered only when its own credentia
 
 | Variable | Use |
 |---|---|
-| `YEWHOLT_MODEL` | Default `provider/modelId`, for example `opencode/big-pickle` |
+| `YEWHOLT_MODEL` | Default `provider/modelId`, for example `opencode/big-pickle`. Also the harness default when no `--model` is given |
 | `YEWHOLT_TURN_TOKENS` | Tokens charged for one interpreter turn (default 1000) |
 | `YEWHOLT_BUDGET_TOKENS` | Per-session cap (default 100000) |
 | `YEWHOLT_HOME` | State directory. The key file is `$YEWHOLT_HOME/.env` |
@@ -212,6 +237,7 @@ SQLite is opened with pi-durable's Node adapter (WAL, `synchronous=NORMAL`). The
 - the kill -9 resume above
 - every pi-ai built-in provider registers only when its env credential resolves, including OpenCode Zen (`opencode/big-pickle`), and Claude/Codex subscription tokens do not
 - `~/.yewholt/.env` loads at start, does not override the shell, and is mode `0600`
+- CLI routing: `yewholt` and `yewholt code ...` reach the harness with arguments unchanged, `YEWHOLT_MODEL` is added only without `--model`, help flags exit 0, daemon commands route to themselves, unknown commands exit 1. The tests do not start the TUI or call a model
 
 Relay bring-up is not part of `npm test`. It needs Docker.
 
