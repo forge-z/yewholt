@@ -383,6 +383,11 @@ yewholt targets list
 yewholt targets doctor my-vm     # omit the ID to check all targets
 ```
 
+Pass the complete relay URL once. `targets add` converts `https://` to
+`wss://` and `http://` to `ws://`; do not prepend a second scheme. To
+fix a malformed stored URL, rerun `targets add` with the same ID, daemon
+pubkey, and any existing label and wake options.
+
 Use lowercase target IDs containing letters, digits, hyphens or underscores,
 starting with a letter or digit. The CLI writes each target file with mode
 `0600` and creates a legacy executable `buzz-backend-yewholt-<id>` in

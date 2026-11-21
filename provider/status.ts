@@ -5,7 +5,7 @@ import { record, writePrivateJson } from "../src/control-files.js";
 import { RelayClient } from "../src/nostr-client.js";
 import { pidPath, yewholtHome } from "../src/paths.js";
 import { targetIds } from "./install.js";
-import { loadTarget, privateJson, providerHome, type Target } from "./target.js";
+import { InvalidTargetRelay, loadTarget, privateJson, providerHome, type Target } from "./target.js";
 import { ProviderSecrets } from "./secrets.js";
 
 const RECENT_MS = 10 * 60 * 1_000;
@@ -99,8 +99,8 @@ export function listTargets(): void {
       const daemon = remote ? target.daemonPubkey + " (" + daemonEvidence(lastDeploy) + ")" : localState();
       console.log([id + " (" + safeText(target.label) + ")", remote ? safeText(target.relay) : "—", daemon,
         date(remote ? lastDeploy : undefined), agents, date(lastDeploy), lastFailure].join("\t"));
-    } catch {
-      console.log(id + "\tinvalid target configuration");
+    } catch (error) {
+      console.log(id + "\t" + (error instanceof InvalidTargetRelay ? error.message : "invalid target configuration"));
     }
   }
 }
@@ -130,7 +130,8 @@ export async function doctorTargets(id?: string): Promise<void> {
     let target: Target;
     try {
       target = loadTarget(id);
-    } catch {
+    } catch (error) {
+      if (error instanceof InvalidTargetRelay) throw error;
       throw new Error("Invalid or missing target configuration");
     }
     const { lastDeploy } = evidence(id, target);

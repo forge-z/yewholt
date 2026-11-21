@@ -17,13 +17,27 @@ export function validId(value: unknown): value is string {
   return typeof value === "string" && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(value);
 }
 
-export function relayUrl(value: unknown): value is string {
-  if (typeof value !== "string" || !/^wss?:\/\/[^\s\\]+$/.test(value)) return false;
+function normalizeRelay(value: unknown): string | undefined {
+  if (typeof value !== "string" || /[\s\x00-\x1f\x7f\\?#]/.test(value)) return;
+  const scheme = /^(wss?|https?):\/\/(?:\[[^\]]+\]|[^/:@%]+)(?::\d+)?(?:\/|$)/i.exec(value)?.[1];
+  if (!scheme) return;
+  const relay = scheme.toLowerCase().replace(/^http/, "ws") + value.slice(scheme.length);
   try {
-    const url = new URL(value);
-    return !!url.hostname && !url.username && !url.password && !/[?#]/.test(value);
+    const { hostname } = new URL(relay);
+    if (hostname.startsWith("[") || hostname.replace(/\.$/, "").split(".")
+      .every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(label))) return relay;
   } catch {
-    return false;
+    return;
+  }
+}
+
+export function relayUrl(value: unknown): value is string {
+  return typeof value === "string" && normalizeRelay(value) === value;
+}
+
+export class InvalidTargetRelay extends Error {
+  constructor(id: string) {
+    super(`Invalid relay URL for target ${id}. Use one scheme (ws://, wss://, http:// or https://) and a valid host. Re-run yewholt targets add ${id} --relay <url> --daemon <pubkey> with any existing label and wake options.`);
   }
 }
 
@@ -68,9 +82,10 @@ export function validateTarget(id: string, value: unknown): Target {
   if (record(value) && value.id === id && typeof value.label === "string" && value.label.trim()) {
     const { transport, label, relay, daemonPubkey } = value;
     if (transport === "local" && only(value, ["id", "label", "transport"])) return { transport, label };
-    if (transport === "relay" && only(value, ["id", "label", "transport", "relay", "daemonPubkey", "wake"]) &&
-        relayUrl(relay) && isPubkey(daemonPubkey)) {
-      return { transport, label, relay, daemonPubkey, wake: parseWake(value.wake) };
+    if (transport === "relay" && only(value, ["id", "label", "transport", "relay", "daemonPubkey", "wake"])) {
+      const normalized = normalizeRelay(relay);
+      if (!normalized) throw new InvalidTargetRelay(id);
+      if (isPubkey(daemonPubkey)) return { transport, label, relay: normalized, daemonPubkey, wake: parseWake(value.wake) };
     }
   }
   throw new Error("Invalid target configuration");

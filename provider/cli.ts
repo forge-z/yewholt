@@ -4,7 +4,7 @@ import { writePrivateJson } from "../src/control-files.js";
 import { pubkeyOf } from "../src/nostr.js";
 import { discoverableId, installEngine, installProvider, installShim, removeShim, verifyShim } from "./install.js";
 import { ProviderSecrets } from "./secrets.js";
-import { targetFile, validateTarget } from "./target.js";
+import { InvalidTargetRelay, targetFile, validateTarget } from "./target.js";
 import { doctorTargets, listTargets } from "./status.js";
 
 class CliError extends Error {}
@@ -48,8 +48,9 @@ function parseTarget(id: string, args: string[]) {
   };
   try {
     if (Buffer.byteLength(JSON.stringify(raw)) >= 32 * 1024) throw new Error();
-    return { raw, target: validateTarget(id, raw) };
-  } catch {
+    return validateTarget(id, raw);
+  } catch (error) {
+    if (error instanceof InvalidTargetRelay) throw error;
     throw new CliError("Invalid target configuration (check relay URL, daemon pubkey and wake options)");
   }
 }
@@ -65,10 +66,10 @@ export async function providerCommand(command: "provider" | "targets" | "pair", 
     }
     const [sub, id, ...rest] = args;
     if (sub === "add") {
-      const { raw, target } = parseTarget(id, rest);
+      const target = parseTarget(id, rest);
       verifyShim(id);
       installEngine();
-      writePrivateJson(targetFile(id), raw);
+      writePrivateJson(targetFile(id), { id, ...target });
       installShim(id, target);
       console.log("Configured target " + id);
     } else if (sub === "list" && args.length === 1) {
@@ -87,7 +88,7 @@ export async function providerCommand(command: "provider" | "targets" | "pair", 
       throw new CliError("Usage: yewholt targets add <id> [options] | list | remove <id> | doctor [id]");
     }
   } catch (error) {
-    if (error instanceof CliError) throw error;
+    if (error instanceof CliError || error instanceof InvalidTargetRelay) throw error;
     throw new Error("Provider operation failed; check target files, credentials and managed entry permissions.");
   }
 }
