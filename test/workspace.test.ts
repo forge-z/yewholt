@@ -135,6 +135,20 @@ test("paths: $YEWHOLT_HOME outside the bot's own workspace is refused, also thro
   });
 });
 
+test("paths: the daemon's Pi credential file is refused even through a workspace symlink", async () => {
+  await withHome((home, outside) => {
+    const workspace = ensureWorkspace(home, BOT);
+    const credentialFile = join(outside, "auth.json");
+    const roots = { home, workspace, credentialFile };
+    writeFileSync(credentialFile, "{}", { mode: 0o600 });
+    symlinkSync(credentialFile, join(workspace, "alias"));
+    for (const tool of ["read", "write", "edit"] as const) {
+      assert.equal(judgePath(tool, credentialFile, roots).kind, "refuse");
+      assert.equal(judgePath(tool, "alias", roots).kind, "refuse");
+    }
+  });
+});
+
 test("workspace bash: exact sudo argv preserves quotes and command substitution", () => {
   const workspace = "/srv/work spaces/-coder";
   const command = "printf '%s\\n' \"$(printf 'hello world')\"";

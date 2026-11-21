@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import type { Models } from "@earendil-works/pi-ai";
 import type { MutableModels } from "@earendil-works/pi-ai/models";
@@ -91,7 +91,8 @@ export class Yewholt {
   ) {}
 
   static async open(storage: Storage, options: SessionOptions): Promise<Yewholt> {
-    const models = options.models ?? (await loadModels());
+    const agentDir = options.piDir ?? piDir();
+    const models = options.models ?? (await loadModels(process.env, join(agentDir, "auth.json")));
     const registry = createRegistry();
     // Installed for every process, selected only by code bots' conversations (settings.extensions
     // is empty, so nothing is selected by default, as before any extension existed).
@@ -132,7 +133,7 @@ export class Yewholt {
         models,
         admins: new Set((options.admins ?? parseAdmins(process.env.YEWHOLT_ADMINS)).map((key) => key.toLowerCase())),
       },
-      { registry, toolSearch, gate, packages: [], piDir: options.piDir ?? piDir() },
+      { registry, toolSearch, gate, packages: [], piDir: agentDir },
       options.isolation ?? new WorkspaceIsolation(options.home),
     );
     ready(self);
@@ -901,7 +902,12 @@ export class Yewholt {
     } catch {
       // keep the configured path
     }
-    return { home, workspace: this.isolation.workspace(bot.pubkey), homeAliases: real === home ? [] : [real] };
+    return {
+      home,
+      workspace: this.isolation.workspace(bot.pubkey),
+      homeAliases: real === home ? [] : [real],
+      credentialFile: join(this.coding.piDir, "auth.json"),
+    };
   }
 
   /** Store a parked call's request and post it in the channel of the turn it belongs to. Idempotent. */

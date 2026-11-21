@@ -116,7 +116,7 @@ async function install(home: string): Promise<void> {
   console.log("Relay: stock Buzz compose (ghcr.io/block/buzz:0.3.0) with Postgres, Redis, and MinIO.");
   const envFile = ensureEnvFile(home);
   console.log("Back up secrets/ and relay/.env. Buzz has no key rotation; a lost secret is a lost identity.");
-  console.log(`Provider keys: ${envFile} (mode 0600). Paste a key, then yewholt start. Restart after changes.`);
+  console.log(`Provider keys: /login in yewholt as the daemon user, or ${envFile} (mode 0600). Restart after changes.`);
   console.log("Next: yewholt start");
 }
 

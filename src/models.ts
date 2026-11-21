@@ -1,5 +1,7 @@
+import { defaultProviderAuthContext, InMemoryCredentialStore, type ApiKeyCredential } from "@earendil-works/pi-ai";
 import { createModels, type Models, type Provider } from "@earendil-works/pi-ai/models";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+import { readStoredCredential } from "@earendil-works/pi-coding-agent";
 
 export type ModelChoice = {
   provider: string;
@@ -61,13 +63,13 @@ function envValue(env: Env, name: string): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 
-/** True when the provider's own api-key resolver accepts this env. OAuth-only providers do not. */
-async function hasEnvCredential(provider: Provider, env: Env): Promise<boolean> {
+async function hasCredential(provider: Provider, env: Env, credential?: ApiKeyCredential): Promise<boolean> {
   const apiKey = provider.auth.apiKey;
   if (!apiKey) return false;
   const explicitCredentials = envValue(env, "GOOGLE_APPLICATION_CREDENTIALS");
   try {
     const resolved = await apiKey.resolve({
+      credential,
       ctx: {
         env: async (name) => envValue(env, name),
         fileExists: async (path) => {
@@ -90,16 +92,24 @@ async function hasEnvCredential(provider: Provider, env: Env): Promise<boolean> 
 }
 
 /**
- * Register every built-in pi-ai provider whose env credential resolves.
- * Nothing is required: with an empty env the catalog is empty and chat
- * commands still run. `env` is the only place keys are read; `process.env`
- * is not consulted unless the caller passes it.
+ * Register built-in providers with usable ambient auth or a saved Pi API key.
+ * Use the same credentials for catalog admission and model requests.
  */
-export async function loadModels(env: Env = process.env): Promise<Models> {
-  const models = createModels();
+export async function loadModels(env: Env = process.env, authPath?: string): Promise<Models> {
+  const credentials = new InMemoryCredentialStore();
+  const models = createModels({
+    credentials,
+    authContext: { ...defaultProviderAuthContext(), env: async (name) => envValue(env, name) },
+  });
   for (const provider of officialProviders()) {
     const installed = installable(provider);
-    if (!(await hasEnvCredential(installed, env))) continue;
+    if (!installed.auth.apiKey) continue;
+    if (!(await hasCredential(installed, env))) {
+      const saved = authPath ? readStoredCredential(installed.id, authPath) : undefined;
+      if (saved?.type !== "api_key" || typeof saved.key !== "string" || !saved.key.trim() ||
+          !(await hasCredential(installed, env, saved))) continue;
+      await credentials.modify(installed.id, async () => saved);
+    }
     models.setProvider(installed);
   }
   return models;
