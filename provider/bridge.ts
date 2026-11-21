@@ -12,7 +12,7 @@ import { targetIds } from "./install.js";
 import { waitForConfirmation, type RelayWait } from "./relay.js";
 import { ProviderSecrets } from "./secrets.js";
 import { recordOutcome } from "./status.js";
-import { loadTarget, privateJson, providerHome, relayUrl, validId } from "./target.js";
+import { InvalidTargetRelay, loadTarget, privateJson, providerHome, relayUrl, validId } from "./target.js";
 import { runWake } from "./wake.js";
 
 type Binding = {
@@ -188,8 +188,9 @@ export async function bridge(input: unknown, wait: RelayWait = waitForConfirmati
       recordOutcome(binding.target, target, { pubkey });
     }
     return ok;
-  } catch {
-    return fail("Yewholt operation failed; check the provider installation and target");
+  } catch (error) {
+    return fail(error instanceof InvalidTargetRelay ? error.message
+      : "Yewholt operation failed; check the provider installation and target");
   }
 }
 
