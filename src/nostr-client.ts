@@ -27,6 +27,7 @@ export class RelayClient {
     private readonly url: string,
     private readonly secretHex: string,
     private readonly authTag?: string[],
+    private readonly logClosed = true,
   ) {}
 
   async connect(): Promise<void> {
@@ -131,7 +132,7 @@ export class RelayClient {
       const subscription = this.subscriptions.get(id);
       this.subscriptions.delete(id);
       const key = `${id}\n${reason}`;
-      if (!this.closedLogged.has(key)) {
+      if (this.logClosed && !this.closedLogged.has(key)) {
         this.closedLogged.add(key);
         console.error(`relay CLOSED ${id} for ${pubkeyOf(this.secretHex).slice(0, 8)}: ${reason || "(no reason)"}`);
       }
