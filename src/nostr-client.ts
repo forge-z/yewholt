@@ -6,6 +6,7 @@ type OkResult = { ok: boolean; message: string };
 type Subscription = {
   onEvent: (event: NostrEvent) => void;
   onClosed?: (id: string, reason: string) => void;
+  onEose?: () => void;
 };
 
 /**
@@ -21,7 +22,6 @@ export class RelayClient {
   /** Ids this client sent CLOSE for; the relay's answer to those is not a relay close. */
   private readonly selfClosed = new Set<string>();
   private challenge: ((value: string) => void) | undefined;
-  private authed: Promise<void> | undefined;
 
   constructor(
     private readonly url: string,
@@ -33,23 +33,29 @@ export class RelayClient {
     const socket = new WebSocket(this.url);
     this.socket = socket;
     socket.on("message", (data) => this.onFrame(data.toString()));
-    await new Promise<void>((resolve, reject) => {
-      socket.once("open", () => resolve());
-      socket.once("error", (error) => reject(error));
-    });
-    this.authed = new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`AUTH timed out for ${this.url}`)), 15_000);
-      this.challenge = (value) => {
-        clearTimeout(timer);
-        const event = authEvent(this.secretHex, this.url, value, this.authTag);
-        this.send(["AUTH", event]);
-        this.waiters.set(event.id, (result) => {
-          if (result.ok) resolve();
-          else reject(new Error(result.message || "AUTH rejected"));
-        });
-      };
-    });
-    await this.authed;
+    let timer: NodeJS.Timeout | undefined;
+    let authId: string | undefined;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`AUTH timed out for ${this.url}`)), 15_000);
+        socket.once("error", reject);
+        socket.once("close", () => reject(new Error(`Socket closed before AUTH completed for ${this.url}`)));
+        this.challenge = (value) => {
+          this.challenge = undefined;
+          const event = authEvent(this.secretHex, this.url, value, this.authTag);
+          authId = event.id;
+          this.waiters.set(event.id, (result) => {
+            if (result.ok) resolve();
+            else reject(new Error(result.message || "AUTH rejected"));
+          });
+          this.send(["AUTH", event]);
+        };
+      });
+    } finally {
+      clearTimeout(timer);
+      this.challenge = undefined;
+      if (authId) this.waiters.delete(authId);
+    }
   }
 
   async publish(event: NostrEvent): Promise<OkResult> {
@@ -62,14 +68,16 @@ export class RelayClient {
    * REQ under `id`. A second subscribe with the same id replaces the handler
    * (and, per NIP-01, the relay replaces the filters). `onClosed` receives a
    * relay CLOSED for this id; the subscription is dropped either way.
+   * `onEose` marks the end of the relay's stored results.
    */
   subscribe(
     id: string,
     filters: readonly Record<string, unknown>[],
     onEvent: (event: NostrEvent) => void,
     onClosed?: (id: string, reason: string) => void,
+    onEose?: () => void,
   ): void {
-    this.subscriptions.set(id, { onEvent, onClosed });
+    this.subscriptions.set(id, { onEvent, onClosed, onEose });
     this.send(["REQ", id, ...filters]);
   }
 
@@ -110,6 +118,10 @@ export class RelayClient {
     }
     if (type === "EVENT" && typeof rest[0] === "string" && rest[1] && typeof rest[1] === "object") {
       this.subscriptions.get(rest[0])?.onEvent(rest[1] as NostrEvent);
+      return;
+    }
+    if (type === "EOSE" && typeof rest[0] === "string") {
+      this.subscriptions.get(rest[0])?.onEose?.();
       return;
     }
     if (type === "CLOSED" && typeof rest[0] === "string") {

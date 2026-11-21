@@ -165,6 +165,63 @@ Yewholt recognizes a DM when the newest trusted kind 39002 member list contains 
 
 The Buzz owner can stop an external agent with a message containing exactly `!shutdown` after trimming whitespace. Yewholt queues offline presence and closes the agent's subscriptions. The provider can restart it by replacing the file with a valid copy whose modification time is newer than the stop. A removed file retires the durable record and triggers offline presence when the daemon has the loaded key. Run `yewholt status` or read `status.json` to see each agent's active, stopped, retired, or invalid state.
 
+#### Multi-VM control channel (Phase 0)
+
+**Use kind 1059 for the next phase.** In the [Phase 0 spike](https://github.com/forge-z/yewholt/issues/9),
+the stock local Buzz relay (`ghcr.io/block/buzz:0.3.0`, relay membership required) stored the wrap published
+while the daemon key was disconnected. A fresh connection using that key got the event before `EOSE`
+with a `kinds` + `#p` filter, verified the signatures, and decrypted the deploy fixture. This spike does
+not change the provisioning path above.
+
+| Kind | Publish `OK` on an admitted socket | Fresh recipient subscription | Other admitted key, same filter |
+| --- | --- | --- | --- |
+| 30079 (`d` = agent pubkey) | `false`, `restricted: unknown event kind` | `EOSE`, 0 events | `EOSE`, 0 events |
+| 1059 (gift-wrap carrier) | `true`, empty message | `EOSE`, 1 event, decrypted | `CLOSED: restricted: p-gated events require #p matching your pubkey` |
+| 4 (custom payload and `t` tag) | `false`, `restricted: unknown event kind` | `EOSE`, 0 events | `EOSE`, 0 events |
+
+A second, newer 30079 from the same author with the same `d` received the same rejection; the
+relay returned neither event, so addressable replacement was not available. Kind 1059 is not
+addressable; this result does not provide deploy deduplication or replacement.
+
+An unknown publisher and the intended recipient without delegation both got
+`restricted: not a relay member` on NIP-42 AUTH. The intended recipient and the unrelated
+reader were both admitted with NIP-OA delegation for the reads above. Without AUTH, all three
+publish probes returned `OK false` and all three subscriptions returned `CLOSED`, both with
+`auth-required: not authenticated`. The 1059 outer signer could be a fresh key because the
+publishing **connection** was authenticated as the relay owner; this does not prove a
+non-member provider can publish on its own connection.
+
+The sample 1059 has a fresh outer signing key and an encrypted, provider-signed inner event.
+It uses secp256k1 ECDH, HKDF-SHA256, and AES-256-GCM with the agent pubkey and request ID as AAD.
+Those two values are visible in the sample envelope so a fresh recipient can decrypt without
+prior request state. This is a relay carrier test, not a NIP-44/NIP-59 interoperability claim
+or a production wire format. Replay was measured after client reconnect, not across relay
+restarts, at any particular retention interval, or against a production Buzz deployment.
+
+To rerun, use a disposable local relay. From the repository root (port 13000 must be free):
+
+```sh
+npm run build
+spike_home=$(mktemp -d "$HOME/yewholt-phase0.XXXXXX")
+node --input-type=module - "$spike_home" <<'JS'
+import { writeFileSync } from "node:fs";
+import { generateKeyPair } from "./dist/src/nostr.js";
+import { newRelaySecret, writeRelayEnv } from "./dist/src/relay.js";
+const home = process.argv[2];
+const owner = generateKeyPair();
+writeRelayEnv(home, { port: 13000, relayUrl: "ws://127.0.0.1:13000", ownerPubkey: owner.pubkey }, newRelaySecret());
+writeFileSync(home + "/owner.key", owner.secret + "\n", { mode: 0o600, flag: "wx" });
+JS
+BUZZ_HTTP_PORT=127.0.0.1:13000 docker compose -p yewholt-phase0 \
+  --project-directory "$spike_home/relay" up -d --wait
+node dist/test/spike-control-kind.js ws://127.0.0.1:13000 "$spike_home/owner.key"
+docker compose -p yewholt-phase0 --project-directory "$spike_home/relay" down -v
+```
+
+The startup override binds the unmodified Compose bundle to loopback only. The script emits
+the publish/replay/authentication matrix, not keys or payloads. Remove the disposable
+`$spike_home` directory afterward.
+
 ### Coding bots (`code`)
 
 A bot whose stored permissions include `code` is a coding agent. It reads, writes, edits, and runs shell commands in its own workspace, and asks in the chat before anything on the approval list below. A bot without `code` has no tools and behaves as before. The Onboarding Specialist never gets `code`: a proposal that gives it `code` is refused.
@@ -356,7 +413,8 @@ SQLite is opened with pi-durable's Node adapter (WAL, `synchronous=NORMAL`). The
 - the Portuguese create example, approval, a second session, model change, and stop
 - every model phrase above, the verbatim `@Onboarding Specialist …` messages, leading-mention stripping, and the `YEWHOLT_MODEL` default for a create without a model
 - relay membership from a verbatim Buzz 0.3.0 capture (`test/fixtures/buzz-membership-20261121.json`): newest relay-signed 39002 per channel, removal, forged lists ignored, no relay key means stored scope only
-- the relay client against a loopback WebSocket stub: per-subscription routing, `unsubscribe`, `CLOSED` reasons; bot connections, re-subscription, and one-time handling of a message seen on two connections
+- the relay client against a loopback WebSocket stub: per-subscription event and `EOSE` routing, `unsubscribe`, `CLOSED` reasons; bot connections, re-subscription, and one-time handling of a message seen on two connections
+- the Phase 0 control-channel fixture's encryption round-trip and rejection of mismatched AAD
 - a budget that blocks a second create and still allows `approve`
 - the kill -9 resume above
 - code bots: the approval classifier (every dangerous form, combined flags, quoting, `cd x && rm -rf y`, safe look-alikes); the workspace folder and its minimal env; a bash call cannot see a variable set in the daemon's `process.env`; `$YEWHOLT_HOME` reads refused, also through symlinks; tools only with `code`, never for the Onboarding Specialist, and grant/revoke on the next turn; the approval flow end to end on pi-ai's faux provider (park, request message, `aprovo` runs once, `rejeito` refuses, ambiguity asks, reply targets one request, a non-owner's `aprovo` runs nothing and leaves the request queued, an admin from `YEWHOLT_ADMINS` and the install owner can answer); a model error on the faux provider reaches the chat with its reason and provider text, with a fake key masked, for plain and code bots; a kill -9 while parked, then `aprovo` after reopen runs the command exactly once; the Pi package loader with a fixture `pi.durable` package and a broken one that is skipped

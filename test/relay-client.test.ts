@@ -7,7 +7,7 @@ import { generateKeyPair, type NostrEvent } from "../src/nostr.js";
 import { botEvents, byKind, capture, PRIVATE } from "./helpers/fixture.js";
 
 /** A loopback NIP-42 relay stub. It only speaks the frames these tests need. */
-async function fakeRelay(): Promise<{
+async function fakeRelay(immediateChallenge = false): Promise<{
   url: string;
   frames: unknown[][];
   send: (frame: unknown[]) => void;
@@ -22,9 +22,9 @@ async function fakeRelay(): Promise<{
   server.on("connection", (socket) => {
     peer = socket;
     // Like a real relay, the challenge comes a moment after the upgrade.
-    // RelayClient.connect() installs its challenge handler after `open`, so a
-    // same-tick challenge would be dropped (pre-existing, see the report).
-    setTimeout(() => socket.send(JSON.stringify(["AUTH", "challenge-1"])), 20);
+    const challenge = () => socket.send(JSON.stringify(["AUTH", "challenge-1"]));
+    if (immediateChallenge) challenge();
+    else setTimeout(challenge, 20);
     socket.on("message", (data) => {
       const frame = JSON.parse(data.toString()) as unknown[];
       frames.push(frame);
@@ -78,6 +78,37 @@ test("RelayClient routes EVENT frames to the subscription that asked for them on
     await tick();
     assert.deepEqual(members, [list.id]);
     assert.deepEqual(chat, [message.id]);
+  } finally {
+    await client.close();
+    await relay.stop();
+  }
+});
+
+test("RelayClient signals EOSE only to the named subscription", async () => {
+  const relay = await fakeRelay();
+  const client = new RelayClient(relay.url, generateKeyPair().secret);
+  try {
+    await client.connect();
+    const history: string[] = [];
+    client.subscribe("members", [{ kinds: [39002] }], () => {}, undefined, () => history.push("members"));
+    client.subscribe("chat", [{ kinds: [9] }], () => {}, undefined, () => history.push("chat"));
+    await relay.waitFor((frame) => frame[0] === "REQ" && frame[1] === "chat");
+    relay.send(["EOSE", "not-subscribed"]);
+    relay.send(["EOSE", "members"]);
+    await tick();
+    assert.deepEqual(history, ["members"]);
+  } finally {
+    await client.close();
+    await relay.stop();
+  }
+});
+
+test("RelayClient authenticates when the challenge arrives with the upgrade", { timeout: 2000 }, async () => {
+  const relay = await fakeRelay(true);
+  const client = new RelayClient(relay.url, generateKeyPair().secret);
+  try {
+    await client.connect();
+    assert.ok(relay.frames.some((frame) => frame[0] === "AUTH"));
   } finally {
     await client.close();
     await relay.stop();
