@@ -64,9 +64,10 @@ export async function openSession(
   piDir: string,
   models: Models = scriptedModels(),
   isolation = new WorkspaceIsolation(home, { YEWHOLT_WORKSPACES: testWorkspaces(home), YEWHOLT_UNSAFE_SHARED_USER: "1" }),
+  admins: readonly string[] = [HUMAN],
 ): Promise<Yewholt> {
   ensureOwnerKey(home);
-  return Yewholt.open(storage, { home, models, piDir, isolation, turnTokens: 1000, defaultLimit: 10_000_000 });
+  return Yewholt.open(storage, { home, models, piDir, isolation, turnTokens: 1000, defaultLimit: 10_000_000, admins });
 }
 
 export function human(eventId: string, text: string, extra: Partial<HumanMessage> = {}): HumanMessage {

@@ -127,6 +127,8 @@ Leading `@` mentions of Yewholt bots are stripped before the Onboarding Speciali
 
 A display name such as `GPT-6.2 Astra` is stored as requested and mapped to `openai/gpt-6.2-astra`. pi-ai will call it only when that provider and id exist in the catalog and the matching API key is set. Until then the session still exists, keeps its history, and says so when mentioned.
 
+When a model turn ends without an answer, the bot says why instead of a bare failure, for example `I could not answer that (model_error: 429 FreeUsageLimitError: ...).` or `I could not answer that (no_model).` The reason is pi-durable's settlement reason, and the detail is the provider's error text, flattened to one line, cut at 300 characters, with token-like runs of 32+ characters shown as `[redacted]`. The daemon logs the same line with the bot name and model.
+
 Mention another bot by name or pubkey. The Onboarding Specialist listens to the whole install channel. Other bots answer only when mentioned, and only while they are `active`. This holds in every channel a bot is a member of, see below.
 
 ### Channels and scope
@@ -200,7 +202,7 @@ How it works: a pi-durable `beforeTool` gate parks the call before it runs (pi-d
 
 Who may answer, and which request an answer resolves:
 
-- The answer must come from a person (not a bot) in that same channel, the same rule as proposal approval.
+- The answer must come from a person in that same channel who is the install owner (the pubkey of `$YEWHOLT_HOME/secrets/owner.key`), the owner of a Buzz-created agent (its NIP-OA `ownerPubkey`), or an admin listed in `YEWHOLT_ADMINS`. Anyone else gets `Only the owner or an admin can answer approval <id>.`: the call stays parked, nothing runs, and the request stays in the queue. Bots never answer.
 - `aprovo`, `sim`, or `approve` (with or without a leading `@<bot>` mention) runs the call once. `rejeito`, `não`, or `reject` refuses it; the model gets a tool error saying a person rejected it.
 - A reply to the request message (NIP-10 `e` tag) answers that request.
 - `@Coder aprovo` answers Coder's oldest request in the channel. `@Onboarding Specialist aprovo` stays with the bot proposal.
@@ -315,6 +317,7 @@ None of these are required. A provider is registered only when its own credentia
 | `YEWHOLT_BOT_GROUP` | Workspace group shared by the bot account and the daemon (default `yewholt-ws`) |
 | `YEWHOLT_WORKSPACES` | Workspace root, outside `$YEWHOLT_HOME` (default `/srv/yewholt/workspaces`) |
 | `YEWHOLT_UNSAFE_SHARED_USER` | Development-only escape hatch. Set to `1` to run commands as the daemon user |
+| `YEWHOLT_ADMINS` | Optional hex pubkeys (64 characters, separated by commas or spaces) that may answer code-bot approvals besides the owner. Other entries are skipped with a log line |
 
 The full commented list is in `.env.example`. No dependency was added for this; the file parser is a few lines in `src/env-file.ts`.
 
@@ -356,7 +359,7 @@ SQLite is opened with pi-durable's Node adapter (WAL, `synchronous=NORMAL`). The
 - the relay client against a loopback WebSocket stub: per-subscription routing, `unsubscribe`, `CLOSED` reasons; bot connections, re-subscription, and one-time handling of a message seen on two connections
 - a budget that blocks a second create and still allows `approve`
 - the kill -9 resume above
-- code bots: the approval classifier (every dangerous form, combined flags, quoting, `cd x && rm -rf y`, safe look-alikes); the workspace folder and its minimal env; a bash call cannot see a variable set in the daemon's `process.env`; `$YEWHOLT_HOME` reads refused, also through symlinks; tools only with `code`, never for the Onboarding Specialist, and grant/revoke on the next turn; the approval flow end to end on pi-ai's faux provider (park, request message, `aprovo` runs once, `rejeito` refuses, ambiguity asks, reply targets one request); a kill -9 while parked, then `aprovo` after reopen runs the command exactly once; the Pi package loader with a fixture `pi.durable` package and a broken one that is skipped
+- code bots: the approval classifier (every dangerous form, combined flags, quoting, `cd x && rm -rf y`, safe look-alikes); the workspace folder and its minimal env; a bash call cannot see a variable set in the daemon's `process.env`; `$YEWHOLT_HOME` reads refused, also through symlinks; tools only with `code`, never for the Onboarding Specialist, and grant/revoke on the next turn; the approval flow end to end on pi-ai's faux provider (park, request message, `aprovo` runs once, `rejeito` refuses, ambiguity asks, reply targets one request, a non-owner's `aprovo` runs nothing and leaves the request queued, an admin from `YEWHOLT_ADMINS` and the install owner can answer); a model error on the faux provider reaches the chat with its reason and provider text, with a fake key masked, for plain and code bots; a kill -9 while parked, then `aprovo` after reopen runs the command exactly once; the Pi package loader with a fixture `pi.durable` package and a broken one that is skipped
 - every pi-ai built-in provider registers only when its env credential resolves, including OpenCode Zen (`opencode/big-pickle`), and Claude/Codex subscription tokens do not
 - `~/.yewholt/.env` loads at start, does not override the shell, and is mode `0600`
 - CLI routing: `yewholt` and `yewholt code ...` reach the harness with arguments unchanged, `YEWHOLT_MODEL` is added only without `--model`, help flags exit 0, daemon commands route to themselves, unknown commands exit 1. The tests do not start the TUI or call a model
