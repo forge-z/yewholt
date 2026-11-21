@@ -303,6 +303,119 @@ confirmation and the agent's kind 10100 and online kind 20001, then checks retry
 deduplication, revocation and secret-free output. The script stops its daemon.
 Remove its disposable home and stop the Phase 0 Compose stack before reusing the port.
 
+### Buzz backend provider engine
+
+Build with `npm run build`, then invoke `node dist/provider/engine.js <targetId>`.
+The engine reads one JSON object to EOF and emits exactly one JSON object on
+stdout. An error also exits nonzero. No shims or target-management commands
+are installed by the engine.
+
+```sh
+printf '%s\n' '{"op":"info","request_id":"302444a9-c561-47a5-b6b4-34be8f9b894c"}' |
+  node dist/provider/engine.js my-vm
+node dist/provider/engine.js my-vm < /path/to/private-deploy.json
+```
+
+`info` reports protocol version 1 without opening any target or secret. The
+engine has no app-set configuration fields: use `"provider_config": {}` in
+`deploy`, along with a lowercase UUID `request_id` and the Buzz `agent` package.
+The package's own `private_key_nsec` (NIP-19 nsec or 64 hex), signed `auth_tag`,
+and `relay_url` define the agent identity. An owner pubkey alone doesn't
+replace the attestation required by Yewholt. When supplied, a model and
+provider must both be set; otherwise the daemon's model default applies.
+`owner-only` translates to a DM allowlist with only the attested owner.
+Yewholt supplies its own runtime and grants `post`, `read`, and `code` under
+the existing sandbox and approval rules. Buzz launch commands, prompts,
+runtime tuning and environment values aren't installed or passed to the daemon.
+
+Create a regular mode-`0600` file at `~/.config/yewholt/targets/<targetId>.json`
+(`$XDG_CONFIG_HOME/yewholt/targets/` or `$YEWHOLT_PROVIDER_HOME/targets/` if
+set, with the latter taking precedence). The filename and `id` must match:
+
+```json
+{
+  "id": "my-vm",
+  "label": "My remote daemon",
+  "transport": "relay",
+  "relay": "wss://relay.example",
+  "daemonPubkey": "<daemon owner pubkey>"
+}
+```
+
+Do not put credentials in the target, relay URL, or command. The relay URL
+in the target controls where the deploy is sent; the package relay URL
+controls where the provisioned agent connects. To generate or look up the
+provider's public key before the first deploy, run from this checkout:
+
+```sh
+node --input-type=module -e '
+  import {ProviderSecrets} from "./dist/provider/secrets.js";
+  import {pubkeyOf} from "./dist/src/nostr.js";
+  console.log(pubkeyOf(new ProviderSecrets().identity()));
+'
+```
+
+Admit this pubkey to the Buzz relay and use `yewholt pair add <providerPubkey>
+--label "My Mac"` on the target daemon. Pairing and relay admission are
+separate checks. The provider is trusted code: Buzz passes it the agent's
+private key by design. Run only a provider you trust.
+
+Relay deploys send the encrypted kind-`1059` envelope described above and
+wait up to 120 seconds for a matching signed, encrypted confirmation from
+the daemon. The provider replies with `{"ok":true,"agent_id":"<agent pubkey>"}`
+only after a positive daemon reply. If nothing confirms the request, the
+engine runs the optional wake hook (up to 120 seconds), then republishes
+the same event and waits another 120 seconds. Retrying the same job doesn't
+create a second agent; the daemon records job outcomes.
+
+For the same machine, use `{"id":"my-mac","label":"My Mac","transport":"local"}`.
+This needs no provider key, pairing or relay connection: success means an
+atomic mode-`0600` write to `$YEWHOLT_HOME/agents/<pubkey>.json`, or that the
+job was already applied. Local receipts in `$YEWHOLT_HOME/state/local-deploys/`
+track request IDs and payload digests without storing provisioning plaintext.
+As with relay transport, success does not mean the daemon has started the agent.
+
+Optional relay wake hooks:
+
+- `{"kind":"command","cmd":"/path/to/trusted-wake-script"}` invokes the
+  machine operator's command via `/bin/sh`. Its stdio is discarded and it
+  receives no deploy payload. Only use commands you trust as the provider user.
+- `{"kind":"instabox","accountId":"acc_example","machineId":"m_example"}`
+  uses the [documented InstaBox API](https://instabox.sh/docs/api-reference/introduction)
+  to start a stopped sandbox or resume a paused one and wait for its
+  operation. The API key is scoped to the appropriate workspace with
+  `machines:read` and `machines:write`; `accountId` selects the locally stored
+  credential, not an API parameter. The adapter is tested with mocked HTTP,
+  not against a live sandbox. The daemon must already be configured to start
+  on boot.
+
+On macOS the provider generates its secp256k1 key on first use and stores it
+in Keychain, generic password service `yewholt-provider`, account `identity`.
+If using InstaBox, add a Keychain item under the same service with account
+`instabox-<accountId>` and the API token as the password. When Keychain is
+unavailable (including on Linux), the engine warns on stderr and uses
+`secrets/identity.json` or `secrets/instabox-<accountId>.json` under the
+provider configuration directory. The latter must contain just a JSON string
+and have mode `0600`. Never put these files or deploy input in version control.
+
+**Verification.** `npm test` runs the offline provider checks. With the
+disposable Phase 0 Compose relay already running, also run:
+
+```sh
+npm run build
+node dist/test/spike-provider.js ws://127.0.0.1:13000 "$spike_home/owner.key" \
+  yewholt-phase0-relay-1
+```
+
+Pass the actual disposable relay container name. The script admits and removes
+its temporary provider key, uses a new daemon home, pipes a Buzz-shaped request
+into the provider, checks provisioning, active status and runtime kinds
+`10100`/`20001`, retries without duplication, and exercises command wake with the
+daemon stopped (allow at least 120 seconds). An optional fourth argument
+accepts a file containing a complete Buzz-shaped deploy request using the
+disposable loopback relay and an agent attested by an admitted owner. Use only
+disposable identities; remove the printed home after the script stops the daemon.
+
 ### Coding bots (`code`)
 
 A bot whose stored permissions include `code` is a coding agent. It reads, writes, edits, and runs shell commands in its own workspace, and asks in the chat before anything on the approval list below. A bot without `code` has no tools and behaves as before. The Onboarding Specialist never gets `code`: a proposal that gives it `code` is refused.
