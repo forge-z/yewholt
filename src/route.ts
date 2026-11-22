@@ -1,5 +1,5 @@
 /** Commands that drive the Buzz daemon. Their behaviour is unchanged by the harness. */
-export const DAEMON_COMMANDS = ["install", "update", "start", "stop", "status", "admin", "daemon", "pair", "agents"] as const;
+export const DAEMON_COMMANDS = ["install", "update", "start", "stop", "status", "admin", "daemon", "pair", "agents", "relay"] as const;
 export type DaemonCommand = (typeof DAEMON_COMMANDS)[number];
 const PROVIDER_COMMANDS = ["provider", "targets"] as const;
 type ProviderCommand = (typeof PROVIDER_COMMANDS)[number];
@@ -52,6 +52,8 @@ Usage:
 
   yewholt install --relay <url> [--relay-pubkey <pubkey>] [--home dir]
                                  Set up the daemon for an existing Buzz relay
+  yewholt relay add <url> --relay-pubkey <pubkey> [--home dir]
+  yewholt relay list [--home dir]
   yewholt start [--home dir]
   yewholt update [--home dir] [--archive <tar file>]
                                  Update this checkout, bridge, and running daemon (not the relay)
@@ -60,16 +62,16 @@ Usage:
   yewholt admin keys|bots [--home dir]
   yewholt admin budget <name> <tokens> [--home dir]
   yewholt provider install
-  yewholt targets add <id> --relay <url> --daemon <pubkey> [--label <label>]
+  yewholt targets add <id> --relay <url> [--relay <url> ...] --daemon <pubkey> [--label <label>]
   yewholt targets add <id> --local [--home dir] [--label <label>]
     [--wake command --cmd <command> | --wake instabox --account <id> --machine <id>]
   yewholt targets list
   yewholt targets remove <id>
   yewholt targets doctor [id]
   yewholt pair                    Show the provider pubkey and pairing instructions
-  yewholt pair add <providerPubkey> --label <label> [--home dir]
-  yewholt pair list [--home dir]
-  yewholt pair remove <providerPubkey> [--home dir]
+  yewholt pair add <providerPubkey> --label <label> [--relay <url>] [--home dir]
+  yewholt pair list [--relay <url>] [--home dir]
+  yewholt pair remove <providerPubkey> [--relay <url>] [--home dir]
   yewholt agents list [--home dir]
   yewholt help                   Show this message
 `;

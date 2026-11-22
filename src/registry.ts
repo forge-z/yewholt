@@ -30,6 +30,7 @@ export type BotRecord = {
 
 /** A chat message a `code` bot is answering. Kept until its reply is stored, so a restart re-attaches to it. */
 export type CodeTurn = {
+  relay?: { url: string; primary: boolean };
   requestId: string;
   pubkey: string;
   channelId: string;
@@ -60,6 +61,7 @@ export type RegistryState = {
   processed: string[];
   outbox: NostrEvent[];
   highWater: number;
+  highWaterByRelay?: Record<string, number>;
   /** Absent in registries written before code bots existed. */
   turns?: CodeTurn[];
   approvals?: ApprovalRequest[];

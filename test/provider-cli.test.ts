@@ -154,6 +154,29 @@ test("targets store WebSocket URLs and reject bad relay addresses even in existi
   assert.ok(!refused.stdout.includes(malformed));
 });
 
+test("additional daemon relays keep legacy pairings separate and local targets advertise both", (t) => {
+  const { run, target } = fixture(t);
+  const primary = "wss://primary.example";
+  const secondary = "wss://shared.example";
+  assert.equal(run("install", "--relay", primary, "--relay-pubkey", daemon.pubkey).status, 0);
+  assert.equal(run("relay", "add", secondary, "--relay-pubkey", agent.pubkey).status, 0);
+  assert.equal(run("relay", "add", secondary + "/", "--relay-pubkey", agent.pubkey).status, 0);
+  assert.equal(run("relay", "add", secondary + "/", "--relay-pubkey", daemon.pubkey).status, 1);
+  assert.deepEqual(JSON.parse(run("relay", "list").stdout), [
+    { relayUrl: primary, externalRelayPubkey: daemon.pubkey }, { relayUrl: secondary, externalRelayPubkey: agent.pubkey },
+  ]);
+  assert.equal(run("targets", "add", "mac", "--local").status, 0);
+  assert.deepEqual(JSON.parse(readFileSync(target("mac"), "utf8")).relays, [secondary]);
+  const first = JSON.parse(run("pair", "list").stdout);
+  assert.equal(first.length, 1);
+  assert.deepEqual(JSON.parse(run("pair", "list", "--relay", secondary).stdout), first);
+  assert.equal(run("pair", "remove", first[0].pubkey, "--relay", secondary).status, 0);
+  assert.deepEqual(JSON.parse(run("pair", "list", "--relay", secondary).stdout), []);
+  assert.deepEqual(JSON.parse(run("pair", "list").stdout), first);
+  assert.equal(run("targets", "add", "instabox", "--relay", primary, "--relay", secondary, "--daemon", daemon.pubkey).status, 0);
+  assert.deepEqual(JSON.parse(readFileSync(target("instabox"), "utf8")).relays, [secondary]);
+});
+
 test("targets doctor measures relay AUTH and never prints a relay-supplied refusal", async (t) => {
   const { run, env } = fixture(t);
   assert.equal(run("provider", "install").status, 0);
