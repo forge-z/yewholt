@@ -5,14 +5,14 @@ import { gunzipSync } from "node:zlib";
 import { pubkeyOf, signEvent } from "./nostr.js";
 import { normalizeRelay } from "./relay-url.js";
 
-type Invite = { relayUrl: string; origin: string; code: string };
-type JoinOptions = {
+export type Invite = { relayUrl: string; origin: string; code: string };
+export type JoinOptions = {
   acceptPolicy?: boolean;
   confirmAge?: boolean;
   relayPubkey?: string;
 };
 
-function parseInvite(input: string): Invite {
+export function parseInvite(input: string): Invite {
   const invalid = () => new Error("Invalid Buzz invite URL");
   const value = input.trim();
   if (value.length > 4096 || /[\s\x00-\x1f\x7f\\]/.test(value)) throw invalid();
@@ -88,11 +88,15 @@ async function responseObject(
   return object;
 }
 
-async function claim(invite: Invite, options: JoinOptions, ask: (question: string) => Promise<string>,
-  identity: () => string): Promise<void> {
+export type Consent = { receipt?: string; acceptPolicy: boolean; confirmAge: boolean };
+
+export async function consentToPolicy(invite: Invite, options: JoinOptions,
+  ask: (question: string) => Promise<string>): Promise<Consent> {
   const { origin, code } = invite;
   const policyResponse = await request(origin, "/api/join-policy");
   let receipt: string | undefined;
+  let acceptPolicy = options.acceptPolicy === true;
+  let confirmAge = options.confirmAge === true;
   if (policyResponse.status !== 404) {
     const policyResult = await responseObject(policyResponse, "Could not read Buzz join policy", [code]);
     if (Object.keys(policyResult).length !== 0) {
@@ -107,9 +111,11 @@ async function claim(invite: Invite, options: JoinOptions, ask: (question: strin
       if (!options.acceptPolicy && await ask("Accept the policy? Type yes to continue: ") !== "yes") {
         throw new Error("Buzz join policy not accepted");
       }
+      acceptPolicy = true;
       const ageConfirmed = options.confirmAge || (policy.age_attestation_required &&
         await ask("Do you meet the policy's minimum age? Type yes to confirm: ") === "yes");
       if (policy.age_attestation_required && !ageConfirmed) throw new Error("Minimum age not confirmed");
+      confirmAge = ageConfirmed === true;
       const response = await request(origin, "/api/invites/accept-policy", JSON.stringify({
         code, policy_version: policy.version, age_confirmed: ageConfirmed,
       }));
@@ -120,7 +126,11 @@ async function claim(invite: Invite, options: JoinOptions, ask: (question: strin
       receipt = result.receipt;
     }
   }
-  const secret = identity();
+  return { receipt, acceptPolicy, confirmAge };
+}
+
+export async function claimInvite(invite: Invite, { receipt }: Consent, secret: string): Promise<"joined" | "already_member"> {
+  const { origin, code } = invite;
   const path = "/api/invites/claim";
   const body = JSON.stringify({ code, policy_receipt: receipt });
   const event = signEvent(secret, 27235, "", [
@@ -134,10 +144,11 @@ async function claim(invite: Invite, options: JoinOptions, ask: (question: strin
     throw new Error(`Buzz did not confirm membership (HTTP ${response.status})`);
   }
   console.log(`${result.status === "joined" ? "Joined" : "Already a member of"} ${invite.relayUrl} as ${pubkeyOf(secret)}`);
+  return result.status;
 }
 
 export async function joinRelay(args: string[], prepare: (relayUrl: string, options: JoinOptions) => {
-  identity: () => string; finish?: () => void;
+  identity: () => string; finish?: () => void | Promise<void>;
 }, daemon = false): Promise<void> {
   const usage = `Usage: yh ${daemon ? "relay" : "provider"} join [<invite-url>]${daemon ? " [--relay-pubkey <pubkey>]" : ""} [--accept-policy] [--confirm-age]`;
   const { values, positionals } = (() => {
@@ -153,6 +164,19 @@ export async function joinRelay(args: string[], prepare: (relayUrl: string, opti
     }
   })();
   if (positionals.length > 1 || (!daemon && values["relay-pubkey"] !== undefined)) throw new Error(usage);
+  await withInviteInput(positionals[0], async (invite, ask) => {
+    const options = {
+      acceptPolicy: values["accept-policy"], confirmAge: values["confirm-age"], relayPubkey: values["relay-pubkey"],
+    };
+    const { identity, finish } = prepare(invite.relayUrl, options);
+    const consent = await consentToPolicy(invite, options, ask);
+    await claimInvite(invite, consent, identity());
+    await finish?.();
+  });
+}
+
+export async function withInviteInput<T>(value: string | undefined,
+  run: (invite: Invite, ask: (question: string) => Promise<string>) => Promise<T>): Promise<T> {
   let reader: ReturnType<typeof createInterface> | undefined;
   const terminal = process.stdin.isTTY === true;
   const input = () => reader ??= createInterface({ input: process.stdin, output: process.stderr, terminal });
@@ -171,7 +195,6 @@ export async function joinRelay(args: string[], prepare: (relayUrl: string, opti
     }
   };
   try {
-    let value: string | undefined = positionals[0];
     if (value === undefined) {
       if (terminal) value = await ask("Paste Buzz invite URL: ");
       else {
@@ -181,12 +204,7 @@ export async function joinRelay(args: string[], prepare: (relayUrl: string, opti
       }
     }
     const invite = parseInvite(value ?? "");
-    const options = {
-      acceptPolicy: values["accept-policy"], confirmAge: values["confirm-age"], relayPubkey: values["relay-pubkey"],
-    };
-    const { identity, finish } = prepare(invite.relayUrl, options);
-    await claim(invite, options, async (question) => (await ask(question)).toLowerCase(), identity);
-    finish?.();
+    return await run(invite, async (question) => (await ask(question)).toLowerCase());
   } finally {
     reader?.close();
   }

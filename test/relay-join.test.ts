@@ -9,9 +9,10 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
+import { loadTarget } from "../provider/target.js";
 import { saveConfig, loadConfig } from "../src/config.js";
 import { writeKey } from "../src/keys.js";
-import { generateKeyPair, verifyEvent, type NostrEvent } from "../src/nostr.js";
+import { generateKeyPair, signEvent, verifyEvent, type NostrEvent } from "../src/nostr.js";
 import { ownerKeyPath } from "../src/paths.js";
 
 const cli = fileURLToPath(new URL("../src/cli.js", import.meta.url));
@@ -23,7 +24,8 @@ const deepLink = `buzz://join?relay=${encodeURIComponent(relay)}&code=${code}`;
 const claimPath = "/api/invites/claim";
 const policyPath = "/api/join-policy";
 const acceptPath = "/api/invites/accept-policy";
-const relayKey = generateKeyPair().pubkey;
+const relayIdentity = generateKeyPair();
+const relayKey = relayIdentity.pubkey;
 const policy = { policy: { version: "v1", terms_markdown: "Test terms", age_attestation_required: true } };
 
 async function fixture(t: TestContext) {
@@ -65,6 +67,11 @@ async function fixture(t: TestContext) {
     YEWHOLT_PROVIDER_FILE_STORAGE: "1" };
   async function run(args: string[], stdin = "", replies: [string, string][] = []) {
     const setup = `
+      const { RelayClient } = await import(${JSON.stringify(new URL("../src/nostr-client.js", import.meta.url).href)});
+      RelayClient.prototype.connect = async () => {};
+      RelayClient.prototype.subscribe = function(id, filters, onEvent) {
+        onEvent(${JSON.stringify(signEvent(relayIdentity.secret, 39000, "", [["d", "test"]]))});
+      };
       ${replies.length ? 'Object.defineProperty(process.stdin, "isTTY", {value: true});' : ""}
       const realFetch = globalThis.fetch;
       globalThis.fetch = (url, options) => {
@@ -122,6 +129,47 @@ test("daemon joins from stdin with explicit policy and age flags, then adds the 
   assert.equal(repeated.status, 0, repeated.stderr);
   assert.match(repeated.stdout, /Already a member of/);
   assert.notEqual(calls[5].auth, calls[2].auth);
+});
+
+test("unified join prompts once, admits both Mac identities, and registers the local target", async (t) => {
+  const { home, owner, calls, run } = await fixture(t);
+  const result = await run(["join"], "", [
+    ["Paste Buzz invite URL", invite], ["Accept the policy?", "yes"], ["minimum age?", "yes"],
+  ]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /This invite needs 2 uses/);
+  assert.match(result.stdout, /Mac provider: joined/);
+  assert.match(result.stdout, /My Mac daemon: joined/);
+  assert.deepEqual(calls.map(({ path }) => path), [policyPath, acceptPath, claimPath, claimPath]);
+  verifyClaim(calls[3], owner.pubkey, "policy-receipt");
+  assert.equal(loadTarget("mac", join(home, "xdg", "yewholt")).daemonPubkey, owner.pubkey);
+  assert.ok(!result.stdout.includes(code));
+});
+
+test("unified join continues after exhausted uses and exits nonzero with per-machine reasons", async (t) => {
+  const { calls, run, refuse } = await fixture(t);
+  refuse();
+  const result = await run(["join", "--accept-policy", "--confirm-age"], invite + "\n");
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /Mac provider: failed: Buzz invite claim failed \(HTTP 403\): invite_exhausted/);
+  assert.match(result.stdout, /My Mac daemon: failed: Buzz invite claim failed \(HTTP 403\): invite_exhausted/);
+  assert.deepEqual(calls.map(({ path }) => path), [policyPath, acceptPath, claimPath, claimPath]);
+  assert.ok(!(result.stdout + result.stderr).includes(code));
+});
+
+test("daemon join discovers the relay signing key when no pin was supplied", async (t) => {
+  const { home, run } = await fixture(t);
+  const result = await run(["relay", "join", invite, "--accept-policy", "--confirm-age"]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(loadConfig(home).relays, [{ relayUrl: relay, externalRelayPubkey: relayKey }]);
+});
+
+test("daemon join rejects a supplied pin that differs from the discovered key", async (t) => {
+  const { home, run } = await fixture(t);
+  const result = await run(["relay", "join", invite, "--relay-pubkey", generateKeyPair().pubkey, "--accept-policy", "--confirm-age"]);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Discovered relay signing key differs/);
+  assert.equal(loadConfig(home).relays, undefined);
 });
 
 test("provider accepts consent prompts and claims a deep link with its own key", async (t) => {
@@ -192,9 +240,6 @@ test("explicit refusals and invalid or exhausted invites don't change relay conf
     assert.match(result.stderr, /Invalid Buzz invite URL/);
     assert.ok(!(result.stdout + result.stderr).includes(code));
   }
-  const missingPin = await run(["relay", "join", invite]);
-  assert.equal(missingPin.status, 1);
-  assert.match(missingPin.stderr, /pass --relay-pubkey/);
   assert.equal(calls.length, 2);
   setPolicy({});
   refuse();
