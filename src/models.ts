@@ -1,7 +1,6 @@
-import { defaultProviderAuthContext, InMemoryCredentialStore, type ApiKeyCredential } from "@earendil-works/pi-ai";
+import { defaultProviderAuthContext, InMemoryCredentialStore, type ApiKeyCredential, type CredentialStore } from "@earendil-works/pi-ai";
 import { createModels, type Models, type Provider } from "@earendil-works/pi-ai/models";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
-import { readStoredCredential } from "@earendil-works/pi-coding-agent";
 
 export type ModelChoice = {
   provider: string;
@@ -92,23 +91,40 @@ async function hasCredential(provider: Provider, env: Env, credential?: ApiKeyCr
 }
 
 /**
- * Register built-in providers with usable ambient auth or a saved Pi API key.
+ * Register built-in providers with usable ambient auth or a saved Pi credential.
  * Use the same credentials for catalog admission and model requests.
  */
 export async function loadModels(env: Env = process.env, authPath?: string): Promise<Models> {
-  const credentials = new InMemoryCredentialStore();
+  const stored = await (async (): Promise<CredentialStore> => {
+    if (!authPath) return new InMemoryCredentialStore();
+    const { AuthStorage } = await import(new URL("./core/auth-storage.js",
+      import.meta.resolve("@earendil-works/pi-coding-agent")).href) as {
+      AuthStorage: { create(path: string): CredentialStore };
+    };
+    return AuthStorage.create(authPath);
+  })();
+  const ambient = new Set<string>();
+  const credentials: CredentialStore = {
+    read: (id, options) => ambient.has(id) ? Promise.resolve(undefined) : stored.read(id, options),
+    list: (options) => stored.list(options),
+    modify: (id, fn, options) => stored.modify(id, fn, options),
+    delete: (id, options) => stored.delete(id, options),
+  };
   const models = createModels({
     credentials,
     authContext: { ...defaultProviderAuthContext(), env: async (name) => envValue(env, name) },
   });
   for (const provider of officialProviders()) {
     const installed = installable(provider);
-    if (!installed.auth.apiKey) continue;
-    if (!(await hasCredential(installed, env))) {
-      const saved = authPath ? readStoredCredential(installed.id, authPath) : undefined;
-      if (saved?.type !== "api_key" || typeof saved.key !== "string" || !saved.key.trim() ||
+    if (await hasCredential(installed, env)) {
+      ambient.add(installed.id);
+    } else {
+      const saved = await stored.read(installed.id);
+      if (saved?.type === "oauth") {
+        if (!installed.auth.oauth || typeof saved.access !== "string" || !saved.access.trim() ||
+            typeof saved.refresh !== "string" || !Number.isFinite(saved.expires)) continue;
+      } else if (saved?.type !== "api_key" || typeof saved.key !== "string" || !saved.key.trim() ||
           !(await hasCredential(installed, env, saved))) continue;
-      await credentials.modify(installed.id, async () => saved);
     }
     models.setProvider(installed);
   }

@@ -49,21 +49,137 @@ test("a saved Pi API key enables DeepSeek in the hosted catalog and authenticate
   const authPath = join(dir, "auth.json");
   writeFileSync(authPath, JSON.stringify({
     deepseek: { type: "api_key", key: "pi-test-key" },
-    "openai-codex": { type: "oauth", access: "fake-access", refresh: "fake-refresh", expires: Date.now() + 3_600_000 },
   }), { mode: 0o600 });
   const session = await Yewholt.open(new MemoryStorage(), { home: join(dir, "state"), piDir: dir });
   try {
     assert.ok(session.availableModelReferences().includes("deepseek/deepseek-flash"));
-    assert.equal(session.availableModelReferences().some((model) => model.startsWith("openai-codex/")), false);
   } finally {
     await session.close();
   }
   const models = await loadModels({}, authPath);
   assert.equal((await models.getAuth("deepseek"))?.auth.apiKey, "pi-test-key");
-  assert.equal(models.getProvider("openai-codex"), undefined);
 
   const overridden = await loadModels({ DEEPSEEK_API_KEY: "env-test-key" }, authPath);
   assert.equal((await overridden.getAuth("deepseek"))?.auth.apiKey, "env-test-key");
+});
+
+function oauthCredential(expires = Date.now() + 3_600_000) {
+  const payload = Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" } })).toString("base64url");
+  return { type: "oauth", access: `test.${payload}.signature`, refresh: "test-refresh", expires };
+}
+
+test("saved OAuth logins list every supporting built-in provider except Anthropic in the daemon catalog", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "yewholt-oauth-catalog-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const providers = builtinProviders().filter((provider) => provider.auth.oauth);
+  writeFileSync(join(dir, "auth.json"), JSON.stringify(Object.fromEntries(
+    providers.map((provider) => [provider.id, oauthCredential()]),
+  )), { mode: 0o600 });
+  const models = await loadModels({}, join(dir, "auth.json"));
+  for (const provider of providers) {
+    assert.equal(models.getProvider(provider.id) !== undefined, provider.id !== "anthropic", provider.id);
+  }
+  const session = await Yewholt.open(new MemoryStorage(), { home: join(dir, "state"), piDir: dir });
+  try {
+    const references = session.availableModelReferences();
+    assert.ok(references.some((model) => model.startsWith("openai-codex/")));
+    assert.ok(!references.some((model) => model.startsWith("anthropic/")));
+  } finally {
+    await session.close();
+  }
+});
+
+test("model requests use the saved Codex OAuth token without modifying auth.json", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "yewholt-oauth-request-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const authPath = join(dir, "auth.json"), credential = oauthCredential();
+  const content = JSON.stringify({ "openai-codex": credential });
+  writeFileSync(authPath, content, { mode: 0o600 });
+  const models = await loadModels({}, authPath);
+  const model = models.getModels("openai-codex")[0];
+  assert.ok(model);
+  let requests = 0;
+  const result = await models.completeSimple(model, { messages: [{ role: "user", content: "hello", timestamp: Date.now() }] }, {
+    transport: "sse", maxRetries: 0,
+    fetch: async (input, init) => {
+      requests++;
+      assert.match(String(input), /^https:\/\/chatgpt.com\/backend-api\/codex\/responses$/);
+      const headers = new Headers(init?.headers);
+      assert.equal(headers.get("authorization"), `Bearer ${credential.access}`);
+      assert.equal(headers.get("chatgpt-account-id"), "test-account");
+      return new Response(`data: ${JSON.stringify({ type: "response.completed", response: {
+        id: "test-response", status: "completed", output: [],
+        usage: { input_tokens: 1, output_tokens: 0, total_tokens: 1 },
+      } })}\n\n`, { headers: { "Content-Type": "text/event-stream" } });
+    },
+  });
+  assert.equal(result.stopReason, "stop", result.errorMessage ?? "model request failed");
+  assert.equal(requests, 1);
+  assert.equal(readFileSync(authPath, "utf8"), content);
+});
+
+test("OAuth refresh is persisted once under Pi's lock without losing another login", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "yewholt-oauth-refresh-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const authPath = join(dir, "auth.json"), refreshed = oauthCredential();
+  writeFileSync(authPath, JSON.stringify({
+    "openai-codex": oauthCredential(Date.now() - 1),
+    deepseek: { type: "api_key", key: "old-key" },
+    unrelated: { type: "api_key", key: "preserved" },
+  }), { mode: 0o600 });
+  const first = await loadModels({}, authPath), second = await loadModels({}, authPath);
+  const fetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = fetch; });
+  let requests = 0, started!: () => void, finish!: () => void;
+  const refreshing = new Promise<void>((resolve) => { started = resolve; });
+  const release = new Promise<void>((resolve) => { finish = resolve; });
+  globalThis.fetch = async (input, init) => {
+    requests++;
+    assert.equal(String(input), "https://auth.openai.com/oauth/token");
+    assert.equal(new URLSearchParams(String(init?.body)).get("refresh_token"), "test-refresh");
+    started();
+    await release;
+    return Response.json({ access_token: refreshed.access, refresh_token: "rotated-refresh", expires_in: 3600 });
+  };
+  const one = first.getAuth("openai-codex");
+  await refreshing;
+  const two = second.getAuth("openai-codex");
+  const login = second.login("deepseek", "api_key", { prompt: async () => "concurrent-key", notify: () => {} });
+  finish();
+  const [a, b] = await Promise.all([one, two, login]);
+  assert.equal(a?.auth.apiKey, refreshed.access);
+  assert.equal(b?.auth.apiKey, refreshed.access);
+  assert.equal(requests, 1);
+  const saved = JSON.parse(readFileSync(authPath, "utf8"));
+  assert.equal(saved["openai-codex"].refresh, "rotated-refresh");
+  assert.ok(saved["openai-codex"].expires > Date.now());
+  assert.equal(saved.deepseek.key, "concurrent-key");
+  assert.equal(saved.unrelated.key, "preserved");
+  assert.equal(statSync(authPath).mode & 0o777, 0o600);
+  assert.equal((await (await loadModels({}, authPath)).getAuth("openai-codex"))?.auth.apiKey, refreshed.access);
+  assert.equal(requests, 1);
+});
+
+test("failed OAuth refresh preserves the saved credential and rejects auth instead of using a stale token", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "yewholt-oauth-error-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const authPath = join(dir, "auth.json");
+  const content = JSON.stringify({ "openai-codex": oauthCredential(Date.now() - 1) });
+  writeFileSync(authPath, content, { mode: 0o600 });
+  const models = await loadModels({}, authPath);
+  const fetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = fetch; });
+  globalThis.fetch = async () => new Response("unauthorized", { status: 401 });
+  await assert.rejects(models.getAuth("openai-codex"), /OAuth refresh failed/);
+  assert.equal(readFileSync(authPath, "utf8"), content);
+});
+
+test("malformed saved OAuth credentials are not advertised", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "yewholt-oauth-invalid-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const authPath = join(dir, "auth.json");
+  writeFileSync(authPath, JSON.stringify({ "openai-codex": { type: "oauth" } }), { mode: 0o600 });
+  assert.equal((await loadModels({}, authPath)).getProviders().length, 0);
 });
 
 test("Anthropic registers an API key and refuses subscription tokens", async () => {

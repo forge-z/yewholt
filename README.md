@@ -735,7 +735,9 @@ Run `/login` inside `yewholt`, or log in with an API key from the terminal. For 
 yewholt code auth login deepseek --api-key
 ```
 
-The daemon reads the API key from the same Pi `auth.json`; there is nothing to copy. Log in on the machine running the daemon, with the same Unix user and HOME it uses. Pi defaults to `~/.pi/agent/auth.json`; if you set `PI_CODING_AGENT_DIR`, use the same absolute directory for login and the daemon. The daemon's `--home` changes Yewholt's state directory, not Pi's. Keep the auth file private to the daemon user. Restart the daemon after logging in, changing a key, or logging out so it rebuilds its model catalog.
+The daemon reads API keys and supported OAuth logins from the same Pi `auth.json`; there is nothing to copy. For example, log in to `openai-codex` in Pi to list and use ChatGPT/Codex subscription models in Buzz. Anthropic remains API-key only: Claude subscription OAuth and `sk-ant-oat` tokens are refused. Log in on the machine running the daemon, with the same Unix user and HOME it uses. Pi defaults to `~/.pi/agent/auth.json`; if you set `PI_CODING_AGENT_DIR`, use the same absolute directory for login and the daemon. The daemon's `--home` changes Yewholt's state directory, not Pi's. Keep the auth file private to the daemon user. Restart the daemon after logging in, changing a key, or logging out so it rebuilds its model catalog.
+
+OAuth request authentication and token refresh use Pi's built-in provider flows. Refreshed tokens are persisted to the same `auth.json` using Pi's file-locked credential store, preserving other logins and serializing concurrent refreshes with the Pi app. Token refresh does not require a daemon restart; failed refreshes fail the request rather than using an expired token.
 
 You can also supply provider keys in the daemon's environment or `$YEWHOLT_HOME/.env` (default `~/.yewholt/.env`, mode `0600`). For the daemon, a usable environment credential takes precedence over a saved Pi key; shell variables win over the `.env` file. `YEWHOLT_HOME` is read before its `.env`, so set it in the service environment if needed.
 
@@ -745,7 +747,7 @@ You can also supply provider keys in the daemon's environment or `$YEWHOLT_HOME/
 
 Daemon model streams request `Accept-Encoding: identity` through Pi's request-header options for providers that support custom HTTP headers. This avoids raw gzip SSE responses and `Stream ended without finish_reason` errors with Node 26.0's native fetch and a dependency-installed Undici dispatcher. It does not change global fetch or dispatcher settings.
 
-None of these are required. A built-in provider is registered when its credential resolves from the environment or a saved Pi API key. The set is `builtinProviders()` from `@earendil-works/pi-ai` 1.6.0, the same list [pi-bot](https://github.com/forge-z/pi-bot) registers in `src/native-providers.ts`, minus subscription OAuth.
+None of these are required. A built-in provider is registered when its credential resolves from the environment, a saved Pi API key, or a saved OAuth login supported by that provider (except Anthropic). Usable environment credentials retain precedence over saved credentials. The set is `builtinProviders()` from `@earendil-works/pi-ai` 1.6.0.
 
 | Provider | Env | Notes |
 |---|---|---|
@@ -790,7 +792,7 @@ None of these are required. A built-in provider is registered when its credentia
 | `xiaomi-token-plan-sgp` | `XIAOMI_TOKEN_PLAN_SGP_API_KEY` | |
 | `zai` | `ZAI_API_KEY` | |
 | `zai-coding-cn` | `ZAI_CODING_CN_API_KEY` | |
-| `openai-codex` | none | Not registered. ChatGPT/Codex subscription OAuth |
+| `openai-codex` | none | Saved ChatGPT/Codex subscription OAuth from Pi's `auth.json` |
 
 | Variable | Use |
 |---|---|
