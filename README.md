@@ -738,6 +738,8 @@ You can also supply provider keys in the daemon's environment or `$YEWHOLT_HOME/
 
 ### Environment
 
+Daemon model streams request `Accept-Encoding: identity` through Pi's request-header options for providers that support custom HTTP headers. This avoids raw gzip SSE responses and `Stream ended without finish_reason` errors with Node 26.0's native fetch and a dependency-installed Undici dispatcher. It does not change global fetch or dispatcher settings.
+
 None of these are required. A built-in provider is registered when its credential resolves from the environment or a saved Pi API key. The set is `builtinProviders()` from `@earendil-works/pi-ai` 1.6.0, the same list [pi-bot](https://github.com/forge-z/pi-bot) registers in `src/native-providers.ts`, minus subscription OAuth.
 
 | Provider | Env | Notes |
