@@ -32,6 +32,7 @@ async function fixture(t: TestContext) {
   writeKey(ownerKeyPath(home), owner.secret);
   saveConfig(home, { relayUrl: "wss://primary.example", externalRelayPubkey: relayKey });
   const calls: { path: string; method?: string; auth?: string; body: string }[] = [];
+  const responses = new Map<string, { status: number; type: string; body: string }>();
   let joinPolicy: unknown = policy;
   let refusal = false;
   let alreadyMember = false;
@@ -40,6 +41,11 @@ async function fixture(t: TestContext) {
     for await (const chunk of req) chunks.push(chunk);
     const path = req.url!;
     calls.push({ path, method: req.method, auth: req.headers.authorization, body: Buffer.concat(chunks).toString() });
+    const response = responses.get(path);
+    if (response) {
+      res.writeHead(response.status, { "Content-Type": response.type });
+      return res.end(response.body);
+    }
     res.setHeader("Content-Type", "application/json");
     if (path === policyPath) return res.end(JSON.stringify(joinPolicy));
     if (path === acceptPath) return res.end(JSON.stringify({ receipt: "policy-receipt" }));
@@ -78,7 +84,7 @@ async function fixture(t: TestContext) {
     assert.ok(!(stdout + stderr).includes(owner.secret));
     return { status, stdout, stderr };
   }
-  return { home, owner, calls, run, setPolicy: (value: unknown) => { joinPolicy = value; },
+  return { home, owner, calls, run, responses, setPolicy: (value: unknown) => { joinPolicy = value; },
     refuse: () => { refusal = true; }, alreadyMember: () => { alreadyMember = true; } };
 }
 
@@ -162,5 +168,37 @@ test("explicit refusals and invalid or exhausted invites don't change relay conf
   assert.match(refused.stderr, /invite_exhausted/);
   assert.deepEqual(calls.slice(2).map(({ path }) => path), [policyPath, claimPath]);
   assert.deepEqual(JSON.parse(calls[3].body), { code });
+  assert.equal(loadConfig(home).relays, undefined);
+});
+
+test("join reports the failing HTTP step and safe server details without exposing invite material", async (t) => {
+  const { home, calls, run, responses } = await fixture(t);
+  const setup = ["relay", "join", "--relay-pubkey", relayKey, "--accept-policy", "--confirm-age"];
+  const cases = [
+    [policyPath, 200, "text/html", "<html>Not the policy</html>",
+      /Could not read Buzz join policy \(HTTP 200\): expected a JSON object/, [policyPath]],
+    [acceptPath, 400, "application/json", '{"error":"join_policy_not_accepted"}',
+      /Buzz did not accept the join policy \(HTTP 400\): join_policy_not_accepted/, [policyPath, acceptPath]],
+    [acceptPath, 200, "application/json", "",
+      /Buzz did not accept the join policy \(HTTP 200\): expected a JSON object/, [policyPath, acceptPath]],
+    [claimPath, 502, "text/html", "<html>Bad Gateway</html>",
+      /Buzz invite claim failed \(HTTP 502\)/, [policyPath, acceptPath, claimPath]],
+    [claimPath, 429, "text/plain", `Too many requests for ${invite}\x1b\n(policy-receipt)`,
+      /Buzz invite claim failed \(HTTP 429\): Too many requests for https:\/\/buzz\.example\/invite\/\[redacted\] \(\[redacted\]\)/,
+      [policyPath, acceptPath, claimPath]],
+    [claimPath, 403, "application/json", '{"error":"invite_exhausted"}',
+      /Buzz invite claim failed \(HTTP 403\): invite_exhausted/, [policyPath, acceptPath, claimPath]],
+  ] as const;
+  for (const [path, status, type, body, error, expectedCalls] of cases) {
+    const start = calls.length;
+    responses.set(path, { status, type, body });
+    const result = await run(setup, invite + "\n");
+    responses.delete(path);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, error);
+    assert.ok(!(result.stdout + result.stderr).includes(code));
+    assert.ok(!result.stderr.includes("policy-receipt") && !result.stderr.includes("<html>"));
+    assert.deepEqual(calls.slice(start).map((call) => call.path), expectedCalls);
+  }
   assert.equal(loadConfig(home).relays, undefined);
 });
