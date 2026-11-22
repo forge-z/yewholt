@@ -1,7 +1,7 @@
 /** Commands that drive the Buzz daemon. Their behaviour is unchanged by the harness. */
 export const DAEMON_COMMANDS = ["install", "update", "start", "stop", "status", "admin", "daemon", "pair", "agents", "relay"] as const;
 export type DaemonCommand = (typeof DAEMON_COMMANDS)[number];
-const PROVIDER_COMMANDS = ["provider", "targets"] as const;
+const PROVIDER_COMMANDS = ["provider", "targets", "join"] as const;
 type ProviderCommand = (typeof PROVIDER_COMMANDS)[number];
 
 export type Route =
@@ -21,7 +21,7 @@ export function route(argv: string[]): Route {
   if (command === undefined) return { kind: "harness", args: [] };
   if (command === "code") return { kind: "harness", args: rest };
   if (command === "help" || command === "--help" || command === "-h") return { kind: "usage", exitCode: 0 };
-  if (command === "provider" || command === "targets") return { kind: "command", command, args: rest };
+  if (command === "provider" || command === "targets" || command === "join") return { kind: "command", command, args: rest };
   if ((DAEMON_COMMANDS as readonly string[]).includes(command)) {
     return { kind: "command", command: command as DaemonCommand, args: rest };
   }
@@ -63,6 +63,7 @@ Usage:
   yewholt admin keys|bots [--home dir]
   yewholt admin budget <name> <tokens> [--home dir]
   yewholt provider install
+  yewholt join [<invite-url>] [--ssh <host> ...] [--accept-policy] [--confirm-age]
   yewholt provider join [<invite-url>] [--accept-policy] [--confirm-age]
   yewholt targets add <id> --relay <url> [--relay <url> ...] --daemon <pubkey> [--label <label>]
   yewholt targets add <id> --local [--home dir] [--label <label>]
