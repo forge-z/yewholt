@@ -59,7 +59,15 @@ if ! dscl . -read "/Users/$bot_user" >/dev/null 2>&1; then
   dscl . -create "/Users/$bot_user" PrimaryGroupID "$group_id"
 fi
 [[ $(id -u "$bot_user") != 0 && $(id -u "$bot_user") != "$daemon_uid" ]] || fail 'bot must have separate UID'
-[[ $(id -g "$bot_user") == "$group_id" && $(id -Gn "$bot_user") == "$bot_group" ]] || fail 'bot must belong only to workspace group'
+bot_groups=$(id -Gn "$bot_user")
+explicit_groups=()
+for group in $bot_groups; do
+  case $group in
+    everyone|localaccounts) ;;
+    *) explicit_groups+=("$group") ;;
+  esac
+done
+[[ $(id -g "$bot_user") == "$group_id" && ${#explicit_groups[@]} == 1 && ${explicit_groups[0]} == "$bot_group" ]] || fail 'bot must belong only to workspace group (apart from everyone/localaccounts)'
 dscl . -create "/Users/$bot_user" IsHidden 1
 dscl . -create "/Users/$bot_user" UserShell /usr/bin/false
 dscl . -create "/Users/$bot_user" NFSHomeDirectory /var/empty

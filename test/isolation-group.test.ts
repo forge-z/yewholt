@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { lookupGroupId } from "../src/isolation.js";
+import { isolationGroups, lookupGroupId } from "../src/isolation.js";
+
+test("Darwin ignores exactly its implicit everyone/localaccounts groups; Linux retains them", () => {
+  const groups = ["everyone", "yewholt-ws", "localaccounts"];
+  assert.deepEqual(isolationGroups(groups, "darwin"), ["yewholt-ws"]);
+  assert.deepEqual(isolationGroups(groups, "linux"), groups);
+  for (const extra of ["admin", "_lpoperator", "com.apple.access_ssh"]) {
+    assert.deepEqual(isolationGroups([...groups, extra], "darwin"), ["yewholt-ws", extra]);
+  }
+  assert.deepEqual(isolationGroups([], "darwin"), []);
+  assert.deepEqual(isolationGroups(["everyone", "localaccounts"], "darwin"), []);
+});
 
 test("group lookup uses dscl on Darwin and getent on Linux, failing closed", () => {
   for (const platform of ["darwin", "linux"] as const) {

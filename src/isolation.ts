@@ -13,6 +13,10 @@ type DirectoryInfo = { uid: number; gid: number; mode: number; isDirectory(): bo
 type BotAccount = { uid: number; gid: number; groups: string[] };
 type Identity = { uid: number; gid: number };
 
+export function isolationGroups(groups: string[], platform: NodeJS.Platform = process.platform): string[] {
+  return platform === "darwin" ? groups.filter((group) => group !== "everyone" && group !== "localaccounts") : groups;
+}
+
 export type IsolationProbe = {
   account(user: string): BotAccount | undefined;
   groupId(group: string): number | undefined;
@@ -60,7 +64,7 @@ const systemProbe: IsolationProbe = {
     const gid = command("/usr/bin/id", ["-g", ...separator, user]);
     const groups = command("/usr/bin/id", ["-Gn", ...separator, user]);
     if (uid.error || gid.error || groups.error || uid.status !== 0 || gid.status !== 0 || groups.status !== 0) return undefined;
-    return { uid: Number(uid.stdout.trim()), gid: Number(gid.stdout.trim()), groups: groups.stdout.trim().split(/\s+/) };
+    return { uid: Number(uid.stdout.trim()), gid: Number(gid.stdout.trim()), groups: isolationGroups(groups.stdout.trim().split(/\s+/)) };
   },
   groupId: lookupGroupId,
   daemon: () => ({ uid: process.geteuid!(), gid: process.getegid!(), groups: process.getgroups!() }),

@@ -475,6 +475,8 @@ an InstaBox host onto the Mac: use the public `wss://` URL directly, including
 an existing InstaBox relay, without a local relay or proxy.
 
 Directory Services replaces Linux `getent` for native macOS isolation checks.
+On macOS only, the implicit `everyone` and `localaccounts` groups are ignored;
+the bot must otherwise belong only to `yewholt-ws`. Other extra groups fail validation.
 This remains Unix-account isolation, not an OS sandbox: all code bots share
 one user and have network access. Do not enable the unsafe shared-user
 development bypass for normal use.

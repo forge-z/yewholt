@@ -36,6 +36,8 @@ workspaces at `/Users/Shared/yewholt/workspaces`, restricts daemon HOME access,
 and updates its `.env`. It accepts `--daemon-user USER` and
 `--workspaces /absolute/path`; workspaces must be outside daemon HOME/state.
 Do not run the Linux setup script or use the unsafe shared-user bypass on Mac.
+macOS validation ignores only the implicit `everyone` and `localaccounts`
+groups; any other group besides `yewholt-ws` is rejected. Linux is unchanged.
 Keep code-bot executables outside the protected daemon HOME (Homebrew paths,
 not a private Node version-manager directory). Validate setup on the intended
 macOS version before claiming that native isolation works.
