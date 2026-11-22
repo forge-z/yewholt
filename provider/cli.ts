@@ -2,6 +2,10 @@ import { unlinkSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { writePrivateJson } from "../src/control-files.js";
 import { pubkeyOf } from "../src/nostr.js";
+import { loadConfig } from "../src/config.js";
+import { readKey } from "../src/keys.js";
+import { ownerKeyPath, yewholtHome } from "../src/paths.js";
+import { addPairing } from "../src/pairing.js";
 import { discoverableId, installProvider } from "./install.js";
 import { ProviderSecrets } from "./secrets.js";
 import { InvalidTargetRelay, targetFile, validateTarget } from "./target.js";
@@ -17,7 +21,7 @@ function printPairing(): void {
 }
 
 function parseTarget(id: string, args: string[]) {
-  const usage = "Usage: targets add <id> --relay <url> --daemon <pubkey> [--label <label>] " +
+  const usage = "Usage: targets add <id> (--relay <url> --daemon <pubkey> | --local [--home <path>]) [--label <label>] " +
     "[--wake command --cmd <command> | --wake instabox --account <id> --machine <id>]";
   if (!discoverableId(id)) throw new CliError("Invalid target id (use lowercase letters, numbers, hyphens or underscores)");
   let values;
@@ -26,6 +30,7 @@ function parseTarget(id: string, args: string[]) {
       args, options: {
         relay: { type: "string", multiple: true }, daemon: { type: "string", multiple: true },
         label: { type: "string", multiple: true },
+        local: { type: "boolean", multiple: true }, home: { type: "string", multiple: true },
         wake: { type: "string", multiple: true }, cmd: { type: "string", multiple: true },
         account: { type: "string", multiple: true }, machine: { type: "string", multiple: true },
       },
@@ -42,10 +47,21 @@ function parseTarget(id: string, args: string[]) {
   if (kind === "command" && cmd && !accountId && !machineId) wake = { kind, cmd };
   else if (kind === "instabox" && accountId && machineId && !cmd) wake = { kind, accountId, machineId };
   else if (kind !== undefined || cmd !== undefined || accountId !== undefined || machineId !== undefined) throw new CliError(usage);
-  const raw = { id, label, transport: "relay", relay: values.relay?.[0], daemonPubkey: values.daemon?.[0], wake };
+  if ((values.local && (values.relay || values.daemon || wake)) || (values.home && !values.local)) throw new CliError(usage);
+  const home = values.local ? yewholtHome(values.home?.[0]) : undefined;
+  let relay = values.relay?.[0], daemonPubkey = values.daemon?.[0];
+  if (home !== undefined) {
+    try {
+      relay = loadConfig(home).relayUrl;
+      daemonPubkey = pubkeyOf(readKey(ownerKeyPath(home)));
+    } catch {
+      throw new CliError('Local daemon home is not installed or is invalid. Run yh install --home ' + JSON.stringify(home) + ' --relay <url> --relay-pubkey <pubkey> first.');
+    }
+  }
+  const raw = { id, label, transport: "relay", relay, daemonPubkey, wake };
   try {
     if (Buffer.byteLength(JSON.stringify(raw)) >= 32 * 1024) throw new Error();
-    return validateTarget(id, raw);
+    return { target: validateTarget(id, raw), home };
   } catch (error) {
     if (error instanceof InvalidTargetRelay) throw error;
     throw new CliError("Invalid target configuration (check relay URL, daemon pubkey and wake options)");
@@ -63,7 +79,17 @@ export async function providerCommand(command: "provider" | "targets" | "pair", 
     }
     const [sub, id, ...rest] = args;
     if (sub === "add") {
-      const target = parseTarget(id, rest);
+      const { target, home } = parseTarget(id, rest);
+      if (home !== undefined) {
+        const provider = pubkeyOf(new ProviderSecrets().identity());
+        addPairing(home, provider, target.label);
+        console.log("Paired provider " + provider + "; the daemon reads pairings live (no restart needed).");
+        console.log("Relay administrator: admit the daemon and provider pubkeys if not already admitted:");
+        console.log("  buzz-admin add-member --pubkey " + target.daemonPubkey);
+        console.log("  buzz-admin add-member --pubkey " + provider);
+        console.log("Daemon pubkey: " + target.daemonPubkey);
+        console.log("Provider pubkey: " + provider);
+      }
       writePrivateJson(targetFile(id), { id, ...target });
       console.log("Configured target " + id);
     } else if (sub === "list" && args.length === 1) {

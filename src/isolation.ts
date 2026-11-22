@@ -7,7 +7,7 @@ import { physicalPath, within, workspaceDir } from "./workspace.js";
 const WORKSPACE_MODE = 0o2770;
 const CACHE_MS = 60_000;
 const UNSAFE = "UNSAFE: YEWHOLT_UNSAFE_SHARED_USER=1 runs code bots as the daemon user";
-const SETUP = "Run sudo scripts/setup-bot-user.sh.";
+const SETUP = `Run sudo scripts/setup-bot-user${process.platform === "darwin" ? "-macos" : ""}.sh.`;
 
 type DirectoryInfo = { uid: number; gid: number; mode: number; isDirectory(): boolean };
 type BotAccount = { uid: number; gid: number; groups: string[] };
@@ -28,6 +28,17 @@ function command(path: string, args: string[]) {
   return spawnSync(path, args, { encoding: "utf8", env: {}, timeout: 2000, stdio: ["ignore", "pipe", "ignore"] });
 }
 
+export function lookupGroupId(group: string, platform: NodeJS.Platform = process.platform, run = command): number | undefined {
+  const entry = platform === "darwin"
+    ? run("/usr/bin/dscl", [".", "-read", "/Groups/" + group, "PrimaryGroupID"])
+    : run("/usr/bin/getent", ["group", group]);
+  if (entry.error || entry.status !== 0) return undefined;
+  const raw = platform === "darwin" ? entry.stdout.trim().match(/^PrimaryGroupID:\s+(\d+)$/)?.[1] : entry.stdout.split(":")[2];
+  if (!raw || !/^\d+$/.test(raw)) return undefined;
+  const gid = Number(raw);
+  return Number.isSafeInteger(gid) ? gid : undefined;
+}
+
 function sudo(user: string, ...args: string[]): boolean {
   const result = spawnSync("/usr/bin/sudo", ["-n", "-u", user, "--", ...args], { env: {}, timeout: 2000, stdio: "ignore" });
   return !result.error && result.status === 0;
@@ -44,16 +55,14 @@ function info(path: string): DirectoryInfo | undefined {
 
 const systemProbe: IsolationProbe = {
   account(user) {
-    const uid = command("/usr/bin/id", ["-u", "--", user]);
-    const gid = command("/usr/bin/id", ["-g", "--", user]);
-    const groups = command("/usr/bin/id", ["-Gn", "--", user]);
+    const separator = process.platform === "darwin" ? [] : ["--"];
+    const uid = command("/usr/bin/id", ["-u", ...separator, user]);
+    const gid = command("/usr/bin/id", ["-g", ...separator, user]);
+    const groups = command("/usr/bin/id", ["-Gn", ...separator, user]);
     if (uid.error || gid.error || groups.error || uid.status !== 0 || gid.status !== 0 || groups.status !== 0) return undefined;
     return { uid: Number(uid.stdout.trim()), gid: Number(gid.stdout.trim()), groups: groups.stdout.trim().split(/\s+/) };
   },
-  groupId(group) {
-    const entry = command("/usr/bin/getent", ["group", group]);
-    return !entry.error && entry.status === 0 ? Number(entry.stdout.split(":")[2]) : undefined;
-  },
+  groupId: lookupGroupId,
   daemon: () => ({ uid: process.geteuid!(), gid: process.getegid!(), groups: process.getgroups!() }),
   sudoWorks: (user) => sudo(user, "/bin/true"),
   workspaceInfo: info,
@@ -81,7 +90,7 @@ export class WorkspaceIsolation {
     private readonly now: () => number = () => performance.now(),
     private readonly log: (message: string) => void = console.error,
   ) {
-    this.workspaces = resolve(env.YEWHOLT_WORKSPACES || "/srv/yewholt/workspaces");
+    this.workspaces = resolve(env.YEWHOLT_WORKSPACES || (process.platform === "darwin" ? "/Users/Shared/yewholt/workspaces" : "/srv/yewholt/workspaces"));
     this.user = env.YEWHOLT_BOT_USER || "yewholt-bot";
     this.group = env.YEWHOLT_BOT_GROUP || "yewholt-ws";
     this.unsafe = env.YEWHOLT_UNSAFE_SHARED_USER === "1";

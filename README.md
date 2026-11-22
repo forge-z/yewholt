@@ -5,7 +5,7 @@
 Yewholt has two roles:
 
 1. **Coding harness.** Type `yh` in any directory and it opens an interactive [pi](https://pi.dev) coding-agent session there. It is the same harness as the `pi` CLI and loads the same pi packages (extensions, skills, prompt templates, themes). `yewholt` is an alias. See [Harness](#harness).
-2. **Durable agents on Buzz.** The headless daemon runs on a Linux VM and connects to an existing [Buzz](https://github.com/block/buzz) relay. The Mac runs the Buzz app with the Yewholt plugin and bridge, not the daemon or relay.
+2. **Durable agents on Buzz.** The headless daemon runs on a Linux VM or natively on the Mac and connects to an existing [Buzz](https://github.com/block/buzz) relay. The Mac runs the Buzz app with the Yewholt plugin and bridge; a Mac-local daemon needs no Docker or local relay.
 
 Calendar, email, MCP, cron, memory, kanban, and browser tools are out of core. They belong in later Buzz plugins.
 
@@ -417,84 +417,88 @@ It is not a live count and does not decrease on shutdown or deletion. For relay 
 connect-plus-auth latency, and marks confirmations from the last ten minutes as
 recent pairing evidence. Control v1 has no ping or version query; an
 authenticated relay connection or a prior confirmation does not prove the daemon
-is online or still paired. Local diagnostics use the daemon PID file.
+is online or still paired.
 Non-secret evidence is stored under the provider config directory's `status/`.
 
-`yewholt targets remove my-vm` removes only that target file and shim; it
+`yewholt targets remove my-vm` removes only that target file; it
 does not stop agents. Keep the original target until their removal is confirmed.
 
-### Legacy Buzz backend provider engine
+### Mac-local daemon target (no Docker)
 
-Build with `npm run build`, then invoke `node dist/provider/engine.js <targetId>`.
-The engine reads one JSON object to EOF and emits exactly one JSON object on
-stdout. An error also exits nonzero. The engine itself does not install
-entries or manage targets; the CLI does that.
+A local target is an ordinary relay target whose daemon runs natively on this
+Mac. Use Node.js ≥22.19 (including Node 26), the existing external Buzz relay,
+and its public signing key:
 
 ```sh
-printf '%s\n' '{"op":"info","request_id":"302444a9-c561-47a5-b6b4-34be8f9b894c"}' |
-  node dist/provider/engine.js my-vm
-node dist/provider/engine.js my-vm < /path/to/private-deploy.json
+yh install --home "$HOME/.yewholt" --relay wss://relay.example --relay-pubkey <relay-public-key>
+sudo env PATH="$PATH" scripts/setup-bot-user-macos.sh
+# Open a new login session so workspace group membership applies.
+yh start
+yh provider install
+yh targets add my-mac --local --home "$HOME/.yewholt" --label "My Mac"
+yh targets doctor my-mac
 ```
 
-`info` reports protocol version 1 without opening any target or secret. When
-invoked by a generated shim, it uses that shim's public display label. The
-engine has no app-set configuration fields: use `"provider_config": {}` in
-`deploy`, along with a lowercase UUID `request_id` and the Buzz `agent` package.
-The package's own `private_key_nsec` (NIP-19 nsec or 64 hex), signed `auth_tag`,
-and `relay_url` define the agent identity. An owner pubkey alone doesn't
-replace the attestation required by Yewholt. When supplied, a model and
-provider must both be set; otherwise the daemon's model default applies.
-`owner-only` translates to a DM allowlist with only the attested owner.
-Yewholt supplies its own runtime and grants `post`, `read`, and `code` under
-the existing sandbox and approval rules. Buzz launch commands, prompts,
-runtime tuning and environment values aren't installed or passed to the daemon.
+Have the owner approve the privileged setup first. It creates a hidden bot user
+`yewholt-bot`, group `yewholt-ws`, passwordless sudo only to that bot account,
+and mode-2770 workspaces at `/Users/Shared/yewholt/workspaces`. It restricts the
+daemon user's HOME permissions and writes `YEWHOLT_WORKSPACES` to its `.env`.
+Node must be on the passed PATH. Do not run npm as root.
+For code-bot use, put required executables in bot-readable locations (for
+example Homebrew), not a version manager inside the protected daemon HOME.
+For custom state, pass `YEWHOLT_HOME="/absolute/state"` through `sudo env`
+and use that same home for start and registration. The setup script accepts
+`--daemon-user USER` and `--workspaces /absolute/path`; workspaces must be
+outside daemon HOME and state. Linux retains `scripts/setup-bot-user.sh`.
+The Mac setup changes system accounts and permissions; validate it on the
+intended macOS version before relying on it for isolation.
 
-Create a regular mode-`0600` file at `~/.config/yewholt/targets/<targetId>.json`
-(`$XDG_CONFIG_HOME/yewholt/targets/` or `$YEWHOLT_PROVIDER_HOME/targets/` if
-set, with the latter taking precedence). The filename and `id` must match:
+`targets add --local` reads the installed relay config and daemon identity
+from `--home`, defaulting to `YEWHOLT_HOME` or `~/.yewholt`, then stores a
+normal relay target and directly pairs this provider. Pairings are read live:
+no daemon restart is needed. It does not install or start the daemon.
+`--local` is mutually exclusive with relay/daemon/wake flags; `--home`
+requires `--local`. A missing installation produces an install command hint.
+
+Pairing is not relay admission. On the relay host, with its existing admin
+environment, the administrator must admit both printed pubkeys if needed:
+
+```sh
+buzz-admin add-member --pubkey <daemon-pubkey>
+buzz-admin add-member --pubkey <provider-pubkey>
+```
+
+Open the same relay community in Buzz, then select **Harness → Remote →
+Yewholt → my-mac**. Configure model credentials as the daemon login user and
+keep the Mac awake and daemon running. Do not copy `YEWHOLT_LOCAL_PORT` from
+an InstaBox host onto the Mac: use the public `wss://` URL directly, including
+an existing InstaBox relay, without a local relay or proxy.
+
+Directory Services replaces Linux `getent` for native macOS isolation checks.
+This remains Unix-account isolation, not an OS sandbox: all code bots share
+one user and have network access. Do not enable the unsafe shared-user
+development bypass for normal use.
+
+### Relay target files
+
+The CLI writes mode-0600 files at `~/.config/yewholt/targets/<id>.json`
+(`$XDG_CONFIG_HOME/yewholt` or `$YEWHOLT_PROVIDER_HOME` override the base).
+Every target, including a Mac-local one, has this shape:
 
 ```json
 {
-  "id": "my-vm",
-  "label": "My remote daemon",
+  "id": "my-mac",
+  "label": "My Mac",
   "transport": "relay",
   "relay": "wss://relay.example",
-  "daemonPubkey": "<daemon owner pubkey>"
+  "daemonPubkey": "<daemon public key>"
 }
 ```
 
-Do not put credentials in the target, relay URL, or command. The relay URL
-in the target controls where the deploy is sent; the package relay URL
-controls where the provisioned agent connects. To generate or look up the
-provider's public key before the first deploy, run from this checkout:
-
-```sh
-node --input-type=module -e '
-  import {ProviderSecrets} from "./dist/provider/secrets.js";
-  import {pubkeyOf} from "./dist/src/nostr.js";
-  console.log(pubkeyOf(new ProviderSecrets().identity()));
-'
-```
-
-Admit this pubkey to the Buzz relay and use `yewholt pair add <providerPubkey>
---label "My Mac"` on the target daemon. Pairing and relay admission are
-separate checks. The provider is trusted code: Buzz passes it the agent's
-private key by design. Run only a provider you trust.
-
-Relay deploys send the encrypted kind-`1059` envelope described above and
-wait up to 120 seconds for a matching signed, encrypted confirmation from
-the daemon. The provider replies with `{"ok":true,"agent_id":"<agent pubkey>"}`
-only after a positive daemon reply. If nothing confirms the request, the
-engine runs the optional wake hook (up to 120 seconds), then republishes
-the same event and waits another 120 seconds. Retrying the same job doesn't
-create a second agent; the daemon records job outcomes.
-
-For the same machine, use `{"id":"my-mac","label":"My Mac","transport":"local"}`.
-This needs no provider key, pairing or relay connection: success means an
-atomic mode-`0600` write to `$YEWHOLT_HOME/agents/<pubkey>.json`, or that the
-job was already applied. Local receipts in `$YEWHOLT_HOME/state/local-deploys/`
-track request IDs and payload digests without storing provisioning plaintext.
-As with relay transport, success does not mean the daemon has started the agent.
+Do not store credentials in targets or relay URLs. The plugin/bridge sends
+encrypted relay requests and awaits daemon confirmation; relay health alone
+does not prove pairing or a running daemon. The removed backend provider
+engine and file-copy local transport are not used.
 
 Optional relay wake hooks:
 

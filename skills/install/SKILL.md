@@ -22,7 +22,43 @@ install a relay, or change existing installations without permission.
    **pubkey**. In Buzz 1.0.6, open **Settings → Plugins → Manage plugins →
    Add → Browse**, select the printed folder and approve
    `yewholt-buzz-bridge`. This is a trusted-app permission; let the user grant
-   it if prompted. Don't start a daemon on the Mac.
+   it if prompted. Start a daemon on the Mac only when a local target is requested.
+
+## Optional Mac-local daemon (no Docker)
+
+Use Node.js ≥22.19 (including Node 26) and the existing external relay.
+Run `yh install --home "$HOME/.yewholt" --relay "$RELAY_URL" --relay-pubkey "$RELAY_PUBKEY"`
+as the normal daemon login user. Have the owner approve and run
+`sudo env PATH="$PATH" scripts/setup-bot-user-macos.sh`. For custom state,
+also pass `YEWHOLT_HOME="/absolute/state"` through `sudo env`.
+The script creates a hidden bot user, workspace group, sudo rule and mode-2770
+workspaces at `/Users/Shared/yewholt/workspaces`, restricts daemon HOME access,
+and updates its `.env`. It accepts `--daemon-user USER` and
+`--workspaces /absolute/path`; workspaces must be outside daemon HOME/state.
+Do not run the Linux setup script or use the unsafe shared-user bypass on Mac.
+Keep code-bot executables outside the protected daemon HOME (Homebrew paths,
+not a private Node version-manager directory). Validate setup on the intended
+macOS version before claiming that native isolation works.
+Open a new login session for group membership, then run:
+
+```sh
+yh start --home "$HOME/.yewholt"
+yh targets add my-mac --local --home "$HOME/.yewholt" --label "My Mac"
+yh targets doctor my-mac
+```
+
+Omitting `--home` uses `YEWHOLT_HOME` or `~/.yewholt`. The home must be installed.
+`--local` cannot accompany relay/daemon/wake flags. It stores a normal relay
+target and pairs this provider directly; pairings are read live, without restart.
+Have the relay administrator admit both printed identities if needed, using
+`buzz-admin add-member --pubkey <daemon-pubkey>` and
+`buzz-admin add-member --pubkey <provider-pubkey>` on the relay host with its
+existing admin environment. Pairing does not replace admission. Configure
+model credentials under the daemon user and keep the Mac awake.
+Do not set `YEWHOLT_LOCAL_PORT` on the Mac: connect directly to public WSS,
+not the InstaBox relay host's loopback proxy. Open that same community in Buzz
+and verify a nonempty model catalog in Harness → Remote → Yewholt.
+See README's Mac-local target and secret-isolation sections for limitations.
 
 ## Each approved VM: daemon only
 
