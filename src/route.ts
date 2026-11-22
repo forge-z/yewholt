@@ -67,7 +67,7 @@ Usage:
   yewholt provider join [<invite-url>] [--accept-policy] [--confirm-age]
   yewholt targets add <id> --relay <url> [--relay <url> ...] --daemon <pubkey> [--label <label>]
   yewholt targets add <id> --local [--home dir] [--label <label>]
-    [--wake command --cmd <command> | --wake instabox --account <id> --machine <id>]
+    [--wake command --cmd <command> | --wake instabox --account <id> --machine <id> | --wake url --url <url>]
   yewholt targets list
   yewholt targets remove <id>
   yewholt targets doctor [id]

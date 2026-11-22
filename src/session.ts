@@ -46,6 +46,8 @@ export type SessionOptions = {
   now?: () => number;
   /** Pubkeys besides the owner that may answer code-bot approvals (default `YEWHOLT_ADMINS`). */
   admins?: readonly string[];
+  /** Public wake URL announced in external agents' runtime profiles (`YEWHOLT_WAKE_URL`). */
+  wakeUrl?: string;
 };
 
 /** A bot that gets the coding runtime: stored permissions include `code`. */
@@ -70,7 +72,7 @@ export class Yewholt {
 
   private constructor(
     readonly harness: Harness,
-    private readonly options: Required<Pick<SessionOptions, "home" | "turnTokens" | "defaultLimit" | "now">> & { admins: ReadonlySet<string> },
+    private readonly options: Required<Pick<SessionOptions, "home" | "turnTokens" | "defaultLimit" | "now">> & { admins: ReadonlySet<string>; wakeUrl?: string },
     private readonly agentDir: string,
     private readonly runtime: ModelRuntime,
     private readonly isolation: WorkspaceIsolation,
@@ -88,6 +90,7 @@ export class Yewholt {
         defaultLimit: options.defaultLimit ?? Number(process.env.YEWHOLT_BUDGET_TOKENS ?? "100000"),
         now: options.now ?? Date.now,
         admins: new Set((options.admins ?? parseAdmins(process.env.YEWHOLT_ADMINS)).map((key) => key.toLowerCase())),
+        wakeUrl: options.wakeUrl,
       },
       agentDir,
       runtime,
@@ -266,6 +269,11 @@ export class Yewholt {
     }, ctx);
   }
 
+  /** A turn, an approval or a queued message is in progress. */
+  busy(): boolean {
+    return this.activeTurns.size > 0 || this.waiting.size > 0 || this.queues.size > 0;
+  }
+
   agentDisconnected(pubkey: string): void {
     this.agentRuntime.delete(pubkey);
   }
@@ -287,7 +295,7 @@ export class Yewholt {
         const last = this.agentRuntime.get(bot.pubkey) ?? { profile: -Infinity, presence: -Infinity };
         const createdAt = Math.floor(now / 1000);
         if (now - last.profile >= 600_000) {
-          queueRuntime(reg, runtimeProfile(bot, secret, createdAt));
+          queueRuntime(reg, runtimeProfile(bot, secret, createdAt, this.options.wakeUrl));
           last.profile = now;
           queued = true;
         }

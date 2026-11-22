@@ -24,7 +24,7 @@ function printPairing(): void {
 
 function parseTarget(id: string, args: string[]) {
   const usage = "Usage: targets add <id> (--relay <url> [--relay <url> ...] --daemon <pubkey> | --local [--home <path>]) [--label <label>] " +
-    "[--wake command --cmd <command> | --wake instabox --account <id> --machine <id>]";
+    "[--wake command --cmd <command> | --wake instabox --account <id> --machine <id> | --wake url --url <url>]";
   if (!discoverableId(id)) throw new CliError("Invalid target id (use lowercase letters, numbers, hyphens or underscores)");
   let values;
   try {
@@ -33,7 +33,7 @@ function parseTarget(id: string, args: string[]) {
         relay: { type: "string", multiple: true }, daemon: { type: "string", multiple: true },
         label: { type: "string", multiple: true },
         local: { type: "boolean", multiple: true }, home: { type: "string", multiple: true },
-        wake: { type: "string", multiple: true }, cmd: { type: "string", multiple: true },
+        wake: { type: "string", multiple: true }, cmd: { type: "string", multiple: true }, url: { type: "string", multiple: true },
         account: { type: "string", multiple: true }, machine: { type: "string", multiple: true },
       },
     });
@@ -45,10 +45,12 @@ function parseTarget(id: string, args: string[]) {
   const label = values.label?.[0] ?? "Yewholt " + id;
   if (/[\x00-\x1f\x7f]/.test(label) || label.length > 120) throw new CliError("Invalid target label");
   const kind = values.wake?.[0], cmd = values.cmd?.[0], accountId = values.account?.[0], machineId = values.machine?.[0];
+  const url = values.url?.[0];
   let wake;
-  if (kind === "command" && cmd && !accountId && !machineId) wake = { kind, cmd };
-  else if (kind === "instabox" && accountId && machineId && !cmd) wake = { kind, accountId, machineId };
-  else if (kind !== undefined || cmd !== undefined || accountId !== undefined || machineId !== undefined) throw new CliError(usage);
+  if (kind === "command" && cmd && !accountId && !machineId && !url) wake = { kind, cmd };
+  else if (kind === "instabox" && accountId && machineId && !cmd && !url) wake = { kind, accountId, machineId };
+  else if (kind === "url" && url && !cmd && !accountId && !machineId) wake = { kind, url };
+  else if (kind !== undefined || cmd !== undefined || accountId !== undefined || machineId !== undefined || url !== undefined) throw new CliError(usage);
   if ((values.local && (values.relay || values.daemon || wake)) || (values.home && !values.local)) throw new CliError(usage);
   const home = values.local ? yewholtHome(values.home?.[0]) : undefined;
   let relays = values.relay ?? [], daemonPubkey = values.daemon?.[0];

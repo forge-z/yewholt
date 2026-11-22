@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 import { record } from "../src/control-files.js";
+import { requestWake } from "../src/wake.js";
 import type { Wake } from "./target.js";
 
 type Api = typeof fetch;
@@ -44,6 +45,10 @@ export async function runWake(
   wake: Wake, requestId: string, timeoutMs: number, token: (accountId: string) => string,
   fetchApi: Api = fetch, delay: Delay = (ms, signal) => sleep(ms, undefined, { signal }),
 ): Promise<void> {
+  if (wake.kind === "url") {
+    if (!await requestWake(wake.url, fetchApi, timeoutMs)) throw new Error("Wake URL did not answer");
+    return;
+  }
   if (wake.kind === "command") {
     return new Promise((resolve, reject) => {
       const command = spawn("/bin/sh", ["-c", wake.cmd], { stdio: "ignore", timeout: timeoutMs, killSignal: "SIGKILL" });
