@@ -1,17 +1,20 @@
 import assert from "node:assert/strict";
+import { once } from "node:events";
 import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
+import { WebSocketServer } from "ws";
 import { joinExitCode, joinMachines, remoteYh, updateJoinTarget, type Runner } from "../provider/join.js";
 import { loadTarget, targetFile, validateTarget, type Target } from "../provider/target.js";
 import { saveConfig } from "../src/config.js";
 import { configureJoinedRelay } from "../src/daemon-join.js";
+import { writePrivateJson } from "../src/control-files.js";
 import { writeKey } from "../src/keys.js";
-import { generateKeyPair, signEvent, type NostrEvent } from "../src/nostr.js";
+import { generateKeyPair, signEvent, verifyEvent, type NostrEvent } from "../src/nostr.js";
 import { readPairing } from "../src/pairing.js";
 import { ownerKeyPath } from "../src/paths.js";
-import { discoverRelayPubkey } from "../src/relay-discovery.js";
+import { discoverRelayPubkey, readRelayMembers } from "../src/relay-discovery.js";
 import { claimInvite, consentToPolicy, parseInvite, type Consent } from "../src/relay-join.js";
 import { route, usageText } from "../src/route.js";
 
@@ -66,7 +69,7 @@ test("join target updates by daemon key, retaining identity, label, wake setting
   const targets: { id: string; target: Target }[] = [];
   const existing = updateJoinTarget(targetsHome, targets, owner.pubkey, [primary], "existing", "My VM", "vm");
   existing.target.wake = { kind: "command", cmd: "wake-vm" };
-  const updated = updateJoinTarget(targetsHome, targets, owner.pubkey, [invite.relayUrl, primary], "mac", "My Mac");
+  const updated = updateJoinTarget(targetsHome, targets, owner.pubkey, [invite.relayUrl, primary], "mac", "My Mac", "new-vm");
   assert.equal(updated.id, "existing");
   assert.deepEqual(loadTarget("existing", targetsHome), { ...existing.target,
     relays: [invite.relayUrl], wake: { kind: "command", cmd: "wake-vm" } });
@@ -128,7 +131,7 @@ test("local and remembered SSH machines reuse consent, pair, update targets, res
   assert.deepEqual(summary.map(({ status }) => status), ["joined", "joined", "already_member"]);
   assert.equal(joinExitCode(summary), 0);
   assert.match(log[0], /needs 3 uses/);
-  assert.equal(log.at(-1), "owner@vm: already member");
+  assert.ok(log.includes("owner@vm: already member"));
   for (const id of ["my-mac", "my-vm"]) assert.deepEqual(loadTarget(id, homes.targetsHome).relays, [invite.relayUrl]);
   assert.equal(loadTarget("my-vm", homes.targetsHome).ssh, "owner@vm");
   assert.ok(readPairing(homes.daemonHome, provider.pubkey));
@@ -143,6 +146,90 @@ test("local and remembered SSH machines reuse consent, pair, update targets, res
   assert.ok(!remoteJoin.args.join(" ").includes(invite.code));
   assert.match(remoteJoin.args.at(-1)!, /--accept-policy/);
   assert.match(remoteJoin.args.at(-1)!, /--confirm-age/);
+});
+
+test("successful local and SSH joins update every alias of the daemon without changing target metadata", async (t) => {
+  for (const local of [true, false]) for (const status of ["joined", "already_member"] as const) {
+    await t.test(`${local ? "local" : "SSH"}: ${status}`, async (t) => {
+      const homes = fixture(t), log: string[] = [];
+      if (local) install(homes.daemonHome);
+      const daemon = local ? owner.pubkey : remoteOwner.pubkey;
+      for (const id of ["original", "alias"]) {
+        writePrivateJson(targetFile(id, homes.targetsHome), { id, label: `Label ${id}`, transport: "relay",
+          daemonPubkey: daemon, relay: primary, ...(local ? {} : { ssh: "owner@vm" }),
+          wake: { kind: "command", cmd: `wake-${id}` } });
+      }
+      const summary = await joinMachines(invite, local ? [] : ["owner@vm"], {}, async () => "yes", {
+        ...homes, identity: () => provider.secret, consent: async () => consent, claim: async () => status,
+        log: (line) => log.push(line), running: () => null,
+        members: async () => { throw Error("handled targets must not need roster lookup"); },
+        configure: (home, url, secret) => configureJoinedRelay(home, url, secret, undefined, async () => relay.pubkey),
+        runner: async (_file, args) => {
+          const command = args.at(-1)!;
+          if (command.includes("admin")) return `owner ${daemon}`;
+          if (command.includes("list")) return JSON.stringify([{ relayUrl: primary }]);
+          if (command.includes("join")) return status === "joined" ? "Joined" : "Already a member of";
+          return "daemon: stopped";
+        },
+      });
+      assert.equal(joinExitCode(summary), 0);
+      for (const id of ["original", "alias"]) {
+        assert.deepEqual(loadTarget(id, homes.targetsHome), { label: `Label ${id}`, transport: "relay",
+          daemonPubkey: daemon, relay: primary, relays: [invite.relayUrl],
+          wake: { kind: "command", cmd: `wake-${id}` }, ...(local ? {} : { ssh: "owner@vm" }) });
+        assert.equal(statSync(targetFile(id, homes.targetsHome)).mode & 0o777, 0o600);
+        assert.equal(log.filter((line) => line === `Target ${id}: updated for ${invite.relayUrl}`).length, 1);
+      }
+    });
+  }
+});
+
+test("join discovers existing member daemons without SSH and adds the community to all their targets once", async (t) => {
+  const homes = fixture(t), log: string[] = [];
+  const unknown = generateKeyPair();
+  for (const id of ["instabox", "instabox-alias", "not-a-member"]) {
+    writePrivateJson(targetFile(id, homes.targetsHome), { id, label: id, transport: "relay", relay: primary,
+      daemonPubkey: id === "not-a-member" ? unknown.pubkey : remoteOwner.pubkey,
+      wake: { kind: "instabox", accountId: "account", machineId: id } });
+  }
+  let lookups = 0, claims = 0;
+  const run = () => joinMachines(invite, [], {}, async () => "yes", {
+    ...homes, identity: () => provider.secret, consent: async () => consent,
+    claim: async () => { claims++; return "already_member"; }, log: (line) => log.push(line),
+    runner: async () => { throw Error("must not need SSH"); },
+    members: async (url, secret) => {
+      lookups++;
+      assert.equal(url, invite.relayUrl);
+      assert.equal(secret, provider.secret);
+      assert.equal(claims, lookups);
+      return new Set([remoteOwner.pubkey]);
+    },
+  });
+  assert.equal(joinExitCode(await run()), 0);
+  for (const id of ["instabox", "instabox-alias"]) {
+    assert.deepEqual(loadTarget(id, homes.targetsHome), { label: id, transport: "relay", relay: primary,
+      daemonPubkey: remoteOwner.pubkey, relays: [invite.relayUrl],
+      wake: { kind: "instabox", accountId: "account", machineId: id } });
+    assert.equal(statSync(targetFile(id, homes.targetsHome)).mode & 0o777, 0o600);
+    assert.ok(log.includes(`Target ${id}: updated for ${invite.relayUrl}`));
+  }
+  assert.equal(loadTarget("not-a-member", homes.targetsHome).relays, undefined);
+  log.length = 0;
+  assert.equal(joinExitCode(await run()), 0);
+  assert.ok(!log.some((line) => line.startsWith("Target ")));
+  assert.equal(lookups, 2);
+});
+
+test("membership lookup errors leave untouched targets unchanged and return a redacted failure", async (t) => {
+  const homes = fixture(t);
+  updateJoinTarget(homes.targetsHome, [], remoteOwner.pubkey, [primary], "instabox", "Instabox");
+  const summary = await joinMachines(invite, [], {}, async () => "yes", {
+    ...homes, identity: () => provider.secret, consent: async () => consent, claim: async () => "joined", log: () => {},
+    members: async () => { throw Error(`missing roster ${invite.code}`); },
+  });
+  assert.equal(joinExitCode(summary), 1);
+  assert.deepEqual(summary.at(-1), { machine: "Registered target membership check", status: "failed", reason: "missing roster [redacted]" });
+  assert.equal(loadTarget("instabox", homes.targetsHome).relays, undefined);
 });
 
 test("exhausted invitations and SSH failures are per-machine failures and don't stop later machines", async (t) => {
@@ -305,4 +392,95 @@ test("relay discovery timeout and AUTH rejection clean up the client", async () 
   const client = discoveryClient([]);
   client.connect = async () => { throw Error("AUTH rejected"); };
   await assert.rejects(discoverRelayPubkey(invite.relayUrl, owner.secret, undefined, client), /AUTH rejected/);
+});
+
+function rosterClient(events: NostrEvent[], finish = true, rejection?: string) {
+  const calls: string[] = [];
+  return {
+    calls,
+    connect: async () => { calls.push("AUTH"); },
+    subscribe: (id: string, filters: readonly Record<string, unknown>[], onEvent: (value: NostrEvent) => void,
+      onClosed?: (id: string, reason: string) => void, onEose?: () => void) => {
+      assert.deepEqual(calls, ["AUTH"]);
+      assert.deepEqual(filters, [{ kinds: [13534], authors: [relay.pubkey], limit: 1 }]);
+      calls.push("REQ");
+      events.forEach(onEvent);
+      if (rejection) onClosed?.(id, rejection);
+      else if (finish) onEose?.();
+    },
+    unsubscribe: () => { calls.push("CLOSE"); },
+    close: async () => { calls.push("disconnect"); },
+  };
+}
+
+test("community roster lookup authenticates, verifies the signing key, and uses the newest complete snapshot", async () => {
+  const older = signEvent(relay.secret, 13534, "", [["member", owner.pubkey, "member"]], 1);
+  const newest = signEvent(relay.secret, 13534, "", [["member", remoteOwner.pubkey, "member"], ["member", "invalid"], ["p", owner.pubkey]], 2);
+  const client = rosterClient([
+    signEvent(owner.secret, 13534, "", [["member", owner.pubkey]], 3),
+    { ...newest, sig: "bad" }, signEvent(relay.secret, 39002, "", [["p", owner.pubkey]], 4), newest, older,
+  ]);
+  assert.deepEqual(await readRelayMembers(invite.relayUrl, provider.secret, relay.pubkey, client), new Set([remoteOwner.pubkey]));
+  assert.deepEqual(client.calls, ["AUTH", "REQ", "CLOSE", "disconnect"]);
+  const empty = rosterClient([signEvent(relay.secret, 13534, "", [])]);
+  assert.deepEqual(await readRelayMembers(invite.relayUrl, provider.secret, relay.pubkey, empty), new Set());
+});
+
+test("community roster lookup fails closed on absent, refused and timed-out rosters and AUTH errors", async () => {
+  for (const [client, message] of [
+    [rosterClient([]), /No relay-signed/],
+    [rosterClient([], true, "restricted"), /rejected: restricted/],
+    [rosterClient([], false), /timed out/],
+  ] as const) {
+    await assert.rejects(readRelayMembers(invite.relayUrl, provider.secret, relay.pubkey, client, 5), message);
+    assert.deepEqual(client.calls, ["AUTH", "REQ", "CLOSE", "disconnect"]);
+  }
+  const client = rosterClient([]);
+  client.connect = async () => { throw Error("AUTH rejected"); };
+  await assert.rejects(readRelayMembers(invite.relayUrl, provider.secret, relay.pubkey, client), /AUTH rejected/);
+  assert.deepEqual(client.calls, ["CLOSE", "disconnect"]);
+});
+
+test("join discovers and updates a non-SSH target through authenticated NIP-43 WebSocket queries", async (t) => {
+  const homes = fixture(t);
+  updateJoinTarget(homes.targetsHome, [], remoteOwner.pubkey, [primary], "instabox", "Instabox");
+  const server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+  t.after(() => { for (const client of server.clients) client.terminate(); server.close(); });
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const url = `ws://127.0.0.1:${address.port}`, calls: string[] = [];
+  server.on("connection", (socket) => {
+    let authenticated = false;
+    socket.send(JSON.stringify(["AUTH", "join-challenge"]));
+    socket.on("message", (data) => {
+      const [type, id, filter] = JSON.parse(data.toString());
+      if (type === "AUTH") {
+        authenticated = verifyEvent(id) && id.pubkey === provider.pubkey && id.kind === 22242 &&
+          id.tags.some((tag: string[]) => tag[0] === "challenge" && tag[1] === "join-challenge");
+        calls.push("AUTH");
+        socket.send(JSON.stringify(["OK", id.id, authenticated, ""]));
+      } else if (type === "REQ") {
+        assert.ok(authenticated);
+        if (filter.kinds.includes(39002)) {
+          calls.push("groups");
+          socket.send(JSON.stringify(["EVENT", id, signEvent(relay.secret, 39002, "", [["d", "channel"]])]));
+        } else {
+          assert.deepEqual(filter, { kinds: [13534], authors: [relay.pubkey], limit: 1 });
+          calls.push("roster");
+          socket.send(JSON.stringify(["EVENT", id, signEvent(relay.secret, 13534, "", [["member", remoteOwner.pubkey, "member"]])]));
+        }
+        socket.send(JSON.stringify(["EOSE", id]));
+      }
+    });
+  });
+  const log: string[] = [];
+  const summary = await joinMachines({ ...invite, relayUrl: url }, [], {}, async () => "yes", {
+    ...homes, identity: () => provider.secret, consent: async () => consent, claim: async () => "already_member",
+    log: (line) => log.push(line), runner: async () => { throw Error("must not use SSH"); },
+  });
+  assert.equal(joinExitCode(summary), 0);
+  assert.deepEqual(calls, ["AUTH", "groups", "AUTH", "roster"]);
+  assert.deepEqual(loadTarget("instabox", homes.targetsHome).relays, [url]);
+  assert.ok(log.includes(`Target instabox: updated for ${url}`));
 });

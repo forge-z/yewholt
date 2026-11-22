@@ -11,6 +11,7 @@ import { readKey } from "../src/keys.js";
 import { pubkeyOf } from "../src/nostr.js";
 import { addPairing } from "../src/pairing.js";
 import { configPath, ownerKeyPath, yewholtHome } from "../src/paths.js";
+import { discoverRelayPubkey, readRelayMembers } from "../src/relay-discovery.js";
 import { claimInvite, consentToPolicy, withInviteInput, type Invite, type JoinOptions } from "../src/relay-join.js";
 import { normalizeRelay, sameRelay } from "../src/relay-url.js";
 import { targetIds } from "./install.js";
@@ -45,24 +46,37 @@ export function remoteYh(host: string, args: string[], stdin = "", runner: Runne
 type StoredTarget = { id: string; target: Target };
 
 export function updateJoinTarget(home: string, targets: StoredTarget[], daemonPubkey: string, relays: string[],
-  preferredId: string, label: string, ssh?: string): StoredTarget {
-  const existing = targets.find(({ target }) => target.daemonPubkey === daemonPubkey);
-  let id = existing?.id ?? preferredId;
-  if (!existing) {
+  preferredId: string, label: string, ssh?: string, onUpdated?: (target: StoredTarget) => void): StoredTarget {
+  const matches = targets.filter(({ target }) => target.daemonPubkey === daemonPubkey);
+  if (!matches.length) {
+    let id = preferredId;
     let suffix = 2;
     while (targets.some((target) => target.id === id)) id = preferredId.slice(0, 70) + "-" + suffix++;
+    const all: string[] = [];
+    for (const relay of relays) if (!all.some((other) => sameRelay(other, relay))) all.push(relay);
+    const [relay, ...additional] = all;
+    const target = validateTarget(id, { id, label, transport: "relay", daemonPubkey, relay,
+      ...(additional.length ? { relays: additional } : {}), ...(ssh === undefined ? {} : { ssh }) });
+    const stored = { id, target };
+    writePrivateJson(targetFile(id, home), { id, ...target });
+    targets.push(stored);
+    onUpdated?.(stored);
+    return stored;
   }
-  const all = existing ? targetRelays(existing.target) : [];
-  for (const relay of relays) if (!all.some((other) => sameRelay(other, relay))) all.push(relay);
-  const [relay, ...additional] = all;
-  const target = validateTarget(id, { ...existing?.target, id, label: existing?.target.label ?? label,
-    transport: "relay", daemonPubkey, relay, ...(additional.length ? { relays: additional } : {}),
-    ...(ssh === undefined ? {} : { ssh }) });
-  writePrivateJson(targetFile(id, home), { id, ...target });
-  const stored = { id, target };
-  if (existing) existing.target = target;
-  else targets.push(stored);
-  return stored;
+  for (const existing of matches) {
+    const all = targetRelays(existing.target);
+    for (const relay of relays) if (!all.some((other) => sameRelay(other, relay))) all.push(relay);
+    const changed = all.length !== targetRelays(existing.target).length || (ssh !== undefined && existing.target.ssh === undefined);
+    if (!changed) continue;
+    const [relay, ...additional] = all;
+    const target = validateTarget(existing.id, { ...existing.target, id: existing.id, relay,
+      ...(additional.length ? { relays: additional } : {}),
+      ...(ssh === undefined ? {} : { ssh: existing.target.ssh ?? ssh }) });
+    writePrivateJson(targetFile(existing.id, home), { id: existing.id, ...target });
+    existing.target = target;
+    onUpdated?.(existing);
+  }
+  return matches[0];
 }
 
 export type JoinSummary = { machine: string; status: "joined" | "already_member" | "failed"; reason?: string };
@@ -70,6 +84,7 @@ type Dependencies = {
   daemonHome: string; targetsHome: string; identity: () => string; runner: Runner;
   consent: typeof consentToPolicy; claim: typeof claimInvite; configure: typeof configureJoinedRelay;
   running: typeof readPid; log: (line: string) => void;
+  members: (relay: string, secret: string) => Promise<ReadonlySet<string>>;
 };
 
 function hostId(host: string): string {
@@ -92,6 +107,7 @@ export async function joinMachines(invite: Invite, hosts: string[], options: Joi
   const deps: Dependencies = {
     daemonHome: yewholtHome(), targetsHome: providerHome(), identity: () => new ProviderSecrets().identity(),
     runner: runCommand, consent: consentToPolicy, claim: claimInvite, configure: configureJoinedRelay,
+    members: async (relay, secret) => readRelayMembers(relay, secret, await discoverRelayPubkey(relay, secret)),
     running: readPid, log: console.log, ...overrides,
   };
   const targets = targetIds(deps.targetsHome).map((id) => ({ id, target: loadTarget(id, deps.targetsHome) }));
@@ -102,13 +118,16 @@ export async function joinMachines(invite: Invite, hosts: string[], options: Joi
   if (!installed) deps.log("Local daemon not installed; skipping. Install it first with yh install --relay <url> --relay-pubkey <pubkey>.");
   const consent = await deps.consent(invite, options, ask);
   const summary: JoinSummary[] = [];
+  const updatedTargets = new Set<string>();
+  const onUpdated = ({ id }: StoredTarget) => { updatedTargets.add(id); };
+  const handled = new Set<string>();
+  const reasonOf = (error: unknown) => (error instanceof Error ? error.message : "Join failed")
+    .replaceAll(invite.code, "[redacted]").replace(/[\x00-\x1f\x7f-\x9f]/g, " ").slice(0, 400);
   const attempt = async (machine: string, operation: () => Promise<"joined" | "already_member">) => {
     try {
       summary.push({ machine, status: await operation() });
     } catch (error) {
-      const reason = (error instanceof Error ? error.message : "Join failed")
-        .replaceAll(invite.code, "[redacted]").replace(/[\x00-\x1f\x7f-\x9f]/g, " ").slice(0, 400);
-      summary.push({ machine, status: "failed", reason });
+      summary.push({ machine, status: "failed", reason: reasonOf(error) });
     }
   };
   const secret = deps.identity();
@@ -119,7 +138,8 @@ export async function joinMachines(invite: Invite, hosts: string[], options: Joi
     const status = await deps.claim(invite, consent, owner);
     const added = await deps.configure(deps.daemonHome, invite.relayUrl, owner);
     const relays = configuredRelays(loadConfig(deps.daemonHome)).map(({ relayUrl }) => relayUrl);
-    const { target } = updateJoinTarget(deps.targetsHome, targets, pubkeyOf(owner), relays, "mac", "My Mac");
+    const { target } = updateJoinTarget(deps.targetsHome, targets, pubkeyOf(owner), [...relays, invite.relayUrl], "mac", "My Mac", undefined, onUpdated);
+    handled.add(pubkeyOf(owner));
     addPairing(deps.daemonHome, provider, target.label);
     for (const relay of relays.slice(1)) addPairing(deps.daemonHome, provider, target.label, undefined, relay);
     if ((status !== "already_member" || added) && deps.running(deps.daemonHome)) {
@@ -145,10 +165,26 @@ export async function joinMachines(invite: Invite, hosts: string[], options: Joi
       await remote(["stop"]);
       await remote(["start"]);
     }
-    updateJoinTarget(deps.targetsHome, targets, daemon, [...relays, invite.relayUrl], hostId(host), label, host);
+    updateJoinTarget(deps.targetsHome, targets, daemon, [...relays, invite.relayUrl], hostId(host), label, host, onUpdated);
+    handled.add(daemon);
     return status;
   });
+  const pending = targets.filter(({ target }) => !handled.has(target.daemonPubkey) &&
+    !targetRelays(target).some((relay) => sameRelay(relay, invite.relayUrl)));
+  if (pending.length && summary[0].status !== "failed") {
+    try {
+      const members = await deps.members(invite.relayUrl, secret);
+      for (const { id, target } of pending) {
+        if (members.has(target.daemonPubkey)) {
+          updateJoinTarget(deps.targetsHome, targets, target.daemonPubkey, [invite.relayUrl], id, target.label, undefined, onUpdated);
+        }
+      }
+    } catch (error) {
+      summary.push({ machine: "Registered target membership check", status: "failed", reason: reasonOf(error) });
+    }
+  }
   for (const result of summary) deps.log(`${result.machine}: ${result.status === "already_member" ? "already member" : result.status}${result.reason ? ": " + result.reason : ""}`);
+  for (const id of updatedTargets) deps.log(`Target ${id}: updated for ${invite.relayUrl}`);
   return summary;
 }
 
