@@ -98,7 +98,7 @@ test("policy consent is asked once and its receipt is reused for multiple HTTP c
   for (const request of requests.slice(2)) assert.equal(JSON.parse(request.body!).policy_receipt, "receipt");
 });
 
-test("local and remembered SSH machines reuse consent, pair, update targets, restart only new running relays", async (t) => {
+test("local and remembered SSH machines reuse consent, pair, update targets, restart after adding running relays", async (t) => {
   const homes = fixture(t);
   install(homes.daemonHome);
   const targets: { id: string; target: Target }[] = [];
@@ -190,6 +190,66 @@ test("existing local relays do not restart a running daemon and already-member i
   assert.deepEqual(summary.map(({ status }) => status), ["already_member", "already_member"]);
   assert.equal(joinExitCode(summary), 0);
   assert.equal(loadTarget("mac", homes.targetsHome).relay, invite.relayUrl);
+});
+
+test("local and SSH restarts require a running daemon and either new admission or an added relay", async (t) => {
+  for (const status of ["joined", "already_member"] as const) {
+    for (const added of [false, true]) {
+      for (const running of [false, true]) {
+        await t.test(`${status}, added=${added}, running=${running}`, async (t) => {
+          const homes = fixture(t);
+          install(homes.daemonHome);
+          if (!added) saveConfig(homes.daemonHome, { relayUrl: invite.relayUrl, externalRelayPubkey: relay.pubkey });
+          const localCommands: string[] = [], remoteCommands: string[] = [];
+          const summary = await joinMachines(invite, ["vm"], {}, async () => "yes", {
+            ...homes, identity: () => provider.secret, log: () => {}, consent: async () => consent,
+            claim: async () => status, running: () => running ? 42 : null,
+            configure: (home, url, secret) => configureJoinedRelay(home, url, secret, undefined, async () => relay.pubkey),
+            runner: async (file, args) => {
+              if (file === process.execPath) {
+                localCommands.push(args[1]);
+                return "";
+              }
+              const command = args.at(-1)!;
+              remoteCommands.push(command);
+              if (command.includes("admin")) return `owner ${remoteOwner.pubkey}`;
+              if (command.includes("list")) return JSON.stringify([{ relayUrl: added ? primary : invite.relayUrl }]);
+              if (command.includes("join")) return `${status === "already_member" ? "Already a member of" : "Joined"} ${invite.relayUrl}`;
+              if (command.includes("status")) return running ? "daemon: running (42)\n" : "daemon: stopped\n";
+              return "";
+            },
+          });
+          assert.deepEqual(summary.map((result) => result.status), [status, status, status]);
+          const restart = running && (status === "joined" || added);
+          assert.deepEqual(localCommands, restart ? ["stop", "start"] : []);
+          assert.deepEqual(remoteCommands.filter((command) => command.includes("stop") || command.includes("start"))
+            .map((command) => command.includes("stop") ? "stop" : "start"), restart ? ["stop", "start"] : []);
+        });
+      }
+    }
+  }
+});
+
+test("failed local and SSH claims do not restart daemons", async (t) => {
+  const homes = fixture(t);
+  install(homes.daemonHome);
+  const commands: string[] = [];
+  const summary = await joinMachines(invite, ["vm"], {}, async () => "yes", {
+    ...homes, identity: () => provider.secret, log: () => {}, consent: async () => consent,
+    claim: async () => { throw Error("invite_exhausted"); },
+    running: () => { throw Error("must not check running after failed claim"); },
+    runner: async (_file, args) => {
+      const command = args.at(-1)!;
+      commands.push(command);
+      if (command.includes("admin")) return `owner ${remoteOwner.pubkey}`;
+      if (command.includes("list")) return JSON.stringify([{ relayUrl: invite.relayUrl }]);
+      if (command.includes("join")) throw Error("invite_exhausted");
+      throw Error("unexpected command");
+    },
+  });
+  assert.ok(summary.every(({ status, reason }) => status === "failed" && reason === "invite_exhausted"));
+  assert.equal(joinExitCode(summary), 1);
+  assert.ok(commands.every((command) => !command.includes("stop") && !command.includes("start")));
 });
 
 test("SSH does not receive consent flags not given locally, and a stopped VM is not started", async (t) => {
