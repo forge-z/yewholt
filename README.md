@@ -168,8 +168,10 @@ A new local target is named `mac` (label `My Mac`); VM IDs come from their hosts
 
 The local daemon home is `YEWHOLT_HOME` or `~/.yewholt`. If not installed it is
 skipped with an install hint; `join` never creates system users or runs isolation
-setup scripts. When adding a relay to a running daemon, `join` stops and starts
-it. Stopped daemons stay stopped. Existing agents remain on their original relay.
+setup scripts. After a successful join, `join` stops and starts a running local
+or SSH daemon if it was newly admitted or its relay was newly added, so it
+reconnects with its new membership. An already-member daemon with an unchanged
+relay is not restarted. Stopped daemons stay stopped. Existing agents remain on their original relay.
 In Buzz, open the joined community and select the desired target when creating
 an agent; the human must also be a community member. Install/update the Buzz
 provider plugin with `yh provider install` if not already done.
@@ -739,6 +741,8 @@ You can also supply provider keys in the daemon's environment or `$YEWHOLT_HOME/
 `YEWHOLT_MODEL` is `provider/modelId`. OpenCode Zen free models are catalog ids with a zero cost, for example `opencode/big-pickle` or `opencode/deepseek-v4.1-flash-free`. `OPENCODE_API_KEY` registers both `opencode` and `opencode-go`.
 
 ### Environment
+
+Daemon model streams request `Accept-Encoding: identity` through Pi's request-header options for providers that support custom HTTP headers. This avoids raw gzip SSE responses and `Stream ended without finish_reason` errors with Node 26.0's native fetch and a dependency-installed Undici dispatcher. It does not change global fetch or dispatcher settings.
 
 None of these are required. A built-in provider is registered when its credential resolves from the environment, a saved Pi API key, or a saved OAuth login supported by that provider (except Anthropic). Usable environment credentials retain precedence over saved credentials. The set is `builtinProviders()` from `@earendil-works/pi-ai` 1.6.0.
 

@@ -120,7 +120,7 @@ export class Yewholt {
         models,
         registry,
         identity: { attribution: { name: "Yewholt", url: "https://github.com/forge-z/yewholt" } },
-        settings: { extensions: [] },
+        settings: { extensions: [], stream: { headers: { "Accept-Encoding": "identity" } } },
         env: async (target) => (await opened).envFor(target),
       },
       ctx,
