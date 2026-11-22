@@ -116,7 +116,7 @@ test("daemon joins from stdin with explicit policy and age flags, then adds the 
   const { home, owner, calls, run, alreadyMember } = await fixture(t);
   const result = await run(["relay", "join", "--relay-pubkey", relayKey, "--accept-policy", "--confirm-age"], invite + "\n");
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /Policy for wss:\/\/buzz.example: 1 KB of terms and privacy text; rerun with YH_SHOW_TERMS=1 to review\./);
+  assert.match(result.stdout, /Terms: https:\/\/buzz.example\/api\/join-policy\/terms/);
   assert.ok(!result.stdout.includes("Test terms"));
   assert.ok(!(result.stdout + result.stderr).includes(code));
   assert.deepEqual(calls.map(({ path, method }) => [path, method]), [
@@ -182,7 +182,7 @@ test("provider accepts consent prompts and claims a deep link with its own key",
     ["Paste Buzz invite URL", deepLink], ["Accept the policy?", "yes"], ["minimum age?", "yes"],
   ]);
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /YH_SHOW_TERMS=1/);
+  assert.match(result.stdout, /Terms: https:\/\/buzz.example\/api\/join-policy\/terms/);
   assert.ok(!result.stdout.includes("Test terms"));
   verifyClaim(calls[2], provider, "policy-receipt");
   assert.equal(loadConfig(home).relays, undefined);
@@ -190,7 +190,7 @@ test("provider accepts consent prompts and claims a deep link with its own key",
   assert.ok(!(result.stdout + result.stderr).includes(JSON.parse(stored)));
 });
 
-test("inline policies stay concise, including large and empty text, with full text opt-in", async (t) => {
+test("policy links stay concise, omit absent or empty privacy text, and support full text opt-in", async (t) => {
   const { run, setPolicy } = await fixture(t);
   setPolicy({ policy: { ...policy.policy, terms_markdown: "T".repeat(84 * 1024),
     privacy_markdown: "P".repeat(26 * 1024) } });
@@ -198,9 +198,9 @@ test("inline policies stay concise, including large and empty text, with full te
     ["Accept the policy?", "yes"], ["minimum age?", "yes"],
   ]);
   assert.equal(result.status, 0, result.stderr);
-  const summary = "Policy for wss://buzz.example: 110 KB of terms and privacy text; rerun with YH_SHOW_TERMS=1 to review.";
+  const summary = "Terms: https://buzz.example/api/join-policy/terms\nPrivacy: https://buzz.example/api/join-policy/privacy";
   const prompt = "Accept the policy? Type yes to continue: ";
-  assert.equal(result.stdout.split("\n")[0], summary);
+  assert.equal(result.stdout.split("\n").slice(0, 2).join("\n"), summary);
   assert.ok(result.stderr.includes(prompt));
   assert.ok(!result.stdout.includes("T".repeat(100)) && !result.stdout.includes("P".repeat(100)));
   assert.ok(result.stdout.length < 500);
@@ -209,14 +209,21 @@ test("inline policies stay concise, including large and empty text, with full te
   setPolicy({ policy: { ...policy.policy, terms_markdown: "" } });
   const empty = await run(["provider", "join", invite, "--accept-policy", "--confirm-age"]);
   assert.equal(empty.status, 0, empty.stderr);
-  assert.match(empty.stdout, /0 KB of terms and privacy text/);
+  assert.match(empty.stdout, /Terms: https:\/\/buzz.example\/api\/join-policy\/terms/);
+  assert.ok(!empty.stdout.includes("Privacy:"));
+  for (const privacy_markdown of ["", " \n"]) {
+    setPolicy({ policy: { ...policy.policy, privacy_markdown } });
+    const noPrivacy = await run(["provider", "join", invite, "--accept-policy", "--confirm-age"]);
+    assert.equal(noPrivacy.status, 0, noPrivacy.stderr);
+    assert.ok(!noPrivacy.stdout.includes("Privacy:"));
+  }
 
   setPolicy({ policy: { ...policy.policy, terms_markdown: "Test\x1b terms", privacy_markdown: "Test privacy" } });
   const full = await run(["provider", "join", invite, "--accept-policy", "--confirm-age"], "", [], { YH_SHOW_TERMS: "1" });
   assert.equal(full.status, 0, full.stderr);
   assert.match(full.stdout, /Terms for wss:\/\/buzz.example:\nTest terms\nPrivacy policy:\nTest privacy/);
   assert.ok(!full.stdout.includes("\x1b"));
-  assert.ok(!full.stdout.includes("KB of terms"));
+  assert.ok(!full.stdout.includes("Terms: https://"));
 });
 
 test("both join commands decode raw gzip without content headers at every HTTP step", async (t) => {
@@ -228,7 +235,7 @@ test("both join commands decode raw gzip without content headers at every HTTP s
     const result = await run([command, "join", invite, "--accept-policy", "--confirm-age",
       ...(command === "relay" ? ["--relay-pubkey", relayKey] : [])]);
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /YH_SHOW_TERMS=1/);
+    assert.match(result.stdout, /Terms: https:\/\/buzz.example\/api\/join-policy\/terms/);
     assert.ok(!result.stdout.includes("Test terms"));
     assert.match(result.stdout, /Joined wss:\/\/buzz.example/);
   }

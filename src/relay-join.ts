@@ -110,9 +110,10 @@ export async function consentToPolicy(invite: Invite, options: JoinOptions,
         console.log(`Terms for ${invite.relayUrl}:\n${display(policy.terms_markdown)}`);
         if (typeof policy.privacy_markdown === "string") console.log(`Privacy policy:\n${display(policy.privacy_markdown)}`);
       } else {
-        const bytes = Buffer.byteLength(policy.terms_markdown) +
-          (typeof policy.privacy_markdown === "string" ? Buffer.byteLength(policy.privacy_markdown) : 0);
-        console.log(`Policy for ${invite.relayUrl}: ${Math.ceil(bytes / 1024)} KB of terms and privacy text; rerun with YH_SHOW_TERMS=1 to review.`);
+        console.log(`Terms: ${origin}/api/join-policy/terms`);
+        if (typeof policy.privacy_markdown === "string" && policy.privacy_markdown.trim()) {
+          console.log(`Privacy: ${origin}/api/join-policy/privacy`);
+        }
       }
       if (!options.acceptPolicy && await ask("Accept the policy? Type yes to continue: ") !== "yes") {
         throw new Error("Buzz join policy not accepted");
