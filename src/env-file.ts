@@ -3,9 +3,9 @@ import { envFilePath } from "./paths.js";
 
 const HEADER = `# Yewholt provider keys. Optional. This file is mode 0600.
 # A variable already set in the environment wins over this file.
-# See the repository .env.example for every provider.
-# YEWHOLT_MODEL=opencode/big-pickle
-# OPENCODE_API_KEY=
+# See the repository .env.example for provider credentials.
+# YEWHOLT_MODEL=anthropic/claude-sonnet-4-5
+# ANTHROPIC_API_KEY=
 `;
 
 /** Create `~/.yewholt/.env` when it is missing, and force mode 0600. */
