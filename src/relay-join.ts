@@ -56,29 +56,45 @@ async function request(origin: string, path: string, body?: string, auth?: strin
   }
 }
 
-async function responseObject(response: Response): Promise<Record<string, unknown>> {
-  const value: unknown = await response.json().catch(() => null);
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Invalid Buzz response");
+async function responseObject(
+  response: Response, action: string, secrets: (string | undefined)[],
+): Promise<Record<string, unknown>> {
+  const body = await response.text().catch(() => "");
+  let value: unknown;
+  try {
+    value = JSON.parse(body);
+  } catch {
+    value = undefined;
   }
-  return value as Record<string, unknown>;
+  const object = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+  const status = `HTTP ${response.status}`;
+  if (!response.ok) {
+    const type = response.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
+    const message = [object?.error, object?.message, value, !type || type === "text/plain" ? body : undefined]
+      .find((entry): entry is string => typeof entry === "string" && entry.trim() !== "");
+    let detail = message ?? "";
+    for (const secret of secrets) if (secret) detail = detail.replaceAll(secret, "[redacted]");
+    detail = detail.replace(/[\x00-\x20\x7f-\x9f]+/g, " ").trim().slice(0, 300);
+    throw new Error(`${action} (${status})${detail ? `: ${detail}` : ""}`);
+  }
+  if (!object) throw new Error(`${action} (${status}): expected a JSON object`);
+  return object;
 }
 
 async function claim(invite: Invite, options: JoinOptions, ask: (question: string) => Promise<string>,
   identity: () => string): Promise<void> {
   const { origin, code } = invite;
   const policyResponse = await request(origin, "/api/join-policy");
-  if (!policyResponse.ok && policyResponse.status !== 404) {
-    throw new Error(`Could not read Buzz join policy (HTTP ${policyResponse.status})`);
-  }
   let receipt: string | undefined;
-  if (policyResponse.ok) {
-    const policyResult = await responseObject(policyResponse);
+  if (policyResponse.status !== 404) {
+    const policyResult = await responseObject(policyResponse, "Could not read Buzz join policy", [code]);
     if (Object.keys(policyResult).length !== 0) {
       const policy = policyResult.policy as Record<string, unknown> | undefined;
       if (!policy || typeof policy.version !== "string" || !policy.version ||
           typeof policy.terms_markdown !== "string" || typeof policy.age_attestation_required !== "boolean") {
-        throw new Error("Invalid Buzz join policy");
+        throw new Error(`Invalid Buzz join policy (HTTP ${policyResponse.status})`);
       }
       const display = (value: string) => value.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
       console.log(`Terms for ${invite.relayUrl}:\n${display(policy.terms_markdown)}`);
@@ -92,9 +108,10 @@ async function claim(invite: Invite, options: JoinOptions, ask: (question: strin
       const response = await request(origin, "/api/invites/accept-policy", JSON.stringify({
         code, policy_version: policy.version, age_confirmed: ageConfirmed,
       }));
-      if (!response.ok) throw new Error(`Buzz did not accept the join policy (HTTP ${response.status})`);
-      const result = await responseObject(response);
-      if (typeof result.receipt !== "string" || !result.receipt) throw new Error("Invalid Buzz policy receipt");
+      const result = await responseObject(response, "Buzz did not accept the join policy", [code]);
+      if (typeof result.receipt !== "string" || !result.receipt) {
+        throw new Error(`Invalid Buzz policy receipt (HTTP ${response.status})`);
+      }
       receipt = result.receipt;
     }
   }
@@ -107,14 +124,9 @@ async function claim(invite: Invite, options: JoinOptions, ask: (question: strin
   ]);
   const auth = `Nostr ${Buffer.from(JSON.stringify(event)).toString("base64")}`;
   const response = await request(origin, path, body, auth);
-  const result = await responseObject(response);
-  if (!response.ok) {
-    const reason = ["invite_expired", "invite_exhausted", "invite_invalid", "invite_restricted",
-      "join_policy_required", "join_policy_not_accepted"].find((reason) => reason === result.error);
-    throw new Error(`Buzz invite claim failed (${reason ?? `HTTP ${response.status}`})`);
-  }
+  const result = await responseObject(response, "Buzz invite claim failed", [code, receipt, auth.slice("Nostr ".length)]);
   if (result.status !== "joined" && result.status !== "already_member") {
-    throw new Error("Buzz did not confirm membership");
+    throw new Error(`Buzz did not confirm membership (HTTP ${response.status})`);
   }
   console.log(`${result.status === "joined" ? "Joined" : "Already a member of"} ${invite.relayUrl} as ${pubkeyOf(secret)}`);
 }
