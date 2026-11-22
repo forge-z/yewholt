@@ -1,9 +1,11 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { createModels, type Models } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import type { Storage } from "@earendil-works/pi-durable";
+import { listAgents } from "../../src/agents.js";
+import { generateKeyPair, ownerAuthTag } from "../../src/nostr.js";
 import { ensureOwnerKey, Yewholt, type HumanMessage } from "../../src/session.js";
 import { WorkspaceIsolation } from "../../src/isolation.js";
 import type { RegistryState } from "../../src/registry.js";
@@ -58,6 +60,9 @@ export function testWorkspaces(home: string): string {
   return join(dirname(home), `${basename(home)}-workspaces`);
 }
 
+const homes = new WeakMap<Yewholt, string>();
+const agentKeys = new Map<string, { pubkey: string; secret: string }>();
+
 export async function openSession(
   storage: Storage,
   home: string,
@@ -67,20 +72,42 @@ export async function openSession(
   admins: readonly string[] = [HUMAN],
 ): Promise<Yewholt> {
   ensureOwnerKey(home);
-  return Yewholt.open(storage, { home, models, piDir, isolation, turnTokens: 1000, defaultLimit: 10_000_000, admins });
+  const session = await Yewholt.open(storage, { home, models, piDir, isolation, turnTokens: 1000, defaultLimit: 10_000_000, admins });
+  homes.set(session, home);
+  return session;
 }
 
 export function human(eventId: string, text: string, extra: Partial<HumanMessage> = {}): HumanMessage {
   return { channelId: CHANNEL, authorPubkey: HUMAN, eventId, text, createdAt: 1_795_231_700, ...extra };
 }
 
-/** Create a bot through the Onboarding Specialist's proposal flow. */
-export async function createBot(session: Yewholt, name: string, permissions: string, prefix = name): Promise<RegistryState["bots"][number]> {
-  await session.handleHuman(human(`${prefix}-create`, `create bot name: ${name} model: ${FAUX_MODEL} scope: this permissions: ${permissions}`));
-  await session.handleHuman(human(`${prefix}-approve`, "@Onboarding Specialist approve"));
-  const bot = (await session.snapshot()).bots.find((item) => item.name === name);
-  if (!bot) throw new Error(`bot ${name} was not created`);
+/** Provision an agent file the way a Buzz deploy does; the same name in the same home rewrites that agent's file. */
+export async function provisionAgent(session: Yewholt, home: string, name: string, permissions: string[], channelId = CHANNEL): Promise<RegistryState["bots"][number]> {
+  const model = { provider: "faux", modelId: "faux-1", label: FAUX_MODEL };
+  const dir = join(home, "agents");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const id = `${home}\0${name}`;
+  const agent = agentKeys.get(id) ?? generateKeyPair();
+  agentKeys.set(id, agent);
+  const authTag = ownerAuthTag(generateKeyPair().secret, agent.pubkey);
+  writeFileSync(join(dir, `${agent.pubkey}.json`), JSON.stringify({ name, nsec: agent.secret, authTag, permissions, channelId, model }), { mode: 0o600 });
+  await session.reconcileAgents(listAgents(home, { relayUrl: "wss://relay.invalid", model }));
+  const bot = (await session.snapshot()).bots.find((item) => item.pubkey === agent.pubkey);
+  if (!bot) throw new Error(`agent ${name} was not provisioned`);
   return bot;
+}
+
+/** Load the agent files already in the home, as the daemon does after a restart. */
+export async function reconcileHome(session: Yewholt): Promise<void> {
+  const home = homes.get(session);
+  if (!home) throw new Error("open the session with openSession");
+  await session.reconcileAgents(listAgents(home, { relayUrl: "wss://relay.invalid", model: { provider: "faux", modelId: "faux-1", label: FAUX_MODEL } }));
+}
+
+export async function createBot(session: Yewholt, name: string, permissions: string, _prefix = name): Promise<RegistryState["bots"][number]> {
+  const home = homes.get(session);
+  if (!home) throw new Error("open the session with openSession");
+  return provisionAgent(session, home, name, permissions.split(","));
 }
 
 export async function waitUntil<T>(probe: () => Promise<T | undefined | false>, what: string, ms = 10_000): Promise<T> {

@@ -1,20 +1,18 @@
-import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { AgentFiles, PRESENCE, agentStatuses, type AgentDiagnostics, type AgentScan } from "./agents.js";
-import { loadConfig, saveConfig, type YewholtConfig } from "./config.js";
+import { loadConfig, type YewholtConfig } from "./config.js";
 import { CONTROL_KIND } from "./control-protocol.js";
 import { DeployControl, lastDeploys } from "./deploy-control.js";
 import { WorkspaceIsolation } from "./isolation.js";
 import { readKey } from "./keys.js";
 import { BotLinks, Inbox, publishAll } from "./bridge.js";
 import { accepted, RelayClient, type RelayLoopback } from "./nostr-client.js";
-import { ownerAuthTag, pubkeyOf, signEvent, type NostrEvent } from "./nostr.js";
+import { ownerAuthTag, pubkeyOf, type NostrEvent } from "./nostr.js";
 import { defaultModel } from "./models.js";
 import { ownerKeyPath, pidPath, sqlitePath, statusPath } from "./paths.js";
 import type { BotRecord } from "./registry.js";
-import { createChannelTags, readRelayPubkey } from "./relay.js";
 import { ensureOwnerKey, Yewholt } from "./session.js";
 
 let stopping = false;
@@ -99,10 +97,9 @@ async function serve(
   const drain = (phase: OutboxPhase) => publishOutbox(session, ownerSecret, owner, links, connectBot, phase);
   try {
     await owner.connect();
-    const channelId = config.externalRelayPubkey ? null : await ensureLocalChannel(home, session, config, owner, ownerSecret);
     let highWater = (await session.snapshot()).highWater;
     const botLinks = new BotLinks<BotRecord>({
-      relayPubkey: config.externalRelayPubkey ?? relayKey(home),
+      relayPubkey: config.externalRelayPubkey,
       since: () => highWater || undefined,
       open: connectBot,
       onEvent: (event) => inbox.accept(event),
@@ -126,7 +123,7 @@ async function serve(
           await drain("before-sync");
           const state = await session.snapshot();
           highWater = state.highWater;
-          await botLinks.sync(state.bots);
+          await botLinks.sync(state.bots.filter((bot) => bot.external));
         }
         // This also runs without incoming messages, on the normal daemon tick.
         const queued = await session.refreshAgentRuntime(botLinks.connectedAgents());
@@ -151,7 +148,6 @@ async function serve(
       void maintain(true)
         .catch((error: unknown) => console.error("outbox:", error instanceof Error ? error.message : error));
     });
-    if (channelId) owner.subscribe("channel", [{ kinds: [9], "#h": [channelId] }], inbox.accept);
     owner.subscribe("deploy-control", [{ kinds: [CONTROL_KIND], "#p": [control.pubkey] }], (event) => {
       if (!serving || stopping) return;
       work = work.then(async () => {
@@ -216,19 +212,6 @@ async function serve(
   }
 }
 
-async function ensureLocalChannel(home: string, session: Yewholt, config: YewholtConfig, owner: RelayClient, ownerSecret: string) {
-  if (!config.channelId) {
-    const channelId = randomUUID();
-    const created = signEvent(ownerSecret, 9007, "", createChannelTags(channelId, config.channelName));
-    const result = await owner.publish(created);
-    if (!accepted(result)) throw new Error(`create channel: ${result.message}`);
-    config.channelId = channelId;
-    saveConfig(home, config);
-  }
-  await session.ensureOnboarding(config.channelId);
-  return config.channelId;
-}
-
 /** A bot's own NIP-42 connection and its owner's delegation. */
 async function openBot(session: Yewholt, ownerSecret: string, relayUrl: string, bot: BotRecord,
   loopback?: RelayLoopback): Promise<RelayClient> {
@@ -269,19 +252,6 @@ async function agentRelayDeadline<T>(operation: Promise<T>): Promise<T> {
   } finally {
     clearTimeout(timer);
   }
-}
-
-let relayKeyWarned = false;
-
-/** Relay public key for trusting kind 39002, or null (fail closed, logged once per process). */
-function relayKey(home: string): string | null {
-  const key = readRelayPubkey(home);
-  if (key.ok) return key.pubkey;
-  if (!relayKeyWarned) {
-    relayKeyWarned = true;
-    console.error(`relay key: ${key.reason}; ignoring kind 39002 membership, bots use their stored scope only`);
-  }
-  return null;
 }
 
 type OutboxPhase = "before-sync" | "connected-agents" | "offline";
@@ -329,7 +299,6 @@ async function writeStatus(home: string, session: Yewholt, config: YewholtConfig
     pid: process.pid,
     isolation: session.isolationStatus(),
     relayUrl: config.relayUrl,
-    channelId: config.channelId,
     agents: agentStatuses(state.bots, diagnostics, { target, timestamps: lastDeploys(home) }),
     bots: state.bots.map((bot) => ({
       name: bot.name,
@@ -346,7 +315,6 @@ async function writeStatus(home: string, session: Yewholt, config: YewholtConfig
       limitTokens: bot.limitTokens,
       conversationId: bot.conversationId,
     })),
-    pending: state.pending?.summary ?? null,
     approvals: (state.approvals ?? []).map((item) => ({ id: item.id, pubkey: item.pubkey, channelId: item.channelId, tool: item.tool, subject: item.subject })),
     outbox: state.outbox.length,
   };

@@ -50,16 +50,15 @@ Usage:
   yewholt code [args...]         Forward every argument to the harness unchanged
                                  (yewholt code --help shows the harness flags)
 
-  yewholt install [--home dir] [--port 3000]
-  yh install --relay <url> --relay-pubkey <pubkey> [--home dir]
-                                 Set up only a daemon for an existing Buzz relay
+  yewholt install --relay <url> [--relay-pubkey <pubkey>] [--home dir]
+                                 Set up the daemon for an existing Buzz relay
   yewholt start [--home dir]
   yewholt stop [--home dir]
   yewholt status [--home dir]
-  yewholt admin keys|bots|channel [--home dir]
+  yewholt admin keys|bots [--home dir]
   yewholt admin budget <name> <tokens> [--home dir]
   yewholt provider install
-  yewholt targets add <id> (--relay <url> --daemon <pubkey> | --local) [--label <label>]
+  yewholt targets add <id> --relay <url> --daemon <pubkey> [--label <label>]
     [--wake command --cmd <command> | --wake instabox --account <id> --machine <id>]
   yewholt targets list
   yewholt targets remove <id>

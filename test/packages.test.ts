@@ -82,7 +82,6 @@ test("packages: a code bot gets the package's tool, a bot without code does not;
   console.error = (...args: unknown[]) => void logged.push(args.map(String).join(" "));
   const session = await openSession(new MemoryStorage(), home, dir);
   try {
-    await session.ensureOnboarding(CHANNEL);
     const plain = await createBot(session, "Plain", "post,read");
     const coder = await createBot(session, "Coder", "post,read,code");
     await session.handleHuman(human("w1", "@Coder hello"));

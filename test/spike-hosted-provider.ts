@@ -58,7 +58,9 @@ async function main() {
   assert.ok(provider);
   console.log(JSON.stringify({ disposableHome: home }));
   writeKey(ownerKeyPath(home), owner);
-  saveConfig(home, { relayUrl: relay, port: Number(new URL(relay).port), channelId: null, channelName: "Hosted " + randomUUID() });
+  const relayPubkey = process.env.YEWHOLT_RELAY_PUBKEY;
+  assert.ok(relayPubkey, "Set YEWHOLT_RELAY_PUBKEY to the disposable relay's public key");
+  saveConfig(home, { relayUrl: relay, externalRelayPubkey: relayPubkey });
   run("pair", "add", provider, "--label", "Disposable hosted provider");
   run("targets", "add", "instabox", "--relay", relay, "--daemon", daemonKey);
   const program = join(bin, "yewholt-buzz-bridge");
