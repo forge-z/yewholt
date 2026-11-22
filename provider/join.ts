@@ -122,7 +122,7 @@ export async function joinMachines(invite: Invite, hosts: string[], options: Joi
     const { target } = updateJoinTarget(deps.targetsHome, targets, pubkeyOf(owner), relays, "mac", "My Mac");
     addPairing(deps.daemonHome, provider, target.label);
     for (const relay of relays.slice(1)) addPairing(deps.daemonHome, provider, target.label, undefined, relay);
-    if (added && deps.running(deps.daemonHome)) {
+    if ((status !== "already_member" || added) && deps.running(deps.daemonHome)) {
       const cli = fileURLToPath(new URL("../src/cli.js", import.meta.url));
       for (const command of ["stop", "start"]) await deps.runner(process.execPath, [cli, command, "--home", deps.daemonHome]);
     }
@@ -137,15 +137,16 @@ export async function joinMachines(invite: Invite, hosts: string[], options: Joi
     const added = !relays.some((relay) => sameRelay(relay, invite.relayUrl));
     const flags = [...(consent.acceptPolicy ? ["--accept-policy"] : []), ...(consent.confirmAge ? ["--confirm-age"] : [])];
     const joined = await remote(["relay", "join", ...flags], `${invite.origin}/invite/${invite.code}\n`);
+    const status = /Already a member of/.test(joined) ? "already_member" : "joined";
     const existing = targets.find(({ target }) => target.daemonPubkey === daemon);
     const label = existing?.target.label ?? host.slice(0, 120);
     await remote(["pair", "add", provider, "--label", label, "--relay", invite.relayUrl]);
-    if (added && /^daemon: running\b/m.test(await remote(["status"]))) {
+    if ((status !== "already_member" || added) && /^daemon: running\b/m.test(await remote(["status"]))) {
       await remote(["stop"]);
       await remote(["start"]);
     }
     updateJoinTarget(deps.targetsHome, targets, daemon, [...relays, invite.relayUrl], hostId(host), label, host);
-    return /Already a member of/.test(joined) ? "already_member" : "joined";
+    return status;
   });
   for (const result of summary) deps.log(`${result.machine}: ${result.status === "already_member" ? "already member" : result.status}${result.reason ? ": " + result.reason : ""}`);
   return summary;

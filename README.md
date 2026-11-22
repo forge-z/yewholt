@@ -168,8 +168,10 @@ A new local target is named `mac` (label `My Mac`); VM IDs come from their hosts
 
 The local daemon home is `YEWHOLT_HOME` or `~/.yewholt`. If not installed it is
 skipped with an install hint; `join` never creates system users or runs isolation
-setup scripts. When adding a relay to a running daemon, `join` stops and starts
-it. Stopped daemons stay stopped. Existing agents remain on their original relay.
+setup scripts. After a successful join, `join` stops and starts a running local
+or SSH daemon if it was newly admitted or its relay was newly added, so it
+reconnects with its new membership. An already-member daemon with an unchanged
+relay is not restarted. Stopped daemons stay stopped. Existing agents remain on their original relay.
 In Buzz, open the joined community and select the desired target when creating
 an agent; the human must also be a community member. Install/update the Buzz
 provider plugin with `yh provider install` if not already done.
