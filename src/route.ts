@@ -1,5 +1,5 @@
 /** Commands that drive the Buzz daemon. Their behaviour is unchanged by the harness. */
-export const DAEMON_COMMANDS = ["install", "start", "stop", "status", "admin", "daemon", "pair", "agents"] as const;
+export const DAEMON_COMMANDS = ["install", "update", "start", "stop", "status", "admin", "daemon", "pair", "agents"] as const;
 export type DaemonCommand = (typeof DAEMON_COMMANDS)[number];
 const PROVIDER_COMMANDS = ["provider", "targets"] as const;
 type ProviderCommand = (typeof PROVIDER_COMMANDS)[number];
@@ -53,6 +53,8 @@ Usage:
   yewholt install --relay <url> [--relay-pubkey <pubkey>] [--home dir]
                                  Set up the daemon for an existing Buzz relay
   yewholt start [--home dir]
+  yewholt update [--home dir] [--archive <tar file>]
+                                 Update this checkout, bridge, and running daemon (not the relay)
   yewholt stop [--home dir]
   yewholt status [--home dir]
   yewholt admin keys|bots [--home dir]

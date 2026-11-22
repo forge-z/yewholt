@@ -34,7 +34,7 @@ test("help, --help and -h print usage and exit 0", () => {
 });
 
 test("each daemon command still routes to itself", () => {
-  assert.deepEqual([...DAEMON_COMMANDS], ["install", "start", "stop", "status", "admin", "daemon", "pair", "agents"]);
+  assert.deepEqual([...DAEMON_COMMANDS], ["install", "update", "start", "stop", "status", "admin", "daemon", "pair", "agents"]);
   for (const command of DAEMON_COMMANDS) {
     assert.deepEqual(route([command]), { kind: "command", command, args: [] }, command);
     assert.deepEqual(route([command, "--home", "/tmp/y"]), { kind: "command", command, args: ["--home", "/tmp/y"] }, command);
