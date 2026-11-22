@@ -3,10 +3,14 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { record } from "../src/control-files.js";
 import { isPubkey } from "../src/control-protocol.js";
-import { normalizeRelay } from "../src/relay-url.js";
+import { normalizeRelay, sameRelay } from "../src/relay-url.js";
 
 export type Wake = { kind: "command"; cmd: string } | { kind: "instabox"; accountId: string; machineId: string };
-export type Target = { label: string; transport: "relay"; relay: string; daemonPubkey: string; wake?: Wake };
+export type Target = { label: string; transport: "relay"; relay: string; relays?: string[]; daemonPubkey: string; wake?: Wake };
+
+export function targetRelays(target: Target): string[] {
+  return [target.relay, ...(target.relays ?? [])];
+}
 
 export function providerHome(): string {
   return process.env.YEWHOLT_PROVIDER_HOME ?? join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "yewholt");
@@ -65,11 +69,21 @@ export function targetFile(id: string, home = providerHome()): string {
 
 export function validateTarget(id: string, value: unknown): Target {
   if (record(value) && value.id === id && typeof value.label === "string" && value.label.trim()) {
-    const { transport, label, relay, daemonPubkey } = value;
-    if (transport === "relay" && only(value, ["id", "label", "transport", "relay", "daemonPubkey", "wake"])) {
+    const { transport, label, relay, daemonPubkey, relays } = value;
+    if (transport === "relay" && only(value, ["id", "label", "transport", "relay", "relays", "daemonPubkey", "wake"])) {
       const normalized = normalizeRelay(relay);
       if (!normalized) throw new InvalidTargetRelay(id);
-      if (isPubkey(daemonPubkey)) return { transport, label, relay: normalized, daemonPubkey, wake: parseWake(value.wake) };
+      const additional: string[] = [];
+      if (relays !== undefined) {
+        if (!Array.isArray(relays)) throw new InvalidTargetRelay(id);
+        for (const url of relays) {
+          const added = normalizeRelay(url);
+          if (!added || [normalized, ...additional].some((other) => sameRelay(added, other))) throw new InvalidTargetRelay(id);
+          additional.push(added);
+        }
+      }
+      if (isPubkey(daemonPubkey)) return { transport, label, relay: normalized,
+        ...(additional.length && { relays: additional }), daemonPubkey, wake: parseWake(value.wake) };
     }
   }
   throw new Error("Invalid target configuration");

@@ -7,11 +7,12 @@ import { record, writePrivateJson } from "../src/control-files.js";
 import { controlEvent, isModelReference, isPubkey } from "../src/control-protocol.js";
 import { parseModelLabel } from "../src/models.js";
 import { generateKeyPair, verifyAuthSignature } from "../src/nostr.js";
+import { sameRelay } from "../src/relay-url.js";
 import { targetIds } from "./install.js";
 import { sendControl, waitForConfirmation, type RelayWait } from "./relay.js";
 import { ProviderSecrets } from "./secrets.js";
 import { recordOutcome } from "./status.js";
-import { InvalidTargetRelay, loadTarget, privateJson, providerHome, relayUrl, validId, type Target } from "./target.js";
+import { InvalidTargetRelay, loadTarget, privateJson, providerHome, relayUrl, targetRelays, validId, type Target } from "./target.js";
 import { runWake } from "./wake.js";
 
 type Binding = {
@@ -43,15 +44,6 @@ function release(binding: Binding, pubkey: string): void {
   if (read<string>(path) === pubkey) removeFile(path);
 }
 
-function sameCommunity(relay: string, community: string): boolean {
-  const endpoint = (value: string) => {
-    const url = new URL(value);
-    if (url.hostname.endsWith(".")) url.hostname = url.hostname.slice(0, -1);
-    return url.href;
-  };
-  return endpoint(relay) === endpoint(community);
-}
-
 function provision(input: Record<string, unknown>, community: string) {
   const { target: id, name, picture, code, model } = input;
   if (!validId(id) || typeof name !== "string" || !name.trim() || name.length > 120 ||
@@ -61,10 +53,11 @@ function provision(input: Record<string, unknown>, community: string) {
   }
   const target = loadTarget(id);
   if (target.transport !== "relay") return fail("Select a Yewholt relay target");
-  if (!sameCommunity(target.relay, community)) {
-    return fail(`Buzz is open to ${community}, but target ${id} uses ${target.relay}. Open the target relay as a Buzz community, then create the agent there.`);
+  const relay = targetRelays(target).find((url) => sameRelay(url, community));
+  if (!relay) {
+    return fail(`Buzz is open to ${community}, but target ${id} uses ${targetRelays(target).join(", ")}. Open the target relay as a Buzz community, then create the agent there.`);
   }
-  const reservation = sha([id, target.relay, target.daemonPubkey, community, name]);
+  const reservation = sha([id, relay, target.daemonPubkey, community, name]);
   const path = reservationPath(reservation);
   const existing = () => {
     const pubkey = read<string>(path);
@@ -78,7 +71,7 @@ function provision(input: Record<string, unknown>, community: string) {
   if (previous) return previous;
   const { pubkey, secret } = generateKeyPair();
   const pending = reservationPath(randomUUID());
-  writePrivateJson(agentPath(pubkey), { target: id, relay: target.relay, daemon: target.daemonPubkey,
+  writePrivateJson(agentPath(pubkey), { target: id, relay, daemon: target.daemonPubkey,
     community, reservation, name, picture, code: code === true, model, secret } satisfies Binding);
   try {
     writePrivateJson(pending, pubkey);
@@ -99,7 +92,7 @@ async function modelCatalog(target: Extract<Target, { transport: "relay" }>, sec
   for (let pages = 0, offset = 0; pages < 12 && Date.now() < deadline; pages++) {
     const requestId = randomUUID();
     const event = controlEvent(secret, target.daemonPubkey, "hosted-models",
-      { requestId, agentPubkey: target.daemonPubkey }, { offset });
+      { requestId, agentPubkey: target.daemonPubkey }, { offset, relay: target.relay });
     let catalog: unknown;
     const result = await wait(target, secret, event, requestId, target.daemonPubkey,
       Math.max(1, deadline - Date.now()), (body) => { catalog = body.catalog; });
@@ -119,7 +112,7 @@ export async function bridge(input: unknown, wait: RelayWait = waitForConfirmati
     if (input.op === "targets") {
       const relays = Object.fromEntries(targetIds().flatMap((id) => {
         const target = loadTarget(id);
-        return target.transport === "relay" ? [[id, target.relay] as const] : [];
+        return target.transport === "relay" ? [[id, target.relays ? targetRelays(target) : target.relay] as const] : [];
       }));
       return { ...ok, targets: Object.keys(relays), ...(input.details === true && { relays }) };
     }
@@ -127,7 +120,11 @@ export async function bridge(input: unknown, wait: RelayWait = waitForConfirmati
       if (!validId(input.target)) return fail("Select a Yewholt relay target");
       const target = loadTarget(input.target);
       if (target.transport !== "relay") return fail("Select a Yewholt relay target");
-      return await modelCatalog(target, new ProviderSecrets().identity(), wait);
+      const community = input.community;
+      const relay = community === undefined ? target.relay : relayUrl(community) &&
+        targetRelays(target).find((url) => sameRelay(url, community));
+      if (!relay) return fail("The selected Yewholt target does not serve this Buzz community");
+      return await modelCatalog({ ...target, relay }, new ProviderSecrets().identity(), wait);
     }
     const { op, community, pubkey } = input;
     if (!relayUrl(community)) return fail("Invalid Buzz community");
@@ -137,7 +134,7 @@ export async function bridge(input: unknown, wait: RelayWait = waitForConfirmati
     }
     const path = agentPath(pubkey);
     const binding = read<Binding>(path);
-    if (!binding || binding.community !== community) return fail("This Mac has no Yewholt binding for this agent");
+    if (!binding || !sameRelay(binding.community, community)) return fail("This Mac has no Yewholt binding for this agent");
     const remove = () => {
       release(binding, pubkey);
       writePrivateJson(path, { ...binding, secret: undefined, removed: true });
@@ -146,10 +143,12 @@ export async function bridge(input: unknown, wait: RelayWait = waitForConfirmati
     if (binding.removed) return op === "remove" ? ok : fail("Yewholt agent was removed");
     if (op === "remove" && !binding.authTag) return remove();
 
-    const target = loadTarget(binding.target);
-    if (target.transport !== "relay" || target.relay !== binding.relay || target.daemonPubkey !== binding.daemon) {
+    const configured = loadTarget(binding.target);
+    const relay = targetRelays(configured).find((url) => sameRelay(url, binding.relay));
+    if (!relay || configured.daemonPubkey !== binding.daemon) {
       return fail("Restore the original Yewholt target before managing this agent");
     }
+    const target = { ...configured, relay };
     let authTag = binding.authTag;
     if (op === "activate") {
       if (!Array.isArray(input.auth) || !input.auth.every((item) => typeof item === "string") ||
@@ -165,7 +164,7 @@ export async function bridge(input: unknown, wait: RelayWait = waitForConfirmati
     }
     if (!authTag) return fail("Activate the Yewholt agent before editing it");
     const owner = authTag[1]!;
-    const context = { community, owner, authTag };
+    const context = { community: binding.community, owner, authTag };
     const secrets = new ProviderSecrets();
     const secret = secrets.identity();
     const wake = (config: Parameters<typeof runWake>[0], requestId: string, timeout: number) =>

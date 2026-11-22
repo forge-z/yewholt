@@ -8,6 +8,7 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { MemoryStorage } from "@earendil-works/pi-durable";
 import { bridge } from "../provider/bridge.js";
+import type { RelayWait } from "../provider/relay.js";
 import { ProviderSecrets } from "../provider/secrets.js";
 import { targetFile } from "../provider/target.js";
 import { listAgents } from "../src/agents.js";
@@ -15,9 +16,65 @@ import { writePrivateJson } from "../src/control-files.js";
 import { controlEvent, decryptControl, verifiedEnvelope, type Confirmation } from "../src/control-protocol.js";
 import { DeployControl } from "../src/deploy-control.js";
 import { WorkspaceIsolation } from "../src/isolation.js";
-import { generateKeyPair, ownerAuthTag, verifyAuthSignature, verifyEvent, type NostrEvent } from "../src/nostr.js";
+import { generateKeyPair, ownerAuthTag, pubkeyOf, verifyAuthSignature, verifyEvent, type NostrEvent } from "../src/nostr.js";
 import { addPairing } from "../src/pairing.js";
 import { Yewholt } from "../src/session.js";
+
+test("two targets provision independent agents in the same Buzz community", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "yewholt-shared-community-"));
+  const old = { ...process.env };
+  process.env.YEWHOLT_PROVIDER_HOME = join(root, "provider");
+  process.env.YEWHOLT_PROVIDER_FILE_STORAGE = "1";
+  t.after(() => {
+    for (const key of ["YEWHOLT_PROVIDER_HOME", "YEWHOLT_PROVIDER_FILE_STORAGE"]) {
+      if (old[key] === undefined) delete process.env[key];
+      else process.env[key] = old[key];
+    }
+    rmSync(root, { recursive: true, force: true });
+  });
+  const primary = "wss://instabox.example";
+  const community = "wss://forge.example";
+  const owner = generateKeyPair();
+  const provider = new ProviderSecrets().identity();
+  const targets = new Map(["instabox", "mac"].map((id) => [id, generateKeyPair()]));
+  for (const [id, daemon] of targets) {
+    writePrivateJson(targetFile(id), { id, label: id, transport: "relay", relay: id === "instabox" ? primary : community,
+      ...(id === "instabox" && { relays: [community] }), daemonPubkey: daemon.pubkey });
+  }
+  assert.deepEqual(await bridge({ op: "targets", details: true }), {
+    ok: true, targets: ["instabox", "mac"], relays: { instabox: [primary, community], mac: community },
+  });
+  const agents = new Set<string>();
+  for (const [id, daemon] of targets) {
+    const home = join(root, id);
+    const primaryRelay = id === "instabox" ? primary : community;
+    const model = { provider: "test", modelId: "offline", label: "Offline" };
+    const control = new DeployControl(home, daemon.secret, { relayUrl: community, model }, undefined, { primaryRelay });
+    addPairing(home, pubkeyOf(provider), id, undefined, id === "instabox" ? community : undefined);
+    const send: RelayWait = async (target, secret, event, _request, _agent, _timeout, onConfirmation) => {
+      assert.equal(target.relay, community);
+      assert.equal(target.daemonPubkey, daemon.pubkey);
+      const reply = await control.handle(event, async () => false, {
+        models: () => ["test/offline"],
+        publishProfile: async (agent) => { assert.equal(agent.relayUrl, community); },
+        updateName: async () => {},
+        reconcileRemoval: async () => {},
+      });
+      const envelope = verifiedEnvelope(reply!, event.pubkey, "confirmation")!;
+      const body = decryptControl(envelope, secret, daemon.pubkey) as Confirmation;
+      onConfirmation?.(body);
+      return body.ok ? "confirmed" : "refused";
+    };
+    assert.deepEqual(await bridge({ op: "models", target: id, community }, send), { ok: true, models: ["test/offline"] });
+    const reserved = await bridge({ op: "provision", target: id, name: "Same name", community });
+    assert.ok("pubkey" in reserved && typeof reserved.pubkey === "string");
+    agents.add(reserved.pubkey);
+    assert.equal((await bridge({ op: "activate", community, pubkey: reserved.pubkey,
+      auth: ownerAuthTag(owner.secret, reserved.pubkey) }, send)).ok, true);
+    assert.equal(listAgents(home, { relayUrl: primaryRelay, model }).definitions[0]?.relayUrl, community);
+  }
+  assert.equal(agents.size, 2);
+});
 
 test("the hosted bridge provisions, edits model and profile in place, and tombstones the agent on removal", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "yewholt-hosted-"));

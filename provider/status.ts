@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { record, writePrivateJson } from "../src/control-files.js";
 import { RelayClient } from "../src/nostr-client.js";
 import { targetIds } from "./install.js";
-import { InvalidTargetRelay, loadTarget, privateJson, providerHome, type Target } from "./target.js";
+import { InvalidTargetRelay, loadTarget, privateJson, providerHome, targetRelays, type Target } from "./target.js";
 import { ProviderSecrets } from "./secrets.js";
 
 const RECENT_MS = 10 * 60 * 1_000;
@@ -79,10 +79,12 @@ export function listTargets(): void {
   for (const id of targetIds()) {
     try {
       const target = loadTarget(id);
-      const { agents, lastDeploy, lastFailure } = evidence(id, target);
-      const daemon = target.daemonPubkey + " (" + daemonEvidence(lastDeploy) + ")";
-      console.log([id + " (" + safeText(target.label) + ")", safeText(target.relay), daemon,
-        date(lastDeploy), agents, date(lastDeploy), lastFailure].join("\t"));
+      for (const relay of targetRelays(target)) {
+        const { agents, lastDeploy, lastFailure } = evidence(id, { ...target, relay });
+        const daemon = target.daemonPubkey + " (" + daemonEvidence(lastDeploy) + ")";
+        console.log([id + " (" + safeText(target.label) + ")", safeText(relay), daemon,
+          date(lastDeploy), agents, date(lastDeploy), lastFailure].join("\t"));
+      }
     } catch (error) {
       console.log(id + "\t" + (error instanceof InvalidTargetRelay ? error.message : "invalid target configuration"));
     }
@@ -118,7 +120,6 @@ export async function doctorTargets(id?: string): Promise<void> {
       if (error instanceof InvalidTargetRelay) throw error;
       throw new Error("Invalid or missing target configuration");
     }
-    const { lastDeploy } = evidence(id, target);
     if (!identityLoaded) {
       identityLoaded = true;
       try {
@@ -127,13 +128,18 @@ export async function doctorTargets(id?: string): Promise<void> {
         // Report unavailable without printing the storage exception.
       }
     }
-    return [
-      id + ":",
-      "  Relay: " + await probe(target, identity),
-      "  Pairing / daemon: " + daemonEvidence(lastDeploy) + " (recorded evidence only; no live daemon probe)",
-      "  Last confirmation: " + date(lastDeploy),
-      "  Daemon version: unavailable (control v1 does not report it)",
-    ];
+    const relays = targetRelays(target);
+    return Promise.all(relays.map(async (relay) => {
+      const route = { ...target, relay };
+      const { lastDeploy } = evidence(id, route);
+      return [
+        id + (relays.length === 1 ? ":" : " (" + safeText(relay) + "):"),
+        "  Relay: " + await probe(route, identity),
+        "  Pairing / daemon: " + daemonEvidence(lastDeploy) + " (recorded evidence only; no live daemon probe)",
+        "  Last confirmation: " + date(lastDeploy),
+        "  Daemon version: unavailable (control v1 does not report it)",
+      ];
+    }));
   }));
-  for (const row of rows) console.log(row.join("\n"));
+  for (const row of rows.flat()) console.log(row.join("\n"));
 }

@@ -74,25 +74,26 @@ export function apply(ctx) {
     const target = targets?.includes(config?.target) ? config.target : "";
     const code = config?.code === true;
     const model = config?.model ?? "";
-    const targetRelay = relays?.[target];
+    const advertised = relays?.[target];
+    const targetRelays = Array.isArray(advertised) ? advertised : advertised ? [advertised] : [];
     const endpoint = (value) => {
       const url = new URL(value);
       if (url.hostname.endsWith(".")) url.hostname = url.hostname.slice(0, -1);
       return url.href;
     };
-    const mismatch = community && targetRelay && endpoint(community) !== endpoint(targetRelay);
-    const readyTarget = target && !mismatch ? target : "";
-    const loaded = catalog?.target === readyTarget && catalog?.retry === retry ? catalog : null;
+    const mismatch = community && target && !targetRelays.some((relay) => endpoint(community) === endpoint(relay));
+    const readyTarget = target && community && !mismatch ? target : "";
+    const loaded = catalog?.target === readyTarget && catalog?.community === community && catalog?.retry === retry ? catalog : null;
     useEffect(() => {
       if (!readyTarget) return;
       const controller = new AbortController();
-      request({ op: "models", target: readyTarget }, controller.signal).then(({ models }) => {
-        if (!controller.signal.aborted) setCatalog({ target: readyTarget, retry, models });
+      request({ op: "models", target: readyTarget, community }, controller.signal).then(({ models }) => {
+        if (!controller.signal.aborted) setCatalog({ target: readyTarget, community, retry, models });
       }, (error) => {
-        if (!controller.signal.aborted) setCatalog({ target: readyTarget, retry, error: error.message });
+        if (!controller.signal.aborted) setCatalog({ target: readyTarget, community, retry, error: error.message });
       });
       return () => controller.abort();
-    }, [readyTarget, retry]);
+    }, [readyTarget, community, retry]);
     useEffect(() => {
       onReadyChange?.(Boolean(readyTarget) && (!model || Boolean(loaded?.models?.includes(model))));
     }, [readyTarget, model, loaded, onReadyChange]);
@@ -103,7 +104,7 @@ export function apply(ctx) {
       }, h("option", { value: "" }, "Select a target"),
       ...(targets ?? []).map((id) => h("option", { key: id, value: id }, id)))),
       mismatch ? h("p", { role: "alert" },
-        `Buzz is open to ${community}, but ${target} uses ${targetRelay}. Open the target relay as a Buzz community, then create the agent there.`) : null,
+        `${target} is not configured for ${community}. Select a target that serves this community, or add this relay to the target.`) : null,
       readyTarget ? h("label", null, "Model ", h("select", {
         value: model, disabled, onChange: (event) => onChange({ target, code, model: event.target.value }),
       }, h("option", { value: "" }, "Daemon default"),
