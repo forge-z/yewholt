@@ -132,50 +132,53 @@ yh status
 
 `start`, `stop`, and `status` manage only the daemon; the relay is run and upgraded by whoever administers it. Running `install` again on the same home with the same relay is a no-op.
 
-### Serve another Buzz community from the same daemon
+### Join Forge Z or another shared Buzz community
 
-Keep the installed primary relay and add the community's relay and its kind
-39002 signing key. The same daemon identity is used on both relays, but
-admission and provider pairings are separate for each community:
-
-```sh
-yh relay join --relay-pubkey <shared-relay-signing-pubkey>
-yh relay list
-yh pair add <provider-pubkey> --label "My Mac" --relay wss://shared.communities.buzz.xyz
-yh stop
-yh start
-```
-
-Ask the community owner/admin for a Buzz invite (**Settings → Community
-admin → Membership → Invite**). Paste the link when prompted. `relay join`
-claims it as the daemon and adds the relay only after Buzz confirms admission.
-Omit `--relay-pubkey` when the relay is already configured. The human
-creating agents must also be a member.
-Existing single-relay homes and pairings keep working without migration
-commands. Omitting `--relay` from `pair add/list/remove` operates on the
-primary relay. Relay configuration changes take effect at daemon restart;
-pairing changes are read live. Use `yh status` to see which configured
-relays the daemon has authenticated to.
-
-On the Mac, rebuild and rerun `yh provider install` and update the Yewholt
-plugin in Buzz from the folder it prints. Run `yh provider join` and paste an
-invite for the provider identity, then update the remote target
-with all its relay URLs; preserve its target ID, daemon pubkey, label
-and any wake options:
+On the owner's Mac, ask the community owner/admin for a Buzz invite
+(**Settings → Community admin → Membership → Invite**), then run:
 
 ```sh
-yh targets add my-vm --relay wss://relay.example --relay wss://shared.communities.buzz.xyz --daemon <daemon-pubkey> --label "My VM"
+yh join
+# Paste the invite when prompted; for first-time SSH VMs:
+yh join --ssh my-vm --ssh owner@another-vm
 ```
 
-To host agents from the Mac in that same community, run the daemon-side
-relay commands against the Mac daemon home (or use `yh install --relay`
-for a fresh home that only needs that community, then `yh relay join`).
-Rerun `yh targets add my-mac --local` to register its configured relays and
-pair the local provider on each one. While Buzz stays open on the shared community, choose
-either target when creating an agent. Models, agent activation and chat use
-the selected community's relay; existing agents remain on their original relay.
+One command admits the Mac provider, its installed local daemon, and each SSH
+VM daemon, pairs the provider, and updates the Buzz targets. Consent is asked
+once. No public keys need to be copied: after admission, the daemon authenticates
+to the relay and discovers its signing key from relay-signed group events.
+Discovery fails clearly if no such event arrives within 15 seconds.
 
-Both join commands accept an HTTPS invite page or a `buzz://join` link.
+The command prints the invite uses needed before claiming: **one for the Mac
+provider plus one per daemon machine** (for example, Mac plus two VMs needs
+four uses). Already-member identities succeed. A failure, including exhausted
+invite uses, is reported per machine without stopping the others; any failure
+gives a nonzero exit status. Get an invite with sufficient uses for all machines.
+
+SSH uses the system `ssh` with `BatchMode=yes` and login `bash` to find `yh` on
+PATH. Install/update `yh` on the VMs first and configure non-interactive SSH
+access. Invites reach child processes only on stdin, never in their argv.
+Successful SSH hosts are remembered on private mode-0600 target files, so
+subsequent `yh join` commands include them without `--ssh`. Target IDs, labels,
+and wake options are retained when the daemon key matches an existing target.
+A new local target is named `mac` (label `My Mac`); VM IDs come from their hosts.
+
+The local daemon home is `YEWHOLT_HOME` or `~/.yewholt`. If not installed it is
+skipped with an install hint; `join` never creates system users or runs isolation
+setup scripts. When adding a relay to a running daemon, `join` stops and starts
+it. Stopped daemons stay stopped. Existing agents remain on their original relay.
+In Buzz, open the joined community and select the desired target when creating
+an agent; the human must also be a community member. Install/update the Buzz
+provider plugin with `yh provider install` if not already done.
+
+Low-level commands remain available: `yh provider join` admits only the Mac
+provider; `yh relay join` admits only that daemon and adds the relay (restart
+it yourself). `--relay-pubkey` is optional and, if supplied, must match discovery.
+`yh relay list`, `yh pair add ... --relay <url>`, and `yh targets add ...` allow
+manual configuration. Omitting `--relay` from pairing commands selects the
+primary relay. Pairing changes are read live.
+
+All join commands accept an HTTPS invite page or a `buzz://join` link.
 Paste at the prompt or supply the link on the first line of stdin to keep
 the invite token out of shell history. When the community has a join policy,
 review the displayed terms and explicitly accept them and any required age
@@ -184,14 +187,14 @@ reviewing the current policy and `--confirm-age` only if the required age
 attestation is true, for example:
 
 ```sh
-yh provider join --accept-policy --confirm-age < /path/to/private-invite-file
+yh join --accept-policy --confirm-age < /path/to/private-invite-file
 ```
 
 Run an interactive join by itself so subsequent shell commands aren't read
 as prompt answers. If join fails, share the reported HTTP status and error,
 not the invite URL.
 
-Both join commands request uncompressed API responses and also handle raw gzip
+All join commands request uncompressed API responses and also handle raw gzip
 bodies even when response headers are missing, for compatibility with HTTP
 dispatchers loaded by dependencies.
 
@@ -517,14 +520,12 @@ and its public signing key:
 
 ```sh
 yh install --home "$HOME/.yewholt" --relay wss://relay.example --relay-pubkey <relay-public-key>
-yh relay join --home "$HOME/.yewholt"
 sudo env PATH="$PATH" scripts/setup-bot-user-macos.sh
 # Open a new login session so workspace group membership applies.
 yh start
 yh provider install
-yh provider join
-yh targets add my-mac --local --home "$HOME/.yewholt" --label "My Mac"
-yh targets doctor my-mac
+yh join
+yh targets doctor mac
 ```
 
 Have the owner approve the privileged setup first. It creates a hidden bot user

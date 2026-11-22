@@ -16,6 +16,7 @@ import { addPairing, listPairings, removePairing } from "./pairing.js";
 import { readKey } from "./keys.js";
 import { logPath, ownerKeyPath, pidPath, secretsDir, sqlitePath, statusPath, yewholtHome } from "./paths.js";
 import { joinRelay } from "./relay-join.js";
+import { configureJoinedRelay } from "./daemon-join.js";
 import { normalizeRelay, sameRelay } from "./relay-url.js";
 import { Yewholt } from "./session.js";
 import { runHarness } from "./harness.js";
@@ -39,6 +40,10 @@ async function main(): Promise<void> {
   }
   if (target.kind === "command") {
     const { command, args } = target;
+    if (command === "join") {
+      const { joinCommunity } = await import("../provider/join.js");
+      return joinCommunity(args);
+    }
     if (command === "provider" || command === "targets" || (command === "pair" && !args.length)) {
       const { providerCommand } = await import("../provider/cli.js");
       return providerCommand(command, args);
@@ -111,16 +116,15 @@ async function relayCommand(home: string, rest: string[]): Promise<void> {
     return joinRelay(rest.slice(1), (relayUrl, { relayPubkey }) => {
       const existing = routes.find((entry) => sameRelay(entry.relayUrl, relayUrl));
       const identity = () => readKey(ownerKeyPath(home));
-      if (!existing) {
-        if (!isPubkey(relayPubkey)) {
-          throw new Error("Relay is not configured; pass --relay-pubkey <pubkey> to add it after joining");
-        }
-        return { identity, finish: () => addRelay(home, relayUrl, relayPubkey) };
-      }
+      if (relayPubkey !== undefined && !isPubkey(relayPubkey)) throw new Error("Invalid relay signing key");
       if (existing && relayPubkey !== undefined && existing.externalRelayPubkey !== relayPubkey) {
         throw new Error("This relay is already configured with a different signing key");
       }
-      return { identity };
+      return { identity, finish: async () => {
+        if (await configureJoinedRelay(home, relayUrl, identity(), relayPubkey)) {
+          console.log(`Added ${relayUrl}. Restart the daemon to connect to it.`);
+        }
+      } };
     }, true);
   }
   if (command === "list" && rest.length === 1) {
