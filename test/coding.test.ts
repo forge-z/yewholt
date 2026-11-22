@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { MemoryStorage, type ConversationId } from "@earendil-works/pi-durable";
+import { MemoryStorage } from "@earendil-works/pi-durable";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { ensureOwnerKey, failureReason, instructionsFor, parseAdmins, type Yewholt } from "../src/session.js";
@@ -13,17 +12,17 @@ import { WorkspaceIsolation, type IsolationProbe } from "../src/isolation.js";
 import type { BotRecord } from "../src/registry.js";
 import { CHANNEL, chatFrom, createBot, emptyPiDir, human, openSession, testWorkspaces, waitUntil } from "./helpers/coding.js";
 
-const ctx = BACKGROUND_CONTEXT;
 const ELSEWHERE = "44444444-4444-4444-8444-444444444444";
 
 async function withCoding(
   fn: (session: Yewholt, home: string) => Promise<void>,
   isolationFor?: (home: string) => WorkspaceIsolation,
-  opts: { admins?: readonly string[]; models?: Parameters<typeof openSession>[3] } = {},
+  opts: { admins?: readonly string[]; models?: Parameters<typeof openSession>[3]; setup?: (piDir: string) => void } = {},
 ): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "yewholt-code-"));
   const home = join(root, "state");
   const piDir = emptyPiDir();
+  opts.setup?.(piDir);
   const session = await openSession(new MemoryStorage(), home, piDir, opts.models, isolationFor?.(home), opts.admins);
   try {
     await fn(session, home);
@@ -35,9 +34,7 @@ async function withCoding(
 }
 
 async function toolNames(session: Yewholt, bot: BotRecord): Promise<string[]> {
-  const conversation = await session.harness.conversation(bot.conversationId as unknown as ConversationId, ctx);
-  assert.ok(conversation);
-  return (await conversation.agent(ctx)).tools.map((tool) => tool.name).sort();
+  return (await session.botSession(bot.pubkey)).getActiveToolNames().sort();
 }
 
 async function lastReply(session: Yewholt, bot: BotRecord): Promise<string> {
@@ -55,7 +52,7 @@ test("permissions: only a bot whose stored permissions include code gets tools",
     assert.deepEqual(coder.permissions, ["post", "read", "code"]);
 
     await session.handleHuman(human("p1", "@Plain run: echo hi > plain.txt"));
-    assert.deepEqual(await toolNames(session, plain), []);
+    assert.deepEqual(await toolNames(session, plain), ["read", "tool_search"]);
     assert.match(await lastReply(session, plain), /done\[error\]/);
     assert.equal(existsSync(workspaceDir(testWorkspaces(home), plain.pubkey)), false);
 
@@ -75,16 +72,21 @@ test("permissions: granting and revoking code in the agent file applies on the n
     assert.match(await lastReply(session, plain), /done\[ok\]/);
     assert.equal(readFileSync(join(workspaceDir(testWorkspaces(home), plain.pubkey), "granted.txt"), "utf8"), "granted\n");
     assert.ok((await toolNames(session, plain)).includes("bash"));
+    const codeSession = await session.botSession(plain.pubkey);
+    const path = codeSession.sessionManager.getSessionFile();
 
     await createBot(session, "Plain", "post,read");
-    assert.deepEqual(await toolNames(session, plain), []);
+    assert.deepEqual(await toolNames(session, plain), ["read", "tool_search"]);
+    const chatSession = await session.botSession(plain.pubkey);
+    assert.notEqual(chatSession, codeSession);
+    assert.equal(chatSession.sessionManager.getSessionFile(), path);
     await session.handleHuman(human("r3", "@Plain run: echo revoked > revoked.txt"));
     assert.match(await lastReply(session, plain), /done\[error\]/);
     assert.equal(existsSync(join(workspaceDir(testWorkspaces(home), plain.pubkey), "revoked.txt")), false);
   });
 });
 
-test("instructions: a code bot is told about its workspace, tools and approvals; others keep the out-of-scope text", () => {
+test("instructions: a code bot is told about its workspace, tools and approvals; others can use installed skills and extensions", () => {
   const base: BotRecord = {
     conversationId: 1,
     name: "Coder",
@@ -101,7 +103,7 @@ test("instructions: a code bot is told about its workspace, tools and approvals;
     announced: true,
   };
   const plain = instructionsFor(base);
-  assert.match(plain, /Calendar, email, MCP, and repo access are out of scope\./);
+  assert.match(plain, /installed skills, MCP servers and extension tools/);
   const coder = instructionsFor({ ...base, permissions: ["post", "read", "code"] });
   assert.match(coder, /workspace/);
   assert.match(coder, /read, write, edit and bash/);
@@ -115,10 +117,11 @@ test("secrets: a bash call cannot see a variable set in the daemon's process.env
   try {
     await withCoding(async (session) => {
       const coder = await createBot(session, "Coder", "post,read,code");
-      await session.handleHuman(human("s1", "@Coder run: echo key=[$YEWHOLT_FAKE_PROVIDER_KEY] home=$HOME"));
+      await session.handleHuman(human("s1", "@Coder run: echo key=[$YEWHOLT_FAKE_PROVIDER_KEY] home=$HOME session=[$PI_SESSION_FILE] id=[$PI_SESSION_ID]"));
       const reply = await lastReply(session, coder);
       assert.match(reply, /done\[ok\]: key=\[\] home=/);
       assert.doesNotMatch(reply, /sk-test-must-not-leak/);
+      assert.match(reply, /session=\[\] id=\[\]/);
     });
   } finally {
     delete process.env.YEWHOLT_FAKE_PROVIDER_KEY;
@@ -209,6 +212,136 @@ test("approval: writing outside the workspace asks first; the request names the 
     } finally {
       rmSync(outside, { recursive: true, force: true });
     }
+  });
+});
+
+test("approval: codemode's nested bash and writes park for chat approval and preserve outright refusals", async () => {
+  await withCoding(async (session, home) => {
+    const coder = await createBot(session, "Coder", "post,read,code");
+    const sdk = await session.botSession(coder.pubkey);
+    sdk.setActiveToolsByName([...sdk.getActiveToolNames(), "codemode"]);
+    const ran = join(workspaceDir(testWorkspaces(home), coder.pubkey), "nested.txt");
+    const target = join(home, "..", "nested-outside.txt");
+    const command = "mkdir -p junk && rm -rf junk && echo nested >> nested.txt";
+    const script = `text(await tools.bash(${JSON.stringify({ command })}));
+text(await tools.write(${JSON.stringify({ path: target, content: "must not run" })}));`;
+    const turn = session.handleHuman(human("cm1", `@Coder script: ${script}`));
+    const [bash] = await waitUntil(async () => {
+      const list = await approvals(session);
+      return list.length > 0 && list;
+    }, "codemode bash approval");
+    assert.equal(bash!.subject, command);
+    assert.equal(existsSync(ran), false);
+    assert.equal(existsSync(target), false);
+    assert.match(await lastReply(session, coder), /aprovo[\s\S]*rejeito/);
+
+    await session.handleHuman(human("cm2", "aprovo"));
+    const [write] = await waitUntil(async () => {
+      const list = await approvals(session);
+      return list.some((request) => request.subject === target) && list;
+    }, "codemode outside write approval");
+    assert.equal(write!.subject, target);
+    assert.equal(readFileSync(ran, "utf8"), "nested\n");
+    assert.equal(existsSync(target), false);
+    await session.handleHuman(human("cm3", "rejeito"));
+    await turn;
+    assert.equal(existsSync(target), false);
+    assert.deepEqual(await approvals(session), []);
+    assert.match(await lastReply(session, coder), /Script failed[\s\S]*A person rejected this in the chat/);
+
+    const privatePath = join(home, "private.txt");
+    await session.handleHuman(human("cm4", `@Coder script: text(await tools.write(${JSON.stringify({ path: privatePath, content: "must not run" })}));`));
+    assert.equal(existsSync(privatePath), false);
+    assert.deepEqual(await approvals(session), []);
+    assert.match(await lastReply(session, coder), /Refused \(not approvable\)/);
+  });
+});
+
+test("permissions: non-code codemode can run empty scripts but cannot call bash or write", async () => {
+  await withCoding(async (session, home) => {
+    const plain = await createBot(session, "Plain", "post,read");
+    const sdk = await session.botSession(plain.pubkey);
+    sdk.setActiveToolsByName([...sdk.getActiveToolNames(), "codemode"]);
+    await session.handleHuman(human("nc0", "@Plain script: text('no tools');"));
+    assert.match(await lastReply(session, plain), /Script completed[\s\S]*no tools/);
+    const target = join(home, "..", "non-code.txt");
+    for (const [name, input] of [
+      ["bash", { command: `echo escaped > ${target}` }],
+      ["write", { path: target, content: "escaped" }],
+    ] as const) {
+      await session.handleHuman(human(`nc-${name}`, `@Plain script: text(await tools.${name}(${JSON.stringify(input)}));`));
+      assert.match(await lastReply(session, plain), new RegExp(`Script failed[\\s\\S]*tools\\.${name} does not exist`));
+      assert.equal(existsSync(target), false);
+      assert.deepEqual(await approvals(session), []);
+    }
+  });
+});
+
+test("approval: tool_search-loaded forwarding tools cannot bypass bash/write gates or non-code exclusions", async () => {
+  await withCoding(async (session, home) => {
+    const coder = await createBot(session, "Coder", "post,read,code");
+    const sdk = await session.botSession(coder.pubkey);
+    const ran = join(workspaceDir(testWorkspaces(home), coder.pubkey), "searched.txt");
+    const target = join(home, "..", "searched-outside.txt");
+    const inputs = {
+      bash: { command: "mkdir -p junk && rm -rf junk && echo searched > searched.txt" },
+      write: { path: target, content: "approved write" },
+    };
+    for (const name of ["bash", "write"] as const) {
+      const tool = `deferred_${name}`;
+      assert.equal(sdk.getActiveToolNames().includes(tool), false);
+      await session.handleHuman(human(`search-${name}`, `@Coder tool: tool_search ${JSON.stringify({ query: tool, limit: 1 })}`));
+      assert.match(await lastReply(session, coder), /done\[ok\]: Loaded 1 tool/);
+      assert.ok(sdk.getActiveToolNames().includes(tool));
+      const turn = session.handleHuman(human(`call-${name}`, `@Coder tool: ${tool} ${JSON.stringify(inputs[name])}`));
+      const [request] = await waitUntil(async () => {
+        const list = await approvals(session);
+        return list.length > 0 && list;
+      }, `searched ${name} approval`);
+      assert.equal(request!.subject, name === "bash" ? inputs.bash.command : target);
+      assert.equal(existsSync(ran), false);
+      assert.equal(existsSync(target), false);
+      await session.handleHuman(human(`answer-${name}`, name === "bash" ? "rejeito" : "aprovo"));
+      await turn;
+      assert.match(await lastReply(session, coder), name === "bash" ? /done\[error\].*A person rejected/s : /done\[ok\]/);
+      assert.deepEqual(await approvals(session), []);
+    }
+    assert.equal(existsSync(ran), false);
+    assert.equal(readFileSync(target, "utf8"), "approved write");
+
+    const plain = await createBot(session, "Plain", "post,read");
+    const blocked = join(home, "..", "searched-blocked.txt");
+    for (const name of ["bash", "write"] as const) {
+      const tool = `deferred_${name}`;
+      await session.handleHuman(human(`plain-search-${name}`, `@Plain tool: tool_search ${JSON.stringify({ query: tool, limit: 1 })}`));
+      assert.ok((await session.botSession(plain.pubkey)).getActiveToolNames().includes(tool));
+      const input = name === "bash" ? { command: `echo escaped > ${blocked}` } : { path: blocked, content: "escaped" };
+      await session.handleHuman(human(`plain-call-${name}`, `@Plain tool: ${tool} ${JSON.stringify(input)}`));
+      assert.match(await lastReply(session, plain), /done\[error\]/);
+      assert.equal(existsSync(blocked), false);
+      assert.deepEqual(await approvals(session), []);
+    }
+  }, undefined, {
+    setup: (piDir) => {
+      mkdirSync(join(piDir, "extensions"));
+      writeFileSync(join(piDir, "extensions", "deferred.js"), `
+export default (pi) => {
+  for (const name of ["bash", "write"]) {
+    pi.registerTool({ name: "deferred_" + name, label: name, description: "Forward to " + name,
+      exposure: "deferred", reachesTools: () => [name],
+      parameters: name === "bash"
+        ? { type: "object", properties: { command: { type: "string" } }, required: ["command"] }
+        : { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] },
+      execute: async (_id, input, _signal, _update, ctx) => {
+        const outcome = await ctx.executeTool(name, input);
+        if (outcome.isError) throw new Error(outcome.result.content.map((part) => part.text ?? "").join(""));
+        return outcome.result;
+      }
+    });
+  }
+};
+`);
+    },
   });
 });
 

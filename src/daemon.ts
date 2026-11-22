@@ -76,7 +76,7 @@ export async function runDaemon(home: string): Promise<void> {
       return true;
     };
     await reconcile();
-    void session.resumeTurns().catch((error: unknown) => console.error("resume:", error instanceof Error ? error.message : error));
+    await session.resumeTurns();
     const links = new Map<string, BotLinks<BotRecord>>();
     const wake = new Set<() => void>();
     let sharedWork = Promise.resolve();

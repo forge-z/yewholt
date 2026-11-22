@@ -25,6 +25,7 @@ function textOf(content: unknown): string {
 /**
  * A scripted model, offline. The last user message decides the call:
  * `run: <command>` → bash, `read: <path>` → read, `write: <path>` → write "written".
+ * `script: <source>` → codemode, `tool: <name> <json>` → an arbitrary tool.
  * After a tool result it answers `done[ok|error]: <result text>`. Anything else: `ok`.
  */
 export function scriptedModels(): Models {
@@ -33,6 +34,10 @@ export function scriptedModels(): Models {
     const last = [...context.messages].reverse().find((message) => message.role !== "system");
     if (last?.role === "toolResult") return fauxAssistantMessage(`done[${last.isError ? "error" : "ok"}]: ${textOf(last.content).trim()}`);
     const text = last?.role === "user" ? textOf(last.content) : "";
+    const script = text.match(/\bscript:\s*([\s\S]+)$/);
+    if (script) return fauxAssistantMessage(fauxToolCall("codemode", { code: script[1]! }), { stopReason: "toolUse" });
+    const tool = text.match(/\btool:\s*(\S+)\s+([\s\S]+)$/);
+    if (tool) return fauxAssistantMessage(fauxToolCall(tool[1]!, JSON.parse(tool[2]!)), { stopReason: "toolUse" });
     const run = text.match(/\brun:\s*([\s\S]+)$/);
     if (run) return fauxAssistantMessage(fauxToolCall("bash", { command: run[1]!.trim() }), { stopReason: "toolUse" });
     const read = text.match(/\bread:\s*(\S+)/);
@@ -40,7 +45,7 @@ export function scriptedModels(): Models {
     const write = text.match(/\bwrite:\s*(\S+)/);
     if (write) return fauxAssistantMessage(fauxToolCall("write", { path: write[1]!, content: "written\n" }), { stopReason: "toolUse" });
     const edit = text.match(/\bedit:\s*(\S+)/);
-    if (edit) return fauxAssistantMessage(fauxToolCall("edit", { path: edit[1]!, edits: [{ oldText: "old", newText: "new" }] }), { stopReason: "toolUse" });
+    if (edit) return fauxAssistantMessage(fauxToolCall("edit", { path: edit[1]!, oldText: "old", newText: "new" }), { stopReason: "toolUse" });
     return fauxAssistantMessage("ok");
   };
   faux.setResponses(Array.from({ length: 200 }, () => respond as never));

@@ -101,6 +101,12 @@ See README's Mac-local target and secret-isolation sections for limitations.
    user, HOME and Pi agent directory as the daemon so it can read the saved key.
    Don't read, echo or copy credentials. See [Provider keys on the host](../../README.md#provider-keys-on-the-host).
    If using **Daemon default**, set `YEWHOLT_MODEL=anthropic/claude-sonnet-4-5` on the VM.
+   Bots share the daemon user’s global Pi skills (`~/.pi/agent/skills`), MCP
+   servers (`yh code mcp add`) and packages (`yh code install npm:...`).
+   These run with daemon permissions: install only trusted integrations.
+   Workspace project resources are ignored. Bot histories appear by name
+   in `yh` → `/resume` → all projects. Restarting cancels pending approvals
+   and unfinished turns; ask again rather than approving an old request.
    Run `yh start` and `yh status`, or use the VM's existing approved
    supervisor to run `yh daemon` in the foreground. With no supervisor,
    `yh start` starts it now but not after a VM reboot. Don't run

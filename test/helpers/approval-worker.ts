@@ -2,9 +2,9 @@
  * Child process for test/approval-kill9.test.ts. Modes:
  * - `park <dir>`: create a code bot, ask it to run a dangerous command, wait until the
  *   call is parked and the request is stored, write `parked`, then hang until killed.
- * - `approve <dir>`: reopen the same SQLite file, re-attach to the unfinished turn,
- *   answer `aprovo`, wait for the turn's reply, write `result.json`, exit 0.
- * - `idle <dir>`: reopen and re-attach again; nothing must run.
+ * - `approve <dir>`: reopen the SQLite file, cancel interrupted work, send a stale
+ *   `aprovo`, write `approve.json`, exit 0.
+ * - `idle <dir>`: reopen again; nothing must run.
  */
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -28,19 +28,14 @@ async function main(mode: string, dir: string): Promise<void> {
       const list = (await session.snapshot()).approvals ?? [];
       return list.length > 0 && list;
     }, "the approval request");
-    // Let the park commit land too; a kill before it is also fine (the gate reruns on reopen).
-    await new Promise((resolve) => setTimeout(resolve, 300));
     writeFileSync(join(dir, "parked"), JSON.stringify({ workspace: workspaceDir(testWorkspaces(home), coder.pubkey), approvals }));
     setInterval(() => undefined, 1000);
     return;
   }
   await reconcileHome(session);
   const resumed = session.resumeTurns();
-  if (mode === "approve") {
-    await waitUntil(async () => ((await session.snapshot()).approvals ?? []).length > 0, "the stored approval after reopen");
-    await session.handleHuman(human("k2", "aprovo"));
-  }
   await resumed;
+  if (mode === "approve") await session.handleHuman(human("k2", "aprovo"));
   const state = await session.snapshot();
   const coder = state.bots.find((bot) => bot.name === "Coder")!;
   writeFileSync(
