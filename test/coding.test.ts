@@ -361,6 +361,32 @@ test("approval: YEWHOLT_ADMINS takes hex pubkeys separated by commas or spaces a
   assert.deepEqual(parseAdmins(undefined), []);
 });
 
+test("model streams request identity encoding for successful, empty and failed responses", async () => {
+  const faux = fauxProvider({ provider: "faux", models: [{ id: "faux-1" }] });
+  const headers: unknown[] = [];
+  const responses = [
+    fauxAssistantMessage("hello"),
+    fauxAssistantMessage(""),
+    fauxAssistantMessage("", { stopReason: "error", errorMessage: "400 invalid request" }),
+  ];
+  faux.setResponses(responses.map((response) => (_context, options) => {
+    headers.push(options?.headers);
+    return response;
+  }));
+  const models = createModels();
+  models.setProvider(faux.provider);
+  await withCoding(async (session) => {
+    const bot = await createBot(session, "Plain", "post,read");
+    await session.handleHuman(human("identity-success", "@Plain hello"));
+    assert.equal(await lastReply(session, bot), "hello");
+    await session.handleHuman(human("identity-empty", "@Plain hello again"));
+    assert.match(await lastReply(session, bot), /empty_answer/);
+    await session.handleHuman(human("identity-error", "@Plain try again"));
+    assert.match(await lastReply(session, bot), /model_error: 400 invalid request/);
+  }, undefined, { models });
+  assert.deepEqual(headers, responses.map(() => ({ "Accept-Encoding": "identity" })));
+});
+
 test("model failure: the reply says why (reason and provider error), not only that it failed", async () => {
   const faux = fauxProvider({ provider: "faux", models: [{ id: "faux-1" }] });
   const key = "sk-" + "x".repeat(40);
