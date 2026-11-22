@@ -163,8 +163,22 @@ PATH. Install/update `yh` on the VMs first and configure non-interactive SSH
 access. Invites reach child processes only on stdin, never in their argv.
 Successful SSH hosts are remembered on private mode-0600 target files, so
 subsequent `yh join` commands include them without `--ssh`. Target IDs, labels,
-and wake options are retained when the daemon key matches an existing target.
+and wake/SSH options are retained when the daemon key matches existing targets;
+all targets for that daemon are updated, not just the first.
 A new local target is named `mac` (label `My Mac`); VM IDs come from their hosts.
+
+After admitting the provider, `join` also checks other registered targets without
+needing SSH or another invite use. It authenticates to the joined community and
+reads Buzz's relay-signed NIP-43 community roster (kind 13534, `member` tags),
+then adds that relay to every target whose daemon key is listed. NIP-29 kind
+39002 is a channel roster, not a community roster, so it is not used to decide
+community membership. Existing relays and target metadata are preserved and
+relays are not duplicated. Each changed target gets a `Target <id>: updated for
+<relay>` summary line. If the community roster is unavailable or rejected,
+unverified targets stay unchanged and the command reports a failure with a
+nonzero exit status. This check does not admit, pair, configure or restart those
+other daemons; they must already serve the joined relay and be paired with the
+provider there for models to load.
 
 The local daemon home is `YEWHOLT_HOME` or `~/.yewholt`. If not installed it is
 skipped with an install hint; `join` never creates system users or runs isolation
