@@ -106,8 +106,15 @@ export async function consentToPolicy(invite: Invite, options: JoinOptions,
         throw new Error(`Invalid Buzz join policy (HTTP ${policyResponse.status})`);
       }
       const display = (value: string) => value.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
-      console.log(`Terms for ${invite.relayUrl}:\n${display(policy.terms_markdown)}`);
-      if (typeof policy.privacy_markdown === "string") console.log(`Privacy policy:\n${display(policy.privacy_markdown)}`);
+      if (process.env.YH_SHOW_TERMS === "1") {
+        console.log(`Terms for ${invite.relayUrl}:\n${display(policy.terms_markdown)}`);
+        if (typeof policy.privacy_markdown === "string") console.log(`Privacy policy:\n${display(policy.privacy_markdown)}`);
+      } else {
+        console.log(`Terms: ${origin}/api/join-policy/terms`);
+        if (typeof policy.privacy_markdown === "string" && policy.privacy_markdown.trim()) {
+          console.log(`Privacy: ${origin}/api/join-policy/privacy`);
+        }
+      }
       if (!options.acceptPolicy && await ask("Accept the policy? Type yes to continue: ") !== "yes") {
         throw new Error("Buzz join policy not accepted");
       }

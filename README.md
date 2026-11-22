@@ -186,8 +186,11 @@ primary relay. Pairing changes are read live.
 All join commands accept an HTTPS invite page or a `buzz://join` link.
 Paste at the prompt or supply the link on the first line of stdin to keep
 the invite token out of shell history. When the community has a join policy,
-review the displayed terms and explicitly accept them and any required age
-attestation. For non-interactive use, pass `--accept-policy` only after
+the CLI links to the community's `/api/join-policy/terms` HTML page and, when
+privacy text is present, `/api/join-policy/privacy`, instead of printing the full
+text. Use `YH_SHOW_TERMS=1 yh join` (also supported by the low-level
+joins) to review the full text before explicitly accepting it and any required
+age attestation. For non-interactive use, pass `--accept-policy` only after
 reviewing the current policy and `--confirm-age` only if the required age
 attestation is true, for example:
 
