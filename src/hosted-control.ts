@@ -2,7 +2,8 @@ import { lstatSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { loadAgent, validateAgent, type AgentProvisioning } from "./agents.js";
 import { readJson, record, syncDirectory, writePrivateJson } from "./control-files.js";
-import { isPubkey, type ControlEnvelope, type HostedOperation } from "./control-protocol.js";
+import { isModelReference, isPubkey, type Confirmation, type ControlEnvelope, type HostedOperation } from "./control-protocol.js";
+import { parseModelLabel } from "./models.js";
 import { signEvent, verifyAuthTag, type NostrEvent } from "./nostr.js";
 import { agentsDir } from "./paths.js";
 
@@ -12,11 +13,13 @@ type HostedState = {
   provider: string; owner: string; community: string;
   removed: boolean; activated: boolean; name?: string; activatedAt?: number;
   profile?: { request: string; issuedAt: number; eventId: string; createdAt: number; confirmed: boolean };
+  model?: { choice: AgentProvisioning["model"]; issuedAt: number; eventId: string };
 };
 export type HostedEffects = {
   publishProfile: (agent: AgentProvisioning, event: NostrEvent) => Promise<void>;
   updateName: (pubkey: string, name: string) => Promise<void>;
   reconcileRemoval: (pubkey: string) => Promise<void>;
+  reconcileModel?: () => Promise<void>;
   models?: () => string[];
   hasModel?: (choice: AgentProvisioning["model"]) => boolean;
 };
@@ -55,6 +58,7 @@ export class HostedControl {
       return false;
     }
     if (state?.name) agent.name = state.name;
+    if (state?.model) agent.model = state.model.choice;
     return true;
   }
 
@@ -65,7 +69,8 @@ export class HostedControl {
   }
 
   async apply(op: HostedOperation, event: NostrEvent, envelope: ControlEnvelope, body: unknown,
-    reserved: boolean, now: number, effects: HostedEffects, authorize: () => boolean): Promise<string | undefined> {
+    reserved: boolean, now: number, effects: HostedEffects, authorize: () => boolean,
+    confirmation: Confirmation): Promise<string | undefined> {
     const pubkey = envelope.agentPubkey;
     const path = join(agentsDir(this.home), pubkey + ".json");
     const pathToState = statePath(this.home, pubkey);
@@ -93,6 +98,32 @@ export class HostedControl {
       return;
     }
     if (state?.removed) return "hosted agent was removed";
+
+    if (op === "hosted-model") {
+      if (!state?.activated) return "hosted agent is not active in this provider";
+      const agent = loadAgent(path, pubkey, this.defaults);
+      if (!("nsec" in agent) || agent.ownerPubkey !== owner || agent.relayUrl !== this.defaults.relayUrl) {
+        return "hosted provisioning is missing or invalid";
+      }
+      const current = state.model;
+      let choice = current?.choice ?? agent.model;
+      if (body.model !== undefined) {
+        if (!isModelReference(body.model) || body.model.toLowerCase().includes(agent.nsec)) return "invalid model reference";
+        if (!effects.reconcileModel) return "hosted model editing unavailable";
+        if (current && current.eventId !== event.id && (envelope.issuedAt < current.issuedAt ||
+            (envelope.issuedAt === current.issuedAt && event.id > current.eventId))) return "stale hosted model update";
+        if (current?.eventId !== event.id) {
+          choice = parseModelLabel(body.model);
+          if (!effects.hasModel?.(choice)) return "selected model is not available on the daemon";
+          // Preserve the provisioning file version: replacing it can restart a stopped agent.
+          writePrivateJson(pathToState, { ...state, model: { choice, issuedAt: envelope.issuedAt, eventId: event.id } });
+        }
+        await effects.reconcileModel();
+      }
+      const reference = `${choice.provider}/${choice.modelId}`;
+      confirmation.model = isModelReference(reference) ? reference : null;
+      return;
+    }
 
     const metadata = profile(body);
     if (!metadata) return "invalid hosted agent profile";

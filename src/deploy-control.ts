@@ -97,6 +97,7 @@ export class DeployControl {
       verifiedEnvelope(event, this.pubkey, "hosted-activate") ??
       verifiedEnvelope(event, this.pubkey, "hosted-profile") ??
       verifiedEnvelope(event, this.pubkey, "hosted-remove") ??
+      verifiedEnvelope(event, this.pubkey, "hosted-model") ??
       verifiedEnvelope(event, this.pubkey, "hosted-models");
     if (!envelope) return null;
     const confirmation: Confirmation = { job: envelope.requestId, agentPubkey: envelope.agentPubkey, ok: false };
@@ -127,7 +128,7 @@ export class DeployControl {
             else if (envelope.type === "deploy") confirmation.error = this.hosted.manages(envelope.agentPubkey)
               ? "agent is managed by hosted control" : this.apply(event, envelope, body, isReserved, now);
             else if (envelope.type !== "confirmation" && effects) {
-              confirmation.error = await this.hosted.apply(envelope.type, event, envelope, body, isReserved, now, effects, authorized);
+              confirmation.error = await this.hosted.apply(envelope.type, event, envelope, body, isReserved, now, effects, authorized, confirmation);
             } else confirmation.error = "hosted control unavailable";
           }
         }

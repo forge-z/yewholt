@@ -102,7 +102,7 @@ async function main() {
     assert.equal(JSON.parse(readFileSync(file, "utf8")).model.label, model);
     console.log(JSON.stringify({ catalog: "configured provider only", selectedModel: model, credentialOutput: false }));
     const status = (expected: string) => {
-      const bots: { pubkey: string; status: string; name: string; conversationId: number }[] =
+      const bots: { pubkey: string; status: string; name: string; model: string; conversationId: number }[] =
         JSON.parse(readFileSync(statusPath(home), "utf8")).bots;
       const matching = bots.filter((bot) => bot.pubkey === pubkey);
       assert.ok(matching.length <= 1);
@@ -130,6 +130,17 @@ async function main() {
     assert.equal(statSync(file, { bigint: true }).ino, before.ino);
     assert.equal(status("active")?.conversationId, active.conversationId);
     console.log(JSON.stringify({ retry: "same pubkey and conversation", attestedProfile: true, runtime: [10100, 20001] }));
+
+    const modelRequest = { ...params, op: "model" };
+    assert.deepEqual(invoke(modelRequest), { ...catalog, model });
+    const replacement = catalog.models.find((id: string) => id !== model);
+    assert.ok(replacement);
+    assert.deepEqual(invoke({ ...modelRequest, model: replacement }), { ok: true, model: replacement });
+    assert.equal(status("active")?.model, replacement);
+    assert.equal(status("active")?.conversationId, active.conversationId);
+    assert.equal(statSync(file, { bigint: true }).ino, before.ino);
+    assert.deepEqual(invoke(modelRequest), { ...catalog, model: replacement });
+    console.log(JSON.stringify({ modelChanged: true, sameConversation: true }));
 
     const renamed = { ...params, op: "profile", name: "Hosted renamed", picture: "https://example.test/agent.png" };
     assert.deepEqual(invoke(renamed), { ok: true });

@@ -170,6 +170,10 @@ async function serve(
             await session.updateHostedName(pubkey, name);
             await writeStatus(home, session, config, control.pubkey, agentDiagnostics(), botLinks);
           },
+          reconcileModel: async () => {
+            await reconcile(true);
+            await writeStatus(home, session, config, control.pubkey, agentDiagnostics(), botLinks);
+          },
           reconcileRemoval: async (pubkey) => {
             await reconcile(true);
             try {
