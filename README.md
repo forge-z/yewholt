@@ -27,6 +27,9 @@ npm link
 yh
 ```
 
+Every `npm run build` preserves the CLI's Node shebang and marks the output
+executable, so rebuilding keeps the linked `yh` and `yewholt` commands runnable.
+
 The first run opens pi in the current directory. Use pi's `/login` and
 `/model` for the local harness; VM credentials are configured separately.
 

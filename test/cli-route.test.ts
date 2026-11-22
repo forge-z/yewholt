@@ -10,6 +10,11 @@ import { DAEMON_COMMANDS, route, usageText, withDefaultModel } from "../src/rout
 
 const cliPath = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 
+test("built CLI retains its Node shebang and Unix execute permissions", () => {
+  assert.equal(readFileSync(cliPath, "utf8").split("\n")[0], "#!/usr/bin/env node");
+  if (process.platform !== "win32") assert.equal(statSync(cliPath).mode & 0o111, 0o111);
+});
+
 test("no arguments opens the harness with nothing forwarded", () => {
   assert.deepEqual(route([]), { kind: "harness", args: [] });
 });

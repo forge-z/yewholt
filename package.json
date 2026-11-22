@@ -9,7 +9,7 @@
     "yewholt": "./dist/src/cli.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node -e \"require('node:fs').chmodSync('dist/src/cli.js', 0o755)\"",
     "test": "npm run build && node --test dist/test/*.test.js",
     "yewholt": "node dist/src/cli.js"
   },
