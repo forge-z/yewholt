@@ -139,15 +139,18 @@ Keep the installed primary relay and add the community's relay and its kind
 admission and provider pairings are separate for each community:
 
 ```sh
-yh relay add wss://shared.communities.buzz.xyz --relay-pubkey <shared-relay-signing-pubkey>
+yh relay join --relay-pubkey <shared-relay-signing-pubkey>
 yh relay list
 yh pair add <provider-pubkey> --label "My Mac" --relay wss://shared.communities.buzz.xyz
 yh stop
 yh start
 ```
 
-The shared-community administrator must admit the daemon and provider
-pubkeys to that relay. The human creating agents must also be a member.
+Ask the community owner/admin for a Buzz invite (**Settings → Community
+admin → Membership → Invite**). Paste the link when prompted. `relay join`
+claims it as the daemon and adds the relay only after Buzz confirms admission.
+Omit `--relay-pubkey` when the relay is already configured. The human
+creating agents must also be a member.
 Existing single-relay homes and pairings keep working without migration
 commands. Omitting `--relay` from `pair add/list/remove` operates on the
 primary relay. Relay configuration changes take effect at daemon restart;
@@ -155,7 +158,8 @@ pairing changes are read live. Use `yh status` to see which configured
 relays the daemon has authenticated to.
 
 On the Mac, rebuild and rerun `yh provider install` and update the Yewholt
-plugin in Buzz from the folder it prints. Then update the remote target
+plugin in Buzz from the folder it prints. Run `yh provider join` and paste an
+invite for the provider identity, then update the remote target
 with all its relay URLs; preserve its target ID, daemon pubkey, label
 and any wake options:
 
@@ -165,12 +169,28 @@ yh targets add my-vm --relay wss://relay.example --relay wss://shared.communitie
 
 To host agents from the Mac in that same community, run the daemon-side
 relay commands against the Mac daemon home (or use `yh install --relay`
-for a fresh home that only needs that community). Rerun
-`yh targets add my-mac --local` to register its configured relays and pair the
-local provider on each one. The community administrator must also admit the
-Mac daemon's pubkey. While Buzz stays open on the shared community, choose
+for a fresh home that only needs that community, then `yh relay join`).
+Rerun `yh targets add my-mac --local` to register its configured relays and
+pair the local provider on each one. While Buzz stays open on the shared community, choose
 either target when creating an agent. Models, agent activation and chat use
 the selected community's relay; existing agents remain on their original relay.
+
+Both join commands accept an HTTPS invite page or a `buzz://join` link.
+Paste at the prompt or supply the link on the first line of stdin to keep
+the invite token out of shell history. When the community has a join policy,
+review the displayed terms and explicitly accept them and any required age
+attestation. For non-interactive use, pass `--accept-policy` only after
+reviewing the current policy and `--confirm-age` only if the required age
+attestation is true, for example:
+
+```sh
+yh provider join --accept-policy --confirm-age < /path/to/private-invite-file
+```
+
+Each newly admitted identity consumes one use. Use a separate link per key if
+**Max uses** is 1, or reuse a link with enough uses for all keys. If the
+administrator admits the keys directly instead, use `yh relay add` to
+configure the extra relay; the provider needs no join command.
 
 ### A relay that an earlier `yewholt install` started
 
@@ -489,10 +509,12 @@ and its public signing key:
 
 ```sh
 yh install --home "$HOME/.yewholt" --relay wss://relay.example --relay-pubkey <relay-public-key>
+yh relay join --home "$HOME/.yewholt"
 sudo env PATH="$PATH" scripts/setup-bot-user-macos.sh
 # Open a new login session so workspace group membership applies.
 yh start
 yh provider install
+yh provider join
 yh targets add my-mac --local --home "$HOME/.yewholt" --label "My Mac"
 yh targets doctor my-mac
 ```
@@ -519,8 +541,9 @@ no daemon restart is needed. It does not install or start the daemon.
 `--local` is mutually exclusive with relay/daemon/wake flags; `--home`
 requires `--local`. A missing installation produces an install command hint.
 
-Pairing is not relay admission. On the relay host, with its existing admin
-environment, the administrator must admit both printed pubkeys if needed:
+Pairing is not relay admission. If the administrator admits the keys directly
+instead of sharing invites, skip the join commands above. On a self-hosted
+relay the admin can use:
 
 ```sh
 buzz-admin add-member --pubkey <daemon-pubkey>

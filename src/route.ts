@@ -53,6 +53,7 @@ Usage:
   yewholt install --relay <url> [--relay-pubkey <pubkey>] [--home dir]
                                  Set up the daemon for an existing Buzz relay
   yewholt relay add <url> --relay-pubkey <pubkey> [--home dir]
+  yewholt relay join [<invite-url>] [--relay-pubkey <pubkey>] [--accept-policy] [--confirm-age] [--home dir]
   yewholt relay list [--home dir]
   yewholt start [--home dir]
   yewholt update [--home dir] [--archive <tar file>]
@@ -62,6 +63,7 @@ Usage:
   yewholt admin keys|bots [--home dir]
   yewholt admin budget <name> <tokens> [--home dir]
   yewholt provider install
+  yewholt provider join [<invite-url>] [--accept-policy] [--confirm-age]
   yewholt targets add <id> --relay <url> [--relay <url> ...] --daemon <pubkey> [--label <label>]
   yewholt targets add <id> --local [--home dir] [--label <label>]
     [--wake command --cmd <command> | --wake instabox --account <id> --machine <id>]
