@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
+import { gzipSync } from "node:zlib";
 import { saveConfig, loadConfig } from "../src/config.js";
 import { writeKey } from "../src/keys.js";
 import { generateKeyPair, verifyEvent, type NostrEvent } from "../src/nostr.js";
@@ -31,8 +32,8 @@ async function fixture(t: TestContext) {
   const owner = generateKeyPair();
   writeKey(ownerKeyPath(home), owner.secret);
   saveConfig(home, { relayUrl: "wss://primary.example", externalRelayPubkey: relayKey });
-  const calls: { path: string; method?: string; auth?: string; body: string }[] = [];
-  const responses = new Map<string, { status: number; type: string; body: string }>();
+  const calls: { path: string; method?: string; auth?: string; body: string; encoding?: string }[] = [];
+  const responses = new Map<string, { status: number; type?: string; body: string | Buffer }>();
   let joinPolicy: unknown = policy;
   let refusal = false;
   let alreadyMember = false;
@@ -40,10 +41,11 @@ async function fixture(t: TestContext) {
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(chunk);
     const path = req.url!;
-    calls.push({ path, method: req.method, auth: req.headers.authorization, body: Buffer.concat(chunks).toString() });
+    calls.push({ path, method: req.method, auth: req.headers.authorization, body: Buffer.concat(chunks).toString(),
+      encoding: req.headers["accept-encoding"] });
     const response = responses.get(path);
     if (response) {
-      res.writeHead(response.status, { "Content-Type": response.type });
+      res.writeHead(response.status, response.type ? { "Content-Type": response.type } : {});
       return res.end(response.body);
     }
     res.setHeader("Content-Type", "application/json");
@@ -136,6 +138,39 @@ test("provider accepts consent prompts and claims a deep link with its own key",
   assert.equal(loadConfig(home).relays, undefined);
   const stored = readFileSync(join(home, "xdg", "yewholt", "secrets", "identity.json"), "utf8");
   assert.ok(!(result.stdout + result.stderr).includes(JSON.parse(stored)));
+});
+
+test("both join commands decode raw gzip without content headers at every HTTP step", async (t) => {
+  const { calls, run, responses } = await fixture(t);
+  responses.set(policyPath, { status: 200, body: gzipSync(JSON.stringify(policy)) });
+  responses.set(acceptPath, { status: 200, body: gzipSync(JSON.stringify({ receipt: "policy-receipt" })) });
+  responses.set(claimPath, { status: 200, body: gzipSync(JSON.stringify({ status: "joined" })) });
+  for (const command of ["provider", "relay"]) {
+    const result = await run([command, "join", invite, "--accept-policy", "--confirm-age",
+      ...(command === "relay" ? ["--relay-pubkey", relayKey] : [])]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Test terms/);
+    assert.match(result.stdout, /Joined wss:\/\/buzz.example/);
+  }
+  assert.equal(calls.length, 6);
+  assert.ok(calls.every(({ encoding }) => encoding === "identity"));
+});
+
+test("gzip errors are decoded and redacted; empty or corrupt gzip is rejected safely", async (t) => {
+  const { run, responses } = await fixture(t);
+  const cases = [
+    { status: 403, body: gzipSync(JSON.stringify({ error: `invalid ${code}` })),
+      error: /Could not read Buzz join policy \(HTTP 403\): invalid \[redacted\]/ },
+    { status: 200, body: gzipSync(""), error: /HTTP 200\): expected a JSON object/ },
+    { status: 200, body: Buffer.from([0x1f, 0x8b, 0x00]), error: /HTTP 200\): expected a JSON object/ },
+  ];
+  for (const { status, body, error } of cases) {
+    responses.set(policyPath, { status, body });
+    const result = await run(["provider", "join", invite, "--accept-policy", "--confirm-age"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, error);
+    assert.ok(!(result.stdout + result.stderr).includes(code));
+  }
 });
 
 test("explicit refusals and invalid or exhausted invites don't change relay config", async (t) => {
