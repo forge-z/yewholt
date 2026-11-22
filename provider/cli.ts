@@ -2,7 +2,7 @@ import { unlinkSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { writePrivateJson } from "../src/control-files.js";
 import { pubkeyOf } from "../src/nostr.js";
-import { loadConfig } from "../src/config.js";
+import { configuredRelays, loadConfig } from "../src/config.js";
 import { readKey } from "../src/keys.js";
 import { ownerKeyPath, yewholtHome } from "../src/paths.js";
 import { addPairing } from "../src/pairing.js";
@@ -18,10 +18,11 @@ function printPairing(): void {
   console.log("Provider pubkey: " + pubkey);
   console.log("Admit this pubkey to the relay, then run on the target daemon:");
   console.log('  yewholt pair add ' + pubkey + ' --label "My Mac"');
+  console.log("For an additional daemon relay, append --relay <url>.");
 }
 
 function parseTarget(id: string, args: string[]) {
-  const usage = "Usage: targets add <id> (--relay <url> --daemon <pubkey> | --local [--home <path>]) [--label <label>] " +
+  const usage = "Usage: targets add <id> (--relay <url> [--relay <url> ...] --daemon <pubkey> | --local [--home <path>]) [--label <label>] " +
     "[--wake command --cmd <command> | --wake instabox --account <id> --machine <id>]";
   if (!discoverableId(id)) throw new CliError("Invalid target id (use lowercase letters, numbers, hyphens or underscores)");
   let values;
@@ -36,7 +37,7 @@ function parseTarget(id: string, args: string[]) {
       },
     });
     values = parsed.values;
-    if (Object.values(values).some((entry) => entry.length > 1)) throw new Error();
+    if (Object.entries(values).some(([key, entry]) => key !== "relay" && entry.length > 1)) throw new Error();
   } catch {
     throw new CliError(usage);
   }
@@ -49,16 +50,17 @@ function parseTarget(id: string, args: string[]) {
   else if (kind !== undefined || cmd !== undefined || accountId !== undefined || machineId !== undefined) throw new CliError(usage);
   if ((values.local && (values.relay || values.daemon || wake)) || (values.home && !values.local)) throw new CliError(usage);
   const home = values.local ? yewholtHome(values.home?.[0]) : undefined;
-  let relay = values.relay?.[0], daemonPubkey = values.daemon?.[0];
+  let relays = values.relay ?? [], daemonPubkey = values.daemon?.[0];
   if (home !== undefined) {
     try {
-      relay = loadConfig(home).relayUrl;
+      relays = configuredRelays(loadConfig(home)).map(({ relayUrl }) => relayUrl);
       daemonPubkey = pubkeyOf(readKey(ownerKeyPath(home)));
     } catch {
       throw new CliError('Local daemon home is not installed or is invalid. Run yh install --home ' + JSON.stringify(home) + ' --relay <url> --relay-pubkey <pubkey> first.');
     }
   }
-  const raw = { id, label, transport: "relay", relay, daemonPubkey, wake };
+  const [relay, ...additional] = relays;
+  const raw = { id, label, transport: "relay", relay, ...(additional.length && { relays: additional }), daemonPubkey, wake };
   try {
     if (Buffer.byteLength(JSON.stringify(raw)) >= 32 * 1024) throw new Error();
     return { target: validateTarget(id, raw), home };
@@ -83,6 +85,7 @@ export async function providerCommand(command: "provider" | "targets" | "pair", 
       if (home !== undefined) {
         const provider = pubkeyOf(new ProviderSecrets().identity());
         addPairing(home, provider, target.label);
+        for (const relay of target.relays ?? []) addPairing(home, provider, target.label, undefined, relay);
         console.log("Paired provider " + provider + "; the daemon reads pairings live (no restart needed).");
         console.log("Relay administrator: admit the daemon and provider pubkeys if not already admitted:");
         console.log("  buzz-admin add-member --pubkey " + target.daemonPubkey);

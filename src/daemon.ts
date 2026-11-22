@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { AgentFiles, PRESENCE, agentStatuses, type AgentDiagnostics, type AgentScan } from "./agents.js";
-import { loadConfig, type YewholtConfig } from "./config.js";
+import { configuredRelays, loadConfig, type RelayConfig, type YewholtConfig } from "./config.js";
 import { CONTROL_KIND } from "./control-protocol.js";
 import { DeployControl, lastDeploys } from "./deploy-control.js";
 import { WorkspaceIsolation } from "./isolation.js";
@@ -13,11 +13,14 @@ import { ownerAuthTag, pubkeyOf, type NostrEvent } from "./nostr.js";
 import { defaultModel } from "./models.js";
 import { ownerKeyPath, pidPath, sqlitePath, statusPath } from "./paths.js";
 import type { BotRecord } from "./registry.js";
+import { sameRelay } from "./relay-url.js";
 import { ensureOwnerKey, Yewholt } from "./session.js";
 
 let stopping = false;
 
 export async function runDaemon(home: string): Promise<void> {
+  const config = loadConfig(home);
+  const routes = configuredRelays(config);
   const localPort = process.env.YEWHOLT_LOCAL_PORT?.trim();
   const loopbackPort = localPort ? Number(localPort) : undefined;
   if (loopbackPort !== undefined && (!/^\d+$/.test(localPort ?? "") || loopbackPort < 1 || loopbackPort > 65535)) {
@@ -45,7 +48,7 @@ export async function runDaemon(home: string): Promise<void> {
   const ownerSecret = readKey(ownerKeyPath(home));
   try {
     const defaults = {
-      relayUrl: loadConfig(home).relayUrl,
+      relayUrl: config.relayUrl,
       model: defaultModel() ?? { provider: "", modelId: "", label: "unset" },
     };
     const files = new AgentFiles(home, defaults);
@@ -55,51 +58,80 @@ export async function runDaemon(home: string): Promise<void> {
     const reconcile = async (force = false) => {
       pending = files.poll(force) ?? pending;
       if (!pending) return false;
-      pending.definitions = pending.definitions.filter((agent) => control.reconcileHosted(agent));
+      const previous = new Map((await session.snapshot()).bots.map((bot) => [bot.pubkey, bot.relayUrl]));
+      pending.definitions = pending.definitions.filter((agent) => {
+        const route = routes.find(({ relayUrl }) => sameRelay(relayUrl, agent.relayUrl));
+        const old = previous.get(agent.pubkey);
+        const reason = !route ? "relay is not configured"
+          : old && !sameRelay(old, agent.relayUrl) ? "agent cannot change relay" : undefined;
+        if (reason) {
+          pending!.invalid.push({ id: agent.pubkey, pubkey: agent.pubkey, name: agent.name, reason });
+          return false;
+        }
+        return control.reconcileHosted(agent);
+      });
       await session.reconcileAgents(pending);
       latest = { invalid: pending.invalid, unavailable: pending.unavailable };
       pending = null;
       return true;
     };
-    let resumed = false;
-    while (!stopping) {
-      try {
-        await reconcile();
-        if (!resumed) {
-          resumed = true;
-          // Reattach to durable turns after their external keys and stop states are reconciled.
-          void session.resumeTurns().catch((error: unknown) => console.error("resume:", error instanceof Error ? error.message : error));
+    await reconcile();
+    void session.resumeTurns().catch((error: unknown) => console.error("resume:", error instanceof Error ? error.message : error));
+    const links = new Map<string, BotLinks<BotRecord>>();
+    const wake = new Set<() => void>();
+    let sharedWork = Promise.resolve();
+    const serialize: Serialize = (operation) => {
+      const run = sharedWork.then(operation);
+      sharedWork = run.then(() => undefined, () => undefined);
+      return run;
+    };
+    const refreshStatus = () => writeStatus(home, session, config, control.pubkey, latest, links);
+    await refreshStatus();
+    session.setOutboxListener(() => { for (const notify of wake) notify(); });
+    await Promise.all(routes.map(async (route, index) => {
+      const primary = index === 0;
+      const routeControl = new DeployControl(home, ownerSecret, { ...defaults, relayUrl: route.relayUrl },
+        undefined, { primaryRelay: config.relayUrl });
+      const loopback = primary && loopbackPort !== undefined ? { relayUrl: route.relayUrl, port: loopbackPort } : undefined;
+      while (!stopping) {
+        try {
+          await serve(session, ownerSecret, route, primary, routeControl, reconcile, serialize, wake, links, refreshStatus, loopback);
+        } catch (error) {
+          console.error(`relay loop ${route.relayUrl}:`, error instanceof Error ? error.message : error);
         }
-        await serve(home, session, ownerSecret, control, reconcile, () => latest, loopbackPort);
-      } catch (error) {
-        console.error("relay loop:", error instanceof Error ? error.message : error);
-        await sleep(2000);
+        if (!stopping) await sleep(2000);
       }
-    }
+    }));
   } finally {
+    session.setOutboxListener(undefined);
     await session.close();
     removePid();
   }
 }
 
+type Serialize = <T>(operation: () => Promise<T>) => Promise<T>;
+
 async function serve(
-  home: string, session: Yewholt, ownerSecret: string, control: DeployControl,
-  reconcile: (force?: boolean) => Promise<boolean>, agentDiagnostics: () => AgentDiagnostics | undefined, loopbackPort?: number,
+  session: Yewholt, ownerSecret: string, route: RelayConfig, primary: boolean, control: DeployControl,
+  reconcile: (force?: boolean) => Promise<boolean>, serialize: Serialize, wake: Set<() => void>,
+  linksByRelay: Map<string, BotLinks<BotRecord>>, refreshStatus: () => Promise<void>, loopback?: RelayLoopback,
 ): Promise<void> {
-  const config = loadConfig(home);
-  await writeStatus(home, session, config, control.pubkey, agentDiagnostics());
-  const loopback = loopbackPort === undefined ? undefined : { relayUrl: config.relayUrl, port: loopbackPort };
-  const owner = new RelayClient(config.relayUrl, ownerSecret, undefined, true, loopback);
-  const connectBot = (bot: BotRecord) => openBot(session, ownerSecret, config.relayUrl, bot, loopback);
+  const { relayUrl, externalRelayPubkey } = route;
+  const owner = new RelayClient(relayUrl, ownerSecret, undefined, true, loopback);
+  const onRelay = (bot: BotRecord) => bot.external ? sameRelay(bot.relayUrl ?? "", relayUrl) : primary;
+  const connectBot = (bot: BotRecord) => openBot(session, ownerSecret, relayUrl, bot, loopback);
   let links: BotLinks<BotRecord> | undefined;
+  let notify: (() => void) | undefined;
   let work = Promise.resolve();
   let serving = true;
-  const drain = (phase: OutboxPhase) => publishOutbox(session, ownerSecret, owner, links, connectBot, phase);
+  const drain = (phase: OutboxPhase) => publishOutbox(session, ownerSecret, owner, links, connectBot, phase, onRelay, primary);
+  const cursor = (state: Awaited<ReturnType<Yewholt["snapshot"]>>) =>
+    primary ? state.highWater : state.highWaterByRelay?.[relayUrl];
   try {
-    await owner.connect();
-    let highWater = (await session.snapshot()).highWater;
+    await owner.connect(5000);
+    let highWater = cursor(await session.snapshot());
     const botLinks = new BotLinks<BotRecord>({
-      relayPubkey: config.externalRelayPubkey,
+      relayPubkey: externalRelayPubkey,
       since: () => highWater || undefined,
       open: connectBot,
       onEvent: (event) => inbox.accept(event),
@@ -107,57 +139,58 @@ async function serve(
       onDisconnect: (pubkey) => session.agentDisconnected(pubkey),
     });
     links = botLinks;
+    linksByRelay.set(relayUrl, botLinks);
     let nextRetry = performance.now() + 2000;
     const maintain = (requestedSync: boolean, poll = false) => {
       if (!serving) return Promise.resolve();
       const run = work.then(async () => {
-        const changed = poll && await reconcile();
+        const changed = poll && await serialize(() => reconcile());
+        if (changed) for (const other of wake) if (other !== notify) other();
         let retry = false;
         if (poll && performance.now() >= nextRetry) {
           nextRetry = performance.now() + 2000;
-          retry = (await session.snapshot()).bots.some((bot) => bot.external);
+          retry = (await session.snapshot()).bots.some((bot) => bot.external && onRelay(bot));
         }
         const sync = requestedSync || changed || retry;
         if (sync) {
           // Finish local identity events and external offline events before changing links.
           await drain("before-sync");
           const state = await session.snapshot();
-          highWater = state.highWater;
-          await botLinks.sync(state.bots.filter((bot) => bot.external));
+          highWater = cursor(state);
+          await botLinks.sync(state.bots.filter((bot) => bot.external && onRelay(bot)));
         }
         // This also runs without incoming messages, on the normal daemon tick.
         const queued = await session.refreshAgentRuntime(botLinks.connectedAgents());
         if (sync || queued) await drain("connected-agents");
-        if (sync || queued) await writeStatus(home, session, config, control.pubkey, agentDiagnostics(), botLinks);
+        if (sync || queued) await refreshStatus();
       });
       work = run.catch(() => undefined);
       return run;
     };
-    // One inbox for every connection: a message seen by several bots is handled once.
-    // The channel comes from the event's h tag.
     const inbox = new Inbox((message) => {
       if (!serving) return;
       void session
-        .handleHuman(message)
+        .handleHuman({ ...message, relay: { url: relayUrl, primary } })
         .then(() => maintain(true))
         .catch((error: unknown) => console.error("turn:", error instanceof Error ? error.message : error));
     });
     await maintain(true);
     // Approval requests and resumed code turns commit outside a chat message's handling.
-    session.setOutboxListener(() => {
+    notify = () => {
       void maintain(true)
         .catch((error: unknown) => console.error("outbox:", error instanceof Error ? error.message : error));
-    });
+    };
+    wake.add(notify);
     owner.subscribe("deploy-control", [{ kinds: [CONTROL_KIND], "#p": [control.pubkey] }], (event) => {
       if (!serving || stopping) return;
       work = work.then(async () => {
         if (!serving || stopping || !owner.isOpen()) return;
-        const reply = await control.handle(event, async (pubkey) =>
+        const reply = await serialize(() => control.handle(event, async (pubkey) =>
           (await session.snapshot()).bots.some((bot) => bot.pubkey === pubkey && !bot.external), {
           models: () => session.availableModelReferences(),
           hasModel: (choice) => session.hasModel(choice),
           publishProfile: async (agent, profile) => {
-            const client = new RelayClient(agent.relayUrl, agent.nsec, agent.authTag, false, loopback);
+            const client = new RelayClient(relayUrl, agent.nsec, agent.authTag, false, loopback);
             try {
               await agentRelayDeadline(client.connect());
               const result = await agentRelayDeadline(client.publish(profile));
@@ -168,12 +201,9 @@ async function serve(
           },
           updateName: async (pubkey, name) => {
             await session.updateHostedName(pubkey, name);
-            await writeStatus(home, session, config, control.pubkey, agentDiagnostics(), botLinks);
+            await refreshStatus();
           },
-          reconcileModel: async () => {
-            await reconcile(true);
-            await writeStatus(home, session, config, control.pubkey, agentDiagnostics(), botLinks);
-          },
+          reconcileModel: async () => { await reconcile(true); await refreshStatus(); },
           reconcileRemoval: async (pubkey) => {
             await reconcile(true);
             try {
@@ -181,10 +211,10 @@ async function serve(
             } finally {
               await session.forgetRemovedAgent(pubkey);
             }
-            await botLinks.sync((await session.snapshot()).bots);
-            await writeStatus(home, session, config, control.pubkey, agentDiagnostics(), botLinks);
+            await botLinks.sync((await session.snapshot()).bots.filter(onRelay));
+            await refreshStatus();
           },
-        });
+        }));
         if (!reply) return;
         const result = await agentRelayDeadline(owner.publish(reply));
         if (!accepted(result)) console.error("control: confirmation rejected by relay");
@@ -201,17 +231,18 @@ async function serve(
     }
   } finally {
     serving = false;
-    session.setOutboxListener(undefined);
+    if (notify) wake.delete(notify);
     try {
       await work;
       if (stopping && links) {
         await session.offlineAgents(links.connectedAgents());
         await drain("offline");
-        await writeStatus(home, session, config, control.pubkey, agentDiagnostics());
       }
     } finally {
+      linksByRelay.delete(relayUrl);
       await links?.closeAll();
       await owner.close();
+      await refreshStatus();
     }
   }
 }
@@ -221,7 +252,7 @@ async function openBot(session: Yewholt, ownerSecret: string, relayUrl: string, 
   loopback?: RelayLoopback): Promise<RelayClient> {
   const authTag = bot.authTag ?? ownerAuthTag(ownerSecret, bot.pubkey, "");
   const client = bot.external
-    ? new ExternalRelayClient(bot.relayUrl ?? relayUrl, session.botSecret(bot), authTag, true, loopback)
+    ? new ExternalRelayClient(relayUrl, session.botSecret(bot), authTag, true, loopback)
     : new RelayClient(relayUrl, session.botSecret(bot), authTag, true, loopback);
   try {
     if (bot.external) await agentRelayDeadline(client.connect());
@@ -268,6 +299,8 @@ async function publishOutbox(
   links: BotLinks<BotRecord> | undefined,
   connectBot: (bot: BotRecord) => Promise<RelayClient>,
   phase: OutboxPhase,
+  onRelay: (bot: BotRecord) => boolean,
+  primary: boolean,
 ): Promise<void> {
   const state = await session.snapshot();
   const ownerPubkey = pubkeyOf(ownerSecret);
@@ -275,6 +308,7 @@ async function publishOutbox(
   const pendingOffline = new Set(state.outbox.filter((event) => event.kind === PRESENCE && event.content === "offline").map((event) => event.pubkey));
   const events = state.outbox.filter((event) => {
     const bot = bots.get(event.pubkey);
+    if (bot ? !onRelay(bot) : !primary || event.pubkey !== ownerPubkey) return false;
     const offline = event.kind === PRESENCE && event.content === "offline";
     if (!bot?.external) return phase === "before-sync";
     if (!session.hasAgentKey(bot.pubkey)) return false;
@@ -297,12 +331,13 @@ async function publishOutbox(
 }
 
 async function writeStatus(home: string, session: Yewholt, config: YewholtConfig, target: string,
-  diagnostics?: AgentDiagnostics, links?: BotLinks<BotRecord>): Promise<void> {
+  diagnostics: AgentDiagnostics | undefined, links: ReadonlyMap<string, BotLinks<BotRecord>>): Promise<void> {
   const state = await session.snapshot();
   const body = {
     pid: process.pid,
     isolation: session.isolationStatus(),
     relayUrl: config.relayUrl,
+    relays: configuredRelays(config).map(({ relayUrl }) => ({ relayUrl, connected: links.has(relayUrl) })),
     agents: agentStatuses(state.bots, diagnostics, { target, timestamps: lastDeploys(home) }),
     bots: state.bots.map((bot) => ({
       name: bot.name,
@@ -311,7 +346,7 @@ async function writeStatus(home: string, session: Yewholt, config: YewholtConfig
       provider: bot.provider,
       modelId: bot.modelId,
       scope: bot.scope,
-      channels: links?.channels(bot.pubkey) ?? bot.scope,
+      channels: [...links].find(([relay]) => sameRelay(relay, bot.relayUrl ?? config.relayUrl))?.[1].channels(bot.pubkey) ?? bot.scope,
       permissions: bot.permissions,
       status: bot.status,
       role: bot.role,

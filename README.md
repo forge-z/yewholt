@@ -112,7 +112,47 @@ yh status
 - `.env`, mode `0600`, for host configuration and provider keys
 - `state/sessions.sqlite`, the pi-durable store
 
-`start`, `stop`, and `status` manage only the daemon; the relay is run and upgraded by whoever administers it. Running `install` again on the same home with the same relay is a no-op; a different relay needs a different `--home`.
+`start`, `stop`, and `status` manage only the daemon; the relay is run and upgraded by whoever administers it. Running `install` again on the same home with the same relay is a no-op.
+
+### Serve another Buzz community from the same daemon
+
+Keep the installed primary relay and add the community's relay and its kind
+39002 signing key. The same daemon identity is used on both relays, but
+admission and provider pairings are separate for each community:
+
+```sh
+yh relay add wss://shared.communities.buzz.xyz --relay-pubkey <shared-relay-signing-pubkey>
+yh relay list
+yh pair add <provider-pubkey> --label "My Mac" --relay wss://shared.communities.buzz.xyz
+yh stop
+yh start
+```
+
+The shared-community administrator must admit the daemon and provider
+pubkeys to that relay. The human creating agents must also be a member.
+Existing single-relay homes and pairings keep working without migration
+commands. Omitting `--relay` from `pair add/list/remove` operates on the
+primary relay. Relay configuration changes take effect at daemon restart;
+pairing changes are read live. Use `yh status` to see which configured
+relays the daemon has authenticated to.
+
+On the Mac, rebuild and rerun `yh provider install` and update the Yewholt
+plugin in Buzz from the folder it prints. Then update the remote target
+with all its relay URLs; preserve its target ID, daemon pubkey, label
+and any wake options:
+
+```sh
+yh targets add my-vm --relay wss://relay.example --relay wss://shared.communities.buzz.xyz --daemon <daemon-pubkey> --label "My VM"
+```
+
+To host agents from the Mac in that same community, run the daemon-side
+relay commands against the Mac daemon home (or use `yh install --relay`
+for a fresh home that only needs that community). Rerun
+`yh targets add my-mac --local` to register its configured relays and pair the
+local provider on each one. The community administrator must also admit the
+Mac daemon's pubkey. While Buzz stays open on the shared community, choose
+either target when creating an agent. Models, agent activation and chat use
+the selected community's relay; existing agents remain on their original relay.
 
 ### A relay that an earlier `yewholt install` started
 
@@ -143,10 +183,10 @@ A bot answers in every channel it is currently a member of, including private ch
 How the daemon does it:
 
 - While the daemon runs, each active bot keeps its own connection, signed with its own key plus the owner's NIP-OA `auth` tag. The owner key cannot read private channels it is not in (the relay answers `CLOSED … restricted: not a channel member`), so each bot reads with its own key.
-- Each bot subscribes to kind 39002 with `#p` = its pubkey, plus `#d` = the channels it is in so the newer list that drops it is seen too. Only lists signed by the relay key count; that key is `externalRelayPubkey` in `$YEWHOLT_HOME/config.json`, set by `yh install`. Per channel, only the newest list counts. Kind 9000/9001 events alone are not trusted.
+- Each bot subscribes to kind 39002 with `#p` = its pubkey, plus `#d` = the channels it is in so the newer list that drops it is seen too. Only lists signed by that relay's key count; that key is set by `yh install` for the primary relay or `yh relay add` for an additional relay. Per channel, only the newest list counts. Kind 9000/9001 events alone are not trusted.
 - A bot's effective scope is its stored scope plus the channels those lists name. Stored records are not changed. `yewholt status` (`status.json`) shows both as `scope` and `channels`.
 - Each bot subscribes to kind 9 once per effective channel and re-subscribes when the set changes. A message seen on several connections is handled once. The channel is taken from the message's `h` tag. Replies go out on the replying bot's own connection, into that same channel.
-- Provisioning or reactivating an agent opens its connection; `!shutdown` or removing its file closes it. If a connection drops, the daemon restarts its relay loop and reopens every connection.
+- Provisioning or reactivating an agent opens its connection; `!shutdown` or removing its file closes it. Disconnections are retried independently for each relay.
 
 ### Agents created in the Buzz desktop app
 
@@ -157,7 +197,7 @@ The Buzz desktop app creates and owns these agents. Its backend provider runs on
 | `name` | Required nonempty agent name. |
 | `nsec` | Required agent secret key as 64 lowercase hex digits. Its public key must match the filename. |
 | `authTag` | Required `["auth", "<owner pubkey>", "<conditions>", "<Schnorr signature>"]`. The owner's key must differ from the agent's. The signature covers `sha256("nostr:agent-auth:<agent pubkey>:<conditions>")`. |
-| `relayUrl` | WebSocket relay URL. Defaults to the daemon's relay URL. |
+| `relayUrl` | One of the daemon's configured WebSocket relays. Defaults to the primary relay. Do not change the relay of an existing agent identity. |
 | `model` | Object with `provider`, `modelId`, and `label`. Defaults to the daemon model configured by `YEWHOLT_MODEL`. |
 | `permissions` | String array. Defaults to `["post", "read"]`. Add `"code"` to give the agent the coding tools and workspace described below. |
 | `respondTo` | DM response policy. Defaults to `"anyone"`. |
@@ -379,7 +419,7 @@ yewholt targets list
 yewholt targets doctor my-vm     # omit the ID to check all targets
 ```
 
-Pass the complete relay URL once. `targets add` converts `https://` to
+Pass a complete URL for each relay, repeating `--relay` as needed. `targets add` converts `https://` to
 `wss://` and `http://` to `ws://`; do not prepend a second scheme. To
 fix a malformed stored URL, rerun `targets add` with the same ID, daemon
 pubkey, and any existing label and wake options.
@@ -394,9 +434,9 @@ Run `provider install` again after moving either. An existing entry not
 managed by Yewholt is not overwritten.
 
 `provider install` and `yewholt pair` print the same provider public key.
-Admit it to the relay and run `yewholt pair add <providerPubkey> --label "My Mac"`
-on each remote daemon. The daemon's existing `pair add/list/remove` commands
-are unchanged.
+Admit it to each relay and run `yewholt pair add <providerPubkey> --label "My Mac"`
+on each remote daemon, adding `--relay <url>` for each additional relay the
+target should serve.
 
 For remote targets, optionally append one of:
 
@@ -455,7 +495,8 @@ intended macOS version before relying on it for isolation.
 
 `targets add --local` reads the installed relay config and daemon identity
 from `--home`, defaulting to `YEWHOLT_HOME` or `~/.yewholt`, then stores a
-normal relay target and directly pairs this provider. Pairings are read live:
+normal relay target and directly pairs this provider on each configured
+relay. Pairings are read live:
 no daemon restart is needed. It does not install or start the daemon.
 `--local` is mutually exclusive with relay/daemon/wake flags; `--home`
 requires `--local`. A missing installation produces an install command hint.
@@ -533,7 +574,8 @@ relay's `relay/.env`), set `YEWHOLT_LOCAL_PORT` to the local WebSocket
 listener's port. Restart only the daemon to apply it. It opens the
 WebSocket to `ws://127.0.0.1:<port>` with the public `Host` header and
 signs NIP-42 AUTH for the original public URL. Use this only when both
-routes lead to the same relay. Other relay URLs and the Mac provider are
+routes lead to the same relay. The override applies only to the primary
+relay set by `yh install`. Additional relays and the Mac provider are
 unchanged. With the variable unset, the daemon connects directly as before.
 
 <a id="instabox-relay-proxy"></a>For an InstaBox VM using the Host-rewriting proxy, publish the relay on

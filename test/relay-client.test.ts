@@ -121,6 +121,57 @@ test("relay loopback routing is opt-in and limited to the configured public WSS 
   assert.deepEqual(relayDialTarget(local, { relayUrl: local, port }), { url: local });
 });
 
+test("one daemon authenticates on two relays with isolated pairings and loopback routing", async () => {
+  const primary = await fakeRelay(true);
+  const secondary = await fakeRelay(true);
+  const home = mkdtempSync(join(tmpdir(), "yewholt-multiple-relays-"));
+  const publicUrl = "wss://instabox.example";
+  const provider = generateKeyPair();
+  const cli = fileURLToPath(new URL("../src/cli.js", import.meta.url));
+  const run = (...args: string[]) => promisify(execFile)(process.execPath, [cli, ...args], {
+    env: { PATH: process.env.PATH, HOME: home, YEWHOLT_HOME: home, DEEPSEEK_API_KEY: "test-key",
+      YEWHOLT_LOCAL_PORT: new URL(primary.url).port },
+    timeout: 20_000,
+  });
+  const catalog = async (relay: typeof primary, daemon: string, requestedRelay: string) => {
+    const requestId = randomUUID();
+    relay.send(["EVENT", "deploy-control", controlEvent(provider.secret, daemon, "hosted-models",
+      { requestId, agentPubkey: daemon }, { offset: 0, relay: requestedRelay })]);
+    const [, event] = await relay.waitFor((frame) => frame[0] === "EVENT" &&
+      verifiedEnvelope(frame[1] as NostrEvent, provider.pubkey, "confirmation")?.requestId === requestId);
+    relay.send(["OK", (event as NostrEvent).id, true, ""]);
+    const reply = verifiedEnvelope(event as NostrEvent, provider.pubkey, "confirmation")!;
+    return decryptControl(reply, provider.secret, daemon) as Confirmation;
+  };
+  try {
+    await run("install", "--relay", publicUrl, "--relay-pubkey", generateKeyPair().pubkey);
+    await run("relay", "add", secondary.url, "--relay-pubkey", generateKeyPair().pubkey);
+    await run("pair", "add", provider.pubkey, "--label", "Primary");
+    await run("start");
+    await Promise.all([primary, secondary].map((relay) => relay.waitFor((frame) => frame[0] === "REQ" && frame[1] === "deploy-control")));
+    const [, firstAuth] = await primary.waitFor((frame) => frame[0] === "AUTH");
+    const [, secondAuth] = await secondary.waitFor((frame) => frame[0] === "AUTH");
+    const daemon = (firstAuth as NostrEvent).pubkey;
+    assert.equal((secondAuth as NostrEvent).pubkey, daemon);
+    assert.deepEqual(primary.hosts, ["instabox.example"]);
+    assert.equal((firstAuth as NostrEvent).tags[0]?.[1], publicUrl);
+    assert.equal((secondAuth as NostrEvent).tags[0]?.[1], secondary.url);
+    assert.equal((await catalog(primary, daemon, publicUrl)).ok, true);
+    assert.equal((await catalog(secondary, daemon, secondary.url)).error, "provider not paired");
+    await run("pair", "add", provider.pubkey, "--label", "Secondary", "--relay", secondary.url);
+    assert.equal((await catalog(secondary, daemon, publicUrl)).ok, false);
+    await primary.stop();
+    assert.equal((await catalog(secondary, daemon, secondary.url)).ok, true);
+  } finally {
+    try {
+      await run("stop");
+    } finally {
+      await Promise.all([primary.stop(), secondary.stop()]);
+      rmSync(home, { recursive: true, force: true });
+    }
+  }
+});
+
 test("RelayClient dials loopback with the public Host and signs AUTH for the public URL", async () => {
   const relay = await fakeRelay(true);
   const relayUrl = "wss://relay.example:8443";

@@ -225,6 +225,25 @@ test("external provisioning emits no identity events and creates no bot key file
   });
 });
 
+test("agents do not answer or shut down on another relay with the same channel ID", async () => {
+  await withAgent(async (f, session) => {
+    const secondary = { url: "wss://other.invalid", primary: false };
+    const primary = { url: defaults.relayUrl, primary: true };
+    f.write({ relayUrl: secondary.url, channelId: PRIVATE, permissions: ["post"] });
+    await reconcile(f, session);
+    const chat = say("shared-id", "@Coder hello", f.owner.pubkey);
+    await session.handleHuman({ ...say("shutdown", "!shutdown", f.owner.pubkey), relay: primary });
+    await session.handleHuman({ ...chat, relay: primary });
+    assert.deepEqual((await session.snapshot()).outbox, []);
+    assert.equal((await session.snapshot()).bots[0]?.status, "active");
+    await session.handleHuman({ ...chat, relay: secondary });
+    const state = await session.snapshot();
+    assert.equal(state.outbox[0]?.pubkey, f.agent.pubkey);
+    assert.equal(state.highWater, 0);
+    assert.equal(state.highWaterByRelay?.[secondary.url], chat.createdAt);
+  });
+});
+
 test("connected agents publish exact profile and presence with independent cadences", async () => {
   await withAgent(async (f, session, tick) => {
     f.write({ respondTo: "allowlist", respondToAllowlist: [OWNER] });

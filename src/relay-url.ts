@@ -11,3 +11,15 @@ export function normalizeRelay(value: unknown): string | undefined {
     return;
   }
 }
+
+export function sameRelay(a: string, b: string): boolean {
+  const endpoint = (value: string) => {
+    const relay = normalizeRelay(value);
+    if (!relay) return;
+    const url = new URL(relay);
+    if (url.hostname.endsWith(".")) url.hostname = url.hostname.slice(0, -1);
+    return url.href;
+  };
+  const first = endpoint(a);
+  return first !== undefined && first === endpoint(b);
+}

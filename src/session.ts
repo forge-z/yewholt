@@ -32,11 +32,13 @@ import { effectiveScope } from "./membership.js";
 import { approvalWord, stripLeadingMentions } from "./parser.js";
 import { botKeyPath, ownerKeyPath } from "./paths.js";
 import { RegistryDoc, type ApprovalRequest, type BotRecord, type CodeTurn, type RegistryState } from "./registry.js";
+import { sameRelay } from "./relay-url.js";
 
 const ctx: Context = BACKGROUND_CONTEXT;
 const PROCESSED_CAP = 400;
 
 export type HumanMessage = {
+  relay?: CodeTurn["relay"];
   channelId: string;
   authorPubkey: string;
   eventId: string;
@@ -356,7 +358,7 @@ export class Yewholt {
     await this.harness.commit(async (tx) => {
       const reg = await tx.doc(RegistryDoc);
       for (const bot of reg.bots) {
-        if (!bot.external || !this.inScope(bot, message.channelId)) continue;
+        if (!bot.external || !this.inScope(bot, message)) continue;
         if (bot.status !== "active" || bot.shutdownEventIds?.includes(message.eventId)) continue;
         if (bot.ownerPubkey !== message.authorPubkey) {
           rejected = true;
@@ -379,24 +381,24 @@ export class Yewholt {
     }
   }
 
-  private inScope(bot: BotRecord, channelId: string): boolean {
-    return effectiveScope(bot.scope, this.memberChannels.get(bot.pubkey)).includes(channelId);
+  private inScope(bot: BotRecord, message: HumanMessage): boolean {
+    return receivesOnRelay(bot, message) && effectiveScope(bot.scope, this.memberChannels.get(bot.pubkey)).includes(message.channelId);
   }
 
   async handleHuman(message: HumanMessage): Promise<void> {
     const state = await this.snapshot();
-    if (state.processed.includes(message.eventId)) return;
-    if (message.text.trim() === "!shutdown" && state.bots.some((bot) => bot.external && this.inScope(bot, message.channelId))) {
+    if (state.processed.includes(processedKey(message))) return;
+    const localBots = state.bots.filter((bot) => receivesOnRelay(bot, message));
+    if (message.text.trim() === "!shutdown" && localBots.some((bot) => bot.external && this.inScope(bot, message))) {
       await this.handleShutdown(message);
       return;
     }
     if (state.bots.some((bot) => bot.pubkey === message.authorPubkey)) return;
 
-    const inScope = (bot: BotRecord) => this.inScope(bot, message.channelId);
-    const leading = stripLeadingMentions(message.text, state.bots.map((bot) => bot.name));
+    const leading = stripLeadingMentions(message.text, localBots.map((bot) => bot.name));
     if (await this.handleApprovalReply(state, message, leading)) return;
-    for (const bot of state.bots) {
-      if (!bot.external || bot.status !== "active" || !inScope(bot)) continue;
+    for (const bot of localBots) {
+      if (!bot.external || bot.status !== "active" || !this.inScope(bot, message)) continue;
       const direct = this.directChannels.get(bot.pubkey)?.has(message.channelId);
       const allowed = direct
         ? bot.respondTo === "anyone" || (bot.respondTo === "allowlist" && bot.respondToAllowlist?.includes(message.authorPubkey))
@@ -612,6 +614,7 @@ export class Yewholt {
     const workspace = this.isolation.workspace(bot.pubkey);
     await conversation.configure({ extensions: this.codeExtensions(), cwd: workspace, instructions: instructionsFor(bot) }, ctx);
     const turn: CodeTurn = {
+      ...(message.relay && { relay: message.relay }),
       requestId: `nostr:${message.eventId}:${bot.pubkey}`,
       pubkey: bot.pubkey,
       channelId: message.channelId,
@@ -641,6 +644,7 @@ export class Yewholt {
     }
     if (bot.external && bot.status !== "active") return;
     const message: HumanMessage = {
+      relay: turn.relay,
       channelId: turn.channelId,
       authorPubkey: turn.author,
       eventId: turn.eventId,
@@ -752,8 +756,11 @@ export class Yewholt {
     message: HumanMessage,
     leading: { text: string; mentioned: string[] },
   ): Promise<boolean> {
-    const here = (state.approvals ?? []).filter((item) => item.channelId === message.channelId &&
-      !state.bots.some((bot) => bot.pubkey === item.pubkey && bot.external && bot.status !== "active"));
+    const here = (state.approvals ?? []).filter((item) => {
+      if (item.channelId !== message.channelId) return false;
+      const bot = state.bots.find((entry) => entry.pubkey === item.pubkey);
+      return bot ? receivesOnRelay(bot, message) && (!bot.external || bot.status === "active") : !message.relay;
+    });
     if (here.length === 0) return false;
     const word = approvalWord(leading.text);
     if (!word) return false;
@@ -900,10 +907,24 @@ function charge(reg: RegistryState, pubkey: string, cost: number): void {
   if (bot) bot.spentTokens += cost;
 }
 
+function receivesOnRelay(bot: BotRecord, message: HumanMessage): boolean {
+  return !message.relay || (bot.relayUrl ? sameRelay(bot.relayUrl, message.relay.url) : message.relay.primary);
+}
+
+function processedKey(message: HumanMessage): string {
+  return message.relay && !message.relay.primary ? `${message.relay.url}:${message.eventId}` : message.eventId;
+}
+
 function remember(reg: RegistryState, message: HumanMessage): void {
-  if (!reg.processed.includes(message.eventId)) reg.processed.push(message.eventId);
+  const key = processedKey(message);
+  if (!reg.processed.includes(key)) reg.processed.push(key);
   if (reg.processed.length > PROCESSED_CAP) reg.processed.splice(0, reg.processed.length - PROCESSED_CAP);
-  if (message.createdAt > reg.highWater) reg.highWater = message.createdAt;
+  if (message.relay && !message.relay.primary) {
+    const url = message.relay.url;
+    if (message.createdAt > (reg.highWaterByRelay?.[url] ?? 0)) {
+      reg.highWaterByRelay = { ...reg.highWaterByRelay, [url]: message.createdAt };
+    }
+  } else if (message.createdAt > reg.highWater) reg.highWater = message.createdAt;
 }
 
 function discardAgentTraffic(reg: RegistryState, pubkey: string): void {

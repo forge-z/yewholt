@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { AgentStatus } from "./agents.js";
-import { loadConfig, readConfig, saveConfig } from "./config.js";
+import { configuredRelays, loadConfig, readConfig, saveConfig } from "./config.js";
 import { isPubkey } from "./control-protocol.js";
 import { ensureEnvFile, loadEnvFile } from "./env-file.js";
 import { readPid, runDaemon } from "./daemon.js";
@@ -15,7 +15,7 @@ import { pubkeyOf } from "./nostr.js";
 import { addPairing, listPairings, removePairing } from "./pairing.js";
 import { readKey } from "./keys.js";
 import { logPath, ownerKeyPath, pidPath, secretsDir, sqlitePath, statusPath, yewholtHome } from "./paths.js";
-import { normalizeRelay } from "./relay-url.js";
+import { normalizeRelay, sameRelay } from "./relay-url.js";
 import { Yewholt } from "./session.js";
 import { runHarness } from "./harness.js";
 import { route, usageText, withDefaultModel } from "./route.js";
@@ -59,6 +59,8 @@ async function main(): Promise<void> {
       return runDaemon(home);
     case "pair":
       return pair(home, commandArgs(target.args));
+    case "relay":
+      return relayCommand(home, commandArgs(target.args));
     case "agents":
       return agents(home, commandArgs(target.args));
   }
@@ -70,17 +72,46 @@ function commandArgs(rest: string[]): string[] {
 }
 
 function pair(home: string, rest: string[]): void {
+  const relayIndex = rest.lastIndexOf("--relay");
+  let relay: string | undefined;
+  if (relayIndex !== -1) {
+    const config = loadConfig(home);
+    const url = rest[relayIndex + 1];
+    const route = url && configuredRelays(config).find((entry) => sameRelay(entry.relayUrl, url));
+    if (!route) throw new Error("Relay is not configured for this daemon");
+    relay = route.relayUrl === config.relayUrl ? undefined : route.relayUrl;
+    rest = [...rest.slice(0, relayIndex), ...rest.slice(relayIndex + 2)];
+  }
   const [sub, pubkey, flag, label] = rest;
   if (sub === "add" && rest.length === 4 && flag === "--label") {
-    addPairing(home, pubkey, label);
+    addPairing(home, pubkey, label, undefined, relay);
   } else if (sub === "remove" && rest.length === 2) {
-    if (!removePairing(home, pubkey)) throw new Error("Provider is not paired");
+    if (!removePairing(home, pubkey, relay)) throw new Error("Provider is not paired");
   } else if (sub === "list" && rest.length === 1) {
-    const entries = listPairings(home);
+    const entries = listPairings(home, relay);
     console.log(JSON.stringify(entries.map(({ pubkey, label }) => ({ pubkey, label })), null, 2));
   } else {
-    throw new Error("Usage: yewholt pair add <providerPubkey> --label <label> | list | remove <providerPubkey>");
+    throw new Error("Usage: yewholt pair add <providerPubkey> --label <label> | list | remove <providerPubkey> [--relay <url>]");
   }
+}
+
+function relayCommand(home: string, rest: string[]): void {
+  const config = loadConfig(home);
+  const routes = configuredRelays(config);
+  const [command, value, flag, externalRelayPubkey] = rest;
+  if (command === "list" && rest.length === 1) {
+    console.log(JSON.stringify(routes.map(({ relayUrl, externalRelayPubkey }) => ({ relayUrl, externalRelayPubkey })), null, 2));
+    return;
+  }
+  const relayUrl = normalizeRelay(value);
+  if (command !== "add" || rest.length !== 4 || flag !== "--relay-pubkey" || !relayUrl || !isPubkey(externalRelayPubkey)) {
+    throw new Error("Usage: yh relay list | relay add <url> --relay-pubkey <pubkey>");
+  }
+  const existing = routes.find((entry) => sameRelay(entry.relayUrl, relayUrl));
+  if (existing?.externalRelayPubkey === externalRelayPubkey) return;
+  if (existing) throw new Error("This relay is already configured with a different signing key");
+  saveConfig(home, { ...config, relays: [...(config.relays ?? []), { relayUrl, externalRelayPubkey }] });
+  console.log(`Added ${relayUrl}. Restart the daemon to connect to it.`);
 }
 
 function agents(home: string, rest: string[]): void {
@@ -114,7 +145,7 @@ async function install(rest: string[]): Promise<void> {
   const relayPubkey = values["relay-pubkey"] ?? (adopting ? bundledRelayPubkey(home) : undefined);
   if (!isPubkey(relayPubkey)) throw new Error(usage);
   if (existing && !adopting && (existing.relayUrl !== relay || existing.externalRelayPubkey !== relayPubkey)) {
-    throw new Error("This home is already configured for another relay; use a separate --home");
+    throw new Error("This home already has a primary relay; use yh relay add to configure additional relays");
   }
   mkdirSync(home, { recursive: true, mode: 0o700 });
   chmodSync(home, 0o700);
@@ -153,7 +184,7 @@ async function start(home: string): Promise<void> {
   const started = Date.now();
   while (Date.now() - started < 20_000) {
     if (readPid(home)) {
-      console.log(`Yewholt daemon ${readPid(home)} on ${config.relayUrl}`);
+      console.log(`Yewholt daemon ${readPid(home)} on ${configuredRelays(config).map((entry) => entry.relayUrl).join(", ")}`);
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 200));
@@ -177,7 +208,7 @@ async function stop(home: string): Promise<void> {
 async function status(home: string): Promise<void> {
   const config = loadConfig(home);
   const pid = readPid(home);
-  console.log(`relay: ${config.relayUrl}`);
+  for (const { relayUrl } of configuredRelays(config)) console.log(`relay: ${relayUrl}`);
   console.log(`daemon: ${pid ? `running (${pid})` : "stopped"}`);
   try {
     const raw = readFileSync(statusPath(home), "utf8");

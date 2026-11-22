@@ -8,6 +8,7 @@ import { HostedControl, hostedLastDeploy, type HostedEffects } from "./hosted-co
 import { pubkeyOf, type NostrEvent } from "./nostr.js";
 import { readPairing } from "./pairing.js";
 import { agentsDir } from "./paths.js";
+import { sameRelay } from "./relay-url.js";
 
 type Defaults = Pick<AgentProvisioning, "relayUrl" | "model">;
 type JobError = "invalid provisioning" | "stale deploy";
@@ -83,7 +84,8 @@ export class DeployControl {
   private readonly hosted: HostedControl;
 
   constructor(private readonly home: string, private readonly secret: string,
-    private readonly defaults: Defaults, private readonly now = () => Date.now()) {
+    private readonly defaults: Defaults, private readonly now = () => Date.now(),
+    private readonly scope?: { primaryRelay: string }) {
     this.pubkey = pubkeyOf(secret);
     this.hosted = new HostedControl(home, defaults);
   }
@@ -102,8 +104,10 @@ export class DeployControl {
     if (!envelope) return null;
     const confirmation: Confirmation = { job: envelope.requestId, agentPubkey: envelope.agentPubkey, ok: false };
     const now = this.now();
+    const relay = this.defaults.relayUrl;
+    const pairingRelay = this.scope && relay !== this.scope.primaryRelay ? relay : undefined;
     try {
-      const pairing = readPairing(this.home, event.pubkey);
+      const pairing = readPairing(this.home, event.pubkey, pairingRelay);
       if (!pairing) confirmation.error = "provider not paired";
       else if (envelope.issuedAt < pairing.pairedAt || envelope.issuedAt > now + 60_000) {
         confirmation.error = "deploy outside pairing window";
@@ -115,12 +119,14 @@ export class DeployControl {
           confirmation.error = "invalid ciphertext";
         }
         if (!confirmation.error) {
-          const authorized = () => readPairing(this.home, event.pubkey)?.pairedAt === pairing.pairedAt;
+          const authorized = () => readPairing(this.home, event.pubkey, pairingRelay)?.pairedAt === pairing.pairedAt;
           if (envelope.type === "hosted-models") {
             if (!authorized()) confirmation.error = "provider not paired";
             else if (now - envelope.issuedAt > 60_000 || envelope.agentPubkey !== this.pubkey ||
                 !record(body) || typeof body.offset !== "number" || !Number.isSafeInteger(body.offset) ||
-                body.offset < 0 || !effects?.models) confirmation.error = "model catalog unavailable";
+                body.offset < 0 || !effects?.models ||
+                (this.scope && (body.relay !== undefined || pairingRelay) &&
+                  !(typeof body.relay === "string" && sameRelay(body.relay, relay)))) confirmation.error = "model catalog unavailable";
             else confirmation.catalog = modelPage(effects.models(), body.offset);
           } else {
             const isReserved = envelope.agentPubkey === this.pubkey || await reserved(envelope.agentPubkey);
@@ -128,7 +134,11 @@ export class DeployControl {
             else if (envelope.type === "deploy") confirmation.error = this.hosted.manages(envelope.agentPubkey)
               ? "agent is managed by hosted control" : this.apply(event, envelope, body, isReserved, now);
             else if (envelope.type !== "confirmation" && effects) {
-              confirmation.error = await this.hosted.apply(envelope.type, event, envelope, body, isReserved, now, effects, authorized, confirmation);
+              if (this.scope && !(record(body) && typeof body.community === "string" && sameRelay(body.community, relay))) {
+                confirmation.error = "hosted operation belongs to another relay";
+              } else {
+                confirmation.error = await this.hosted.apply(envelope.type, event, envelope, body, isReserved, now, effects, authorized, confirmation);
+              }
             } else confirmation.error = "hosted control unavailable";
           }
         }
@@ -142,10 +152,12 @@ export class DeployControl {
 
   private apply(event: NostrEvent, envelope: ControlEnvelope, body: unknown, reserved: boolean, now: number): JobError | undefined {
     const { agentPubkey, requestId, issuedAt } = envelope;
-    const key = `${event.pubkey}:${requestId}`;
+    const otherRelay = this.scope && this.defaults.relayUrl !== this.scope.primaryRelay;
+    const key = otherRelay ? `${this.defaults.relayUrl}:${event.pubkey}:${requestId}` : `${event.pubkey}:${requestId}`;
     const state = loadLedger(this.home);
     const path = join(agentsDir(this.home), `${agentPubkey}.json`);
-    const actual = loadAgent(path, agentPubkey, this.defaults);
+    const actual = loadAgent(path, agentPubkey, this.scope ? { ...this.defaults, relayUrl: this.scope.primaryRelay } : this.defaults);
+    if (this.scope && "nsec" in actual && !sameRelay(actual.relayUrl, this.defaults.relayUrl)) return "invalid provisioning";
     const actualDigest = "nsec" in actual ? digest(provisioningFile(actual)) : undefined;
     let head = state.agents[agentPubkey];
     if (head?.pending && head.digest === actualDigest) {
@@ -163,7 +175,8 @@ export class DeployControl {
     };
     const parsed = record(body) && body.channelId === null ? { ...body, channelId: undefined } : body;
     const validated = validateAgent(parsed, agentPubkey, this.defaults);
-    if (reserved || !("nsec" in validated)) {
+    if (reserved || !("nsec" in validated) || (this.scope &&
+        ((otherRelay && !(record(body) && typeof body.relayUrl === "string")) || !sameRelay(validated.relayUrl, this.defaults.relayUrl)))) {
       return recordResult("invalid provisioning");
     }
     const file = provisioningFile(validated);
