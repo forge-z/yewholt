@@ -15,6 +15,7 @@ import { pubkeyOf } from "./nostr.js";
 import { addPairing, listPairings, removePairing } from "./pairing.js";
 import { readKey } from "./keys.js";
 import { logPath, ownerKeyPath, pidPath, secretsDir, sqlitePath, statusPath, yewholtHome } from "./paths.js";
+import { joinRelay } from "./relay-join.js";
 import { normalizeRelay, sameRelay } from "./relay-url.js";
 import { Yewholt } from "./session.js";
 import { runHarness } from "./harness.js";
@@ -95,19 +96,40 @@ function pair(home: string, rest: string[]): void {
   }
 }
 
-function relayCommand(home: string, rest: string[]): void {
+async function relayCommand(home: string, rest: string[]): Promise<void> {
   const config = loadConfig(home);
   const routes = configuredRelays(config);
   const [command, value, flag, externalRelayPubkey] = rest;
+  if (command === "join") {
+    return joinRelay(rest.slice(1), (relayUrl, { relayPubkey }) => {
+      const existing = routes.find((entry) => sameRelay(entry.relayUrl, relayUrl));
+      const identity = () => readKey(ownerKeyPath(home));
+      if (!existing) {
+        if (!isPubkey(relayPubkey)) {
+          throw new Error("Relay is not configured; pass --relay-pubkey <pubkey> to add it after joining");
+        }
+        return { identity, finish: () => addRelay(home, relayUrl, relayPubkey) };
+      }
+      if (existing && relayPubkey !== undefined && existing.externalRelayPubkey !== relayPubkey) {
+        throw new Error("This relay is already configured with a different signing key");
+      }
+      return { identity };
+    }, true);
+  }
   if (command === "list" && rest.length === 1) {
     console.log(JSON.stringify(routes.map(({ relayUrl, externalRelayPubkey }) => ({ relayUrl, externalRelayPubkey })), null, 2));
     return;
   }
   const relayUrl = normalizeRelay(value);
   if (command !== "add" || rest.length !== 4 || flag !== "--relay-pubkey" || !relayUrl || !isPubkey(externalRelayPubkey)) {
-    throw new Error("Usage: yh relay list | relay add <url> --relay-pubkey <pubkey>");
+    throw new Error("Usage: yh relay list | relay add <url> --relay-pubkey <pubkey> | relay join [<invite-url>]");
   }
-  const existing = routes.find((entry) => sameRelay(entry.relayUrl, relayUrl));
+  addRelay(home, relayUrl, externalRelayPubkey);
+}
+
+function addRelay(home: string, relayUrl: string, externalRelayPubkey: string): void {
+  const config = loadConfig(home);
+  const existing = configuredRelays(config).find((entry) => sameRelay(entry.relayUrl, relayUrl));
   if (existing?.externalRelayPubkey === externalRelayPubkey) return;
   if (existing) throw new Error("This relay is already configured with a different signing key");
   saveConfig(home, { ...config, relays: [...(config.relays ?? []), { relayUrl, externalRelayPubkey }] });

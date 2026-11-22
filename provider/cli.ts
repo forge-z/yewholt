@@ -6,6 +6,7 @@ import { configuredRelays, loadConfig } from "../src/config.js";
 import { readKey } from "../src/keys.js";
 import { ownerKeyPath, yewholtHome } from "../src/paths.js";
 import { addPairing } from "../src/pairing.js";
+import { joinRelay } from "../src/relay-join.js";
 import { discoverableId, installProvider } from "./install.js";
 import { ProviderSecrets } from "./secrets.js";
 import { InvalidTargetRelay, targetFile, validateTarget } from "./target.js";
@@ -71,10 +72,13 @@ function parseTarget(id: string, args: string[]) {
 }
 
 export async function providerCommand(command: "provider" | "targets" | "pair", args: string[]): Promise<void> {
+  if (command === "provider" && args[0] === "join") {
+    return joinRelay(args.slice(1), () => ({ identity: () => new ProviderSecrets().identity() }));
+  }
   try {
     if (command === "pair") return printPairing();
     if (command === "provider") {
-      if (args.length !== 1 || args[0] !== "install") throw new CliError("Usage: yewholt provider install");
+      if (args.length !== 1 || args[0] !== "install") throw new CliError("Usage: yewholt provider install | join [<invite-url>]");
       const plugin = installProvider();
       console.log("Buzz plugin folder: " + plugin);
       return printPairing();
