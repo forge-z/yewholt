@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { WebSocketServer } from "ws";
 import { generateKeyPair, ownerAuthTag } from "../src/nostr.js";
+import { readPairing } from "../src/pairing.js";
 
 const cli = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 const exec = promisify(execFile);
@@ -81,6 +82,32 @@ test("targets validate IDs, relay, daemon and wake; commands never echo malforme
   assert.deepEqual(JSON.parse(readFileSync(target("vm"), "utf8")).wake, { kind: "instabox", accountId: "acc_test", machineId: "m_test" });
   assert.equal(run("targets", "add", "vm", ...options, "--wake", "command", "--cmd", "/path/to/wake").status, 0);
   assert.deepEqual(JSON.parse(readFileSync(target("vm"), "utf8")).wake, { kind: "command", cmd: "/path/to/wake" });
+});
+
+test("local targets read installed homes, store relay targets and pair the provider live", (t) => {
+  const { home, run, target } = fixture(t);
+  const missing = run("targets", "add", "mac", "--local");
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /not installed.*yh install --home/);
+  assert.equal(existsSync(target("mac")), false);
+  const relay = "wss://relay.example";
+  assert.equal(run("install", "--relay", relay, "--relay-pubkey", daemon.pubkey).status, 0);
+  const added = run("targets", "add", "mac", "--local", "--label", "My Mac");
+  assert.equal(added.status, 0, added.stderr);
+  const stored = JSON.parse(readFileSync(target("mac"), "utf8"));
+  assert.equal(stored.transport, "relay");
+  assert.equal(stored.relay, relay);
+  const provider = added.stdout.match(/Provider pubkey: ([a-f0-9]{64})/)![1];
+  assert.equal(readPairing(home, provider)?.label, "My Mac");
+  assert.match(added.stdout, /no restart needed/);
+  assert.match(added.stdout, new RegExp("buzz-admin add-member --pubkey " + stored.daemonPubkey));
+  const pairedAt = readPairing(home, provider)!.pairedAt;
+  assert.equal(run("targets", "add", "explicit", "--local", "--home", home).status, 0);
+  assert.equal(readPairing(home, provider)!.pairedAt, pairedAt);
+  for (const args of [["--relay", relay], ["--daemon", daemon.pubkey], ["--wake", "command", "--cmd", "true"]]) {
+    assert.equal(run("targets", "add", "bad", "--local", ...args).status, 1);
+  }
+  assert.equal(run("targets", "add", "bad", "--home", home, "--relay", relay, "--daemon", daemon.pubkey).status, 1);
 });
 
 test("targets store WebSocket URLs and reject bad relay addresses even in existing files", (t) => {

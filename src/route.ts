@@ -59,6 +59,7 @@ Usage:
   yewholt admin budget <name> <tokens> [--home dir]
   yewholt provider install
   yewholt targets add <id> --relay <url> --daemon <pubkey> [--label <label>]
+  yewholt targets add <id> --local [--home dir] [--label <label>]
     [--wake command --cmd <command> | --wake instabox --account <id> --machine <id>]
   yewholt targets list
   yewholt targets remove <id>
