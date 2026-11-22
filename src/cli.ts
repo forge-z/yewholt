@@ -19,16 +19,23 @@ import { normalizeRelay, sameRelay } from "./relay-url.js";
 import { Yewholt } from "./session.js";
 import { runHarness } from "./harness.js";
 import { route, usageText, withDefaultModel } from "./route.js";
+import { checkoutRoot, update, UpdateError } from "./update.js";
 
 const args = process.argv.slice(2);
 
 main().catch((error: unknown) => {
   console.error(error instanceof Error ? error.message : error);
-  process.exit(1);
+  process.exit(error instanceof UpdateError ? error.exitCode : 1);
 });
 
 async function main(): Promise<void> {
   const target = route(args);
+  if (target.kind === "command" && target.command === "update") {
+    const { values } = parseArgs({ args: target.args, options: {
+      home: { type: "string" }, archive: { type: "string" },
+    } });
+    return update({ checkout: checkoutRoot(import.meta.url), home: values.home ?? yewholtHome(), archive: values.archive });
+  }
   if (target.kind === "command") {
     const { command, args } = target;
     if (command === "provider" || command === "targets" || (command === "pair" && !args.length)) {

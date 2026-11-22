@@ -30,6 +30,24 @@ yh
 The first run opens pi in the current directory. Use pi's `/login` and
 `/model` for the local harness; VM credentials are configured separately.
 
+## Updating
+
+```sh
+yh update [--home dir] [--archive <tar file>]
+```
+
+Run `yh update` on the Mac and each daemon VM. It updates the checkout of the
+running CLI (not the current directory) with `git pull --ff-only`, removes old
+`dist` output, runs `npm ci` and `npm run build`, and refreshes the Buzz bridge
+if installed. A running daemon for `--home` (default `$YEWHOLT_HOME` or
+`~/.yewholt`) is restarted with the new build; a stopped daemon stays stopped.
+The relay is never touched. The update stops at the first failed command with
+that command's exit code.
+
+On a VM without git/GitHub, such as Instabox, transfer a `git archive` tarball
+and run `yh update --archive /path/to/yewholt.tar [--home dir]`. The tarball is
+extracted over the existing checkout before the same build and refresh steps.
+
 ## Harness
 
 ```bash
@@ -334,8 +352,8 @@ Remove its disposable home and stop the disposable relay before reusing the port
 The
 Yewholt plugin registers a remote harness through the app's agent API. Update
 the paired daemon to this version first. On the Mac, use Node ≥22.19.0 to
-build the checkout and run `yewholt provider install` (or
-`node dist/src/cli.js provider install`). No Docker or daemon is needed on the Mac.
+run `yh update` to build and refresh an installed bridge. For the first install,
+build the checkout and run `yewholt provider install`. No Docker or daemon is needed on the Mac.
 Keep the checkout and Node executable in place; reinstall the provider after
 moving either.
 
@@ -381,9 +399,9 @@ the provider identity and wake hooks. The daemon publishes a kind `0` profile
 carrying Buzz's NIP-OA owner attestation; Buzz writes its own agent listing.
 Model changes use the same paired, owner-attested channel. The daemon stores
 the new model separately from the provisioning file, so editing it cannot
-serve as new provisioning for a stopped agent. Upgrade the daemon and rerun
-`yewholt provider install` from the updated build on the Mac to get the
-matching bridge and plugin.
+serve as new provisioning for a stopped agent. Run `yh update` on the daemon
+host and on the Mac to get the matching daemon, bridge, and plugin (use
+`--archive <tar file>` on hosts without git).
 Removal unlinks provisioning, retires the runtime, clears its in-process
 signing key, and writes a durable tombstone under
 `$YEWHOLT_HOME/state/hosted-agents/`. Backups made before removal can still
