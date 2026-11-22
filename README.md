@@ -135,6 +135,15 @@ yh status
 
 `start`, `stop`, and `status` manage only the daemon; the relay is run and upgraded by whoever administers it. Running `install` again on the same home with the same relay is a no-op.
 
+### Container
+
+`ghcr.io/forge-z/yewholt:main` (amd64 and arm64, published from `main` by `.github/workflows/image.yml`) runs the daemon in the foreground with its home in `/data`. On first start it installs against `YEWHOLT_RELAY_URL`, reading the relay key from the relay's NIP-11 `self` field (or `YEWHOLT_RELAY_PUBKEY`). With `YEWHOLT_PUBKEY_FILE` set it writes the daemon pubkey there for an admin step such as `buzz-admin add-member`; until admitted, the daemon retries every 2 seconds. Without `YEWHOLT_WAKE_*` it never dozes, so it can be the always-on watcher next to a relay.
+
+```sh
+docker run -d --restart unless-stopped -v yewholt-data:/data \
+  -e YEWHOLT_RELAY_URL=wss://relay.example ghcr.io/forge-z/yewholt:main
+```
+
 ### Join Forge Z or another shared Buzz community
 
 On the owner's Mac, ask the community owner/admin for a Buzz invite
