@@ -173,18 +173,16 @@ async function install(rest: string[]): Promise<void> {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  // A home whose relay an earlier release started keeps that relay's key in relay/.env.
-  const adopting = existing !== undefined && !existing.externalRelayPubkey;
-  const relayPubkey = values["relay-pubkey"] ?? (adopting ? bundledRelayPubkey(home) : undefined);
+  const relayPubkey = values["relay-pubkey"];
   if (!isPubkey(relayPubkey)) throw new Error(usage);
-  if (existing && !adopting && (existing.relayUrl !== relay || existing.externalRelayPubkey !== relayPubkey)) {
+  if (existing && (existing.relayUrl !== relay || existing.externalRelayPubkey !== relayPubkey)) {
     throw new Error("This home already has a primary relay; use yh relay add to configure additional relays");
   }
   mkdirSync(home, { recursive: true, mode: 0o700 });
   chmodSync(home, 0o700);
   mkdirSync(secretsDir(home), { recursive: true, mode: 0o700 });
   const daemonPubkey = ensureOwnerKey(home);
-  if (!existing || adopting) saveConfig(home, { relayUrl: relay, externalRelayPubkey: relayPubkey });
+  if (!existing) saveConfig(home, { relayUrl: relay, externalRelayPubkey: relayPubkey });
   console.log(`Installed Yewholt in ${home}`);
   console.log(`Daemon pubkey: ${daemonPubkey}`);
   console.log(`Relay: ${relay}. Admit the daemon pubkey to this relay.`);
@@ -192,16 +190,6 @@ async function install(rest: string[]): Promise<void> {
   console.log("Back up secrets/. Buzz has no key rotation; a lost secret is a lost identity.");
   console.log(`Provider keys: /login in yh as the daemon user, or ${envFile} (mode 0600). Restart after changes.`);
   console.log("Next: yewholt start");
-}
-
-function bundledRelayPubkey(home: string): string | undefined {
-  try {
-    const line = readFileSync(join(home, "relay", ".env"), "utf8").split("\n")
-      .map((entry) => entry.match(/^\s*(?:export\s+)?BUZZ_RELAY_PRIVATE_KEY\s*=\s*["']?([0-9a-fA-F]{64})["']?\s*$/)).find(Boolean);
-    return line ? pubkeyOf(line[1]!.toLowerCase()) : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 async function start(home: string): Promise<void> {

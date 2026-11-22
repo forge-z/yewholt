@@ -7,7 +7,8 @@ description: Install the yh coding CLI and Buzz 1.0.6 bridge on a Mac, and pair 
 
 Run this from the Yewholt checkout on the user's Mac. Ask for the approved VM
 SSH aliases, the Buzz community WebSocket URL for each, and the relay's public
-signing key (64 lowercase hex characters; not the relay private key). You'll
+signing key (required by `yh install`, 64 lowercase hex characters;
+not the relay private key). You'll
 also need a relay admin to admit new identities. Do not provision new VMs,
 install a relay, or change existing installations without permission.
 
@@ -57,8 +58,8 @@ Have the relay administrator admit both printed identities if needed, using
 `buzz-admin add-member --pubkey <provider-pubkey>` on the relay host with its
 existing admin environment. Pairing does not replace admission. Configure
 model credentials under the daemon user and keep the Mac awake.
-Do not set `YEWHOLT_LOCAL_PORT` on the Mac: connect directly to public WSS,
-not the InstaBox relay host's loopback proxy. Open that same community in Buzz
+Do not set `YEWHOLT_LOCAL_PORT` on the Mac: connect directly to public WSS.
+Open that same community in Buzz
 and verify a nonempty model catalog in Harness → Remote → Yewholt.
 See README's Mac-local target and secret-isolation sections for limitations.
 
@@ -99,7 +100,7 @@ See README's Mac-local target and secret-isolation sections for limitations.
    (`~/.yewholt/.env` by default, mode 0600). Run login under the same Unix
    user, HOME and Pi agent directory as the daemon so it can read the saved key.
    Don't read, echo or copy credentials. See [Provider keys on the host](../../README.md#provider-keys-on-the-host).
-   If using **Daemon default**, set `YEWHOLT_MODEL=provider/modelId` on the VM.
+   If using **Daemon default**, set `YEWHOLT_MODEL=anthropic/claude-sonnet-4-5` on the VM.
    Run `yh start` and `yh status`, or use the VM's existing approved
    supervisor to run `yh daemon` in the foreground. With no supervisor,
    `yh start` starts it now but not after a VM reboot. Don't run

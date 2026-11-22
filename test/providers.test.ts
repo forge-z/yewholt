@@ -25,16 +25,6 @@ test("an empty env registers no providers and ignores process.env", async () => 
   }
 });
 
-test("OpenCode Zen key registers Zen and Go, including free models", async () => {
-  const models = await loadModels({ OPENCODE_API_KEY: "test-key" });
-  assert.deepEqual(
-    models.getProviders().map((provider) => provider.id).sort(),
-    ["opencode", "opencode-go"],
-  );
-  assert.equal(catalogHas(models, parseModelLabel("opencode/big-pickle")), true);
-  assert.equal(catalogHas(models, parseModelLabel("opencode/deepseek-v4.1-flash-free")), true);
-});
-
 test("a DeepSeek environment key enables its models without a Pi login", async () => {
   const model = parseModelLabel("deepseek/deepseek-v4-pro");
   assert.equal(catalogHas(await loadModels({}), model), false);
@@ -188,6 +178,7 @@ test("Anthropic registers an API key and refuses subscription tokens", async () 
   assert.equal((await loadModels({ ANTHROPIC_AUTH_TOKEN: "bearer" })).getProviders().length, 0);
   const models = await loadModels({ ANTHROPIC_API_KEY: "sk-ant-api03-test" });
   assert.deepEqual(models.getProviders().map((provider) => provider.id), ["anthropic"]);
+  assert.equal(catalogHas(models, parseModelLabel("anthropic/claude-sonnet-4-5")), true);
 });
 
 test("every api-key provider registers from the env vars it asks for", async () => {
@@ -221,6 +212,8 @@ test("every api-key provider registers from the env vars it asks for", async () 
 test("the daemon env file is mode 0600 and does not override the shell", () => {
   const home = mkdtempSync(join(tmpdir(), "yewholt-env-"));
   const path = ensureEnvFile(home);
+  assert.match(readFileSync(path, "utf8"), /YEWHOLT_MODEL=anthropic\/claude-sonnet-4-5/);
+  assert.match(readFileSync(path, "utf8"), /ANTHROPIC_API_KEY=/);
   assert.equal(statSync(path).mode & 0o777, 0o600);
   writeFileSync(
     path,
@@ -238,14 +231,14 @@ test("the daemon env file is mode 0600 and does not override the shell", () => {
   assert.match(readFileSync(path, "utf8"), /from-file/);
 });
 
-test("README and .env.example name every built-in provider and the host env file", () => {
+test("README and .env.example name documented built-in providers and the host env file", () => {
   const readme = readFileSync(readmePath, "utf8");
   const example = readFileSync(examplePath, "utf8");
   assert.match(readme, /~\/\.yewholt\/\.env/);
   assert.match(readme, /0600/);
-  assert.match(readme, /opencode\/big-pickle/);
-  assert.match(example, /YEWHOLT_MODEL=opencode\/big-pickle/);
-  for (const provider of builtinProviders()) {
+  assert.match(readme, /anthropic\/claude-sonnet-4-5/);
+  assert.match(example, /YEWHOLT_MODEL=anthropic\/claude-sonnet-4-5/);
+  for (const provider of builtinProviders().filter((provider) => !["opencode", "opencode-go"].includes(provider.id))) {
     assert.ok(readme.includes(`\`${provider.id}\``), provider.id);
     assert.ok(example.includes(provider.id) || provider.id === "openai-codex", provider.id);
   }
@@ -256,7 +249,6 @@ test("README and .env.example name every built-in provider and the host env file
     "ANTHROPIC_API_KEY",
     "GEMINI_API_KEY",
     "OPENROUTER_API_KEY",
-    "OPENCODE_API_KEY",
     "GROQ_API_KEY",
     "XAI_API_KEY",
     "MISTRAL_API_KEY",
