@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
+import { gunzipSync } from "node:zlib";
 import { pubkeyOf, signEvent } from "./nostr.js";
 import { normalizeRelay } from "./relay-url.js";
 
@@ -44,6 +45,7 @@ async function request(origin: string, path: string, body?: string, auth?: strin
       method: body === undefined ? "GET" : "POST",
       headers: {
         Accept: "application/json",
+        "Accept-Encoding": "identity",
         ...(body === undefined ? {} : { "Content-Type": "application/json" }),
         ...(auth === undefined ? {} : { Authorization: auth }),
       },
@@ -59,7 +61,10 @@ async function request(origin: string, path: string, body?: string, auth?: strin
 async function responseObject(
   response: Response, action: string, secrets: (string | undefined)[],
 ): Promise<Record<string, unknown>> {
-  const body = await response.text().catch(() => "");
+  const body = await (async () => {
+    const bytes = Buffer.from(await response.arrayBuffer());
+    return (bytes[0] === 0x1f && bytes[1] === 0x8b ? gunzipSync(bytes) : bytes).toString("utf8");
+  })().catch(() => "");
   let value: unknown;
   try {
     value = JSON.parse(body);

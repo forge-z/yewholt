@@ -191,6 +191,10 @@ Run an interactive join by itself so subsequent shell commands aren't read
 as prompt answers. If join fails, share the reported HTTP status and error,
 not the invite URL.
 
+Both join commands request uncompressed API responses and also handle raw gzip
+bodies even when response headers are missing, for compatibility with HTTP
+dispatchers loaded by dependencies.
+
 Each newly admitted identity consumes one use. Use a separate link per key if
 **Max uses** is 1, or reuse a link with enough uses for all keys. If the
 administrator admits the keys directly instead, use `yh relay add` to
