@@ -15,6 +15,7 @@ import { ownerKeyPath, pidPath, sqlitePath, statusPath } from "./paths.js";
 import type { BotRecord } from "./registry.js";
 import { sameRelay } from "./relay-url.js";
 import { ensureOwnerKey, Yewholt } from "./session.js";
+import { Doze, requestWake, startWakeServer, WakeWatch, wakeSettings } from "./wake.js";
 
 let stopping = false;
 
@@ -37,14 +38,19 @@ export async function runDaemon(home: string): Promise<void> {
       // already gone
     }
   };
+  const wakeConfig = wakeSettings();
+  const doze = new Doze(wakeConfig);
   process.on("SIGTERM", () => {
     stopping = true;
+    doze.wake();
   });
   process.on("SIGINT", () => {
     stopping = true;
+    doze.wake();
   });
   ensureOwnerKey(home);
-  const session = await Yewholt.open(await openNodeSqliteStorage(sqlitePath(home)), { home, isolation });
+  const session = await Yewholt.open(await openNodeSqliteStorage(sqlitePath(home)), { home, isolation, wakeUrl: wakeConfig.url });
+  const wakeServer = wakeConfig.port === undefined ? undefined : startWakeServer(wakeConfig.port, () => doze.wake());
   const ownerSecret = readKey(ownerKeyPath(home));
   try {
     const defaults = {
@@ -95,14 +101,17 @@ export async function runDaemon(home: string): Promise<void> {
       const loopback = primary && loopbackPort !== undefined ? { relayUrl: route.relayUrl, port: loopbackPort } : undefined;
       while (!stopping) {
         try {
-          await serve(session, ownerSecret, route, primary, routeControl, reconcile, serialize, wake, links, refreshStatus, loopback);
+          await serve(session, ownerSecret, route, primary, routeControl, reconcile, serialize, wake, links, refreshStatus, doze, loopback);
         } catch (error) {
           console.error(`relay loop ${route.relayUrl}:`, error instanceof Error ? error.message : error);
         }
-        if (!stopping) await sleep(2000);
+        if (stopping) break;
+        if (doze.asleep) await doze.untilWoken();
+        else await sleep(2000);
       }
     }));
   } finally {
+    wakeServer?.close();
     session.setOutboxListener(undefined);
     await session.close();
     removePid();
@@ -114,7 +123,7 @@ type Serialize = <T>(operation: () => Promise<T>) => Promise<T>;
 async function serve(
   session: Yewholt, ownerSecret: string, route: RelayConfig, primary: boolean, control: DeployControl,
   reconcile: (force?: boolean) => Promise<boolean>, serialize: Serialize, wake: Set<() => void>,
-  linksByRelay: Map<string, BotLinks<BotRecord>>, refreshStatus: () => Promise<void>, loopback?: RelayLoopback,
+  linksByRelay: Map<string, BotLinks<BotRecord>>, refreshStatus: () => Promise<void>, doze: Doze, loopback?: RelayLoopback,
 ): Promise<void> {
   const { relayUrl, externalRelayPubkey } = route;
   const owner = new RelayClient(relayUrl, ownerSecret, undefined, true, loopback);
@@ -124,6 +133,8 @@ async function serve(
   let notify: (() => void) | undefined;
   let work = Promise.resolve();
   let serving = true;
+  let idle = false;
+  let local = new Set<string>();
   const drain = (phase: OutboxPhase) => publishOutbox(session, ownerSecret, owner, links, connectBot, phase, onRelay, primary);
   const cursor = (state: Awaited<ReturnType<Yewholt["snapshot"]>>) =>
     primary ? state.highWater : state.highWaterByRelay?.[relayUrl];
@@ -157,6 +168,7 @@ async function serve(
           await drain("before-sync");
           const state = await session.snapshot();
           highWater = cursor(state);
+          local = new Set(state.bots.map((bot) => bot.pubkey));
           await botLinks.sync(state.bots.filter((bot) => bot.external && onRelay(bot)));
         }
         // This also runs without incoming messages, on the normal daemon tick.
@@ -169,9 +181,10 @@ async function serve(
     };
     const inbox = new Inbox((message) => {
       if (!serving) return;
+      doze.touch();
       void session
         .handleHuman({ ...message, relay: { url: relayUrl, primary } })
-        .then(() => maintain(true))
+        .then(() => { doze.touch(); return maintain(true); })
         .catch((error: unknown) => console.error("turn:", error instanceof Error ? error.message : error));
     });
     await maintain(true);
@@ -181,6 +194,12 @@ async function serve(
         .catch((error: unknown) => console.error("outbox:", error instanceof Error ? error.message : error));
     };
     wake.add(notify);
+    if (externalRelayPubkey) {
+      const watch = new WakeWatch(externalRelayPubkey, () => local, (url) => {
+        void requestWake(url).then((ok) => { if (!ok) console.error("wake: no answer from an agent's wake URL"); });
+      });
+      owner.subscribe("wake-watch", watch.filters(Math.floor(Date.now() / 1000)), (event) => watch.accept(event));
+    }
     owner.subscribe("deploy-control", [{ kinds: [CONTROL_KIND], "#p": [control.pubkey] }], (event) => {
       if (!serving || stopping) return;
       work = work.then(async () => {
@@ -227,6 +246,10 @@ async function serve(
       const lost = botLinks.lost();
       if (lost) throw new Error(`bot connection lost: ${lost.name}`);
       await maintain(false, true);
+      if (doze.due(session.busy())) {
+        idle = true;
+        break;
+      }
       await sleep(500);
     }
   } finally {
@@ -234,9 +257,13 @@ async function serve(
     if (notify) wake.delete(notify);
     try {
       await work;
-      if (stopping && links) {
+      if ((stopping || idle) && links) {
         await session.offlineAgents(links.connectedAgents());
         await drain("offline");
+      }
+      if (idle) {
+        doze.sleep();
+        console.log(`relay ${relayUrl}: idle, connections closed until the wake URL is requested`);
       }
     } finally {
       linksByRelay.delete(relayUrl);

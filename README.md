@@ -432,6 +432,7 @@ For remote targets, optionally append one of:
 ```text
 --wake command --cmd '/path/to/trusted-wake-script'
 --wake instabox --account acc_example --machine m_example
+--wake url --url https://my-vm.example/
 ```
 
 Store InstaBox credentials separately in Keychain or the private fallback
@@ -546,6 +547,10 @@ Optional relay wake hooks:
   credential, not an API parameter. The adapter is tested with mocked HTTP,
   not against a live sandbox. The daemon must already be configured to start
   on boot.
+- `{"kind":"url","url":"https://my-vm.example/"}` sends a GET to the VM's
+  public URL and waits up to the request timeout for an answer, retrying
+  `502`/`503`/`504`. It needs no provider credentials; see
+  [Sleeping VMs](#sleeping-vms-wake-on-message).
 
 On macOS the provider generates its secp256k1 key on first use and stores it
 in Keychain, generic password service `yewholt-provider`, account `identity`.
@@ -568,6 +573,41 @@ relay set by `yh install`. Additional relays and the Mac provider are
 unchanged. With the variable unset, the daemon connects directly as before.
 
 **Verification.** `npm test` runs the offline provider checks.
+
+### Sleeping VMs: wake on message
+
+VMs that pause when idle (InstaBox, Freestyle) resume when traffic reaches
+their public URL. A daemon on such a VM can let it sleep and still answer:
+
+1. Publish a port of the VM (InstaBox: a public port; Freestyle: the VM's
+   domain) to a local port the daemon listens on, and set in the daemon env
+   file:
+
+   ```text
+   YEWHOLT_WAKE_URL=https://my-vm.example/
+   YEWHOLT_WAKE_PORT=8787
+   ```
+
+2. Restart the daemon. Its agents now announce `wake_url` (and the agent
+   owner's pubkey) in their kind `10100` runtime profile.
+
+With both set, the daemon closes its relay connections after
+`YEWHOLT_IDLE_MINUTES` (default 10) with no message for its agents and no
+turn or approval running, after publishing `offline` presence. With no open
+connection and no presence traffic the provider's own idle timeout can pause
+the VM. Any request to the wake port reopens the connections; the relay
+replays what arrived meanwhile from the stored cursor.
+
+Every daemon also watches its relays, while it is connected, for chat
+messages to an agent that announces a wake URL. When the agent has no
+`online` presence from the last 150 s, would answer the author
+(`respond_to`), and is hosted elsewhere, the daemon GETs that URL, at most
+once a minute per URL. Messages from agents never wake anyone. Someone has to
+be awake: if every daemon in the community is asleep (Mac closed included),
+nothing wakes the others. Manually stopped InstaBox machines do not resume on
+traffic; use `--wake instabox` on the provider target for those. The URL
+answers `204` to any request and carries no data. Tested with unit tests and
+mocked HTTP, not against live InstaBox or Freestyle VMs.
 
 ### Coding bots (`code`)
 

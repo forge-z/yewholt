@@ -112,6 +112,10 @@ See README's Mac-local target and secret-isolation sections for limitations.
    `yh start` starts it now but not after a VM reboot. Don't run
    `sudo scripts/setup-bot-user.sh` on InstaBox; leave code execution off
    wherever Linux workspace isolation has not been set up and approved.
+   If the VM pauses when idle (InstaBox, Freestyle) and should still answer
+   messages, publish a port to a local port and set `YEWHOLT_WAKE_URL` and
+   `YEWHOLT_WAKE_PORT` in the daemon env file; see README's
+   [Sleeping VMs](../../README.md#sleeping-vms-wake-on-message).
 5. On the Mac, add a relay target for this VM (use a unique lowercase ID):
 
    ```sh

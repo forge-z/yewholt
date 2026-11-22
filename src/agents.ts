@@ -232,10 +232,12 @@ export function agentStatuses(bots: readonly BotRecord[], diagnostics?: AgentDia
 export const RUNTIME_PROFILE = 10100;
 export const PRESENCE = 20001;
 
-export function runtimeProfile(bot: BotRecord, nsec: string, createdAt: number): NostrEvent {
+/** `wakeUrl`, when set, lets any awake daemon wake this agent's VM with a GET (see wake.ts). */
+export function runtimeProfile(bot: BotRecord, nsec: string, createdAt: number, wakeUrl?: string): NostrEvent {
   return signEvent(nsec, RUNTIME_PROFILE, JSON.stringify({
     display_name: bot.name, name: bot.name, status: "online",
     respond_to: bot.respondTo, respond_to_allowlist: bot.respondToAllowlist, capabilities: [],
+    ...(wakeUrl && { wake_url: wakeUrl, ...(bot.ownerPubkey && { owner: bot.ownerPubkey }) }),
   }), [], createdAt);
 }
 

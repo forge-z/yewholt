@@ -4,8 +4,10 @@ import { join } from "node:path";
 import { record } from "../src/control-files.js";
 import { isPubkey } from "../src/control-protocol.js";
 import { normalizeRelay, sameRelay } from "../src/relay-url.js";
+import { httpUrl } from "../src/wake.js";
 
-export type Wake = { kind: "command"; cmd: string } | { kind: "instabox"; accountId: string; machineId: string };
+export type Wake =
+  { kind: "command"; cmd: string } | { kind: "instabox"; accountId: string; machineId: string } | { kind: "url"; url: string };
 export type Target = { label: string; transport: "relay"; relay: string; relays?: string[]; daemonPubkey: string; wake?: Wake; ssh?: string };
 
 export function validSshHost(value: unknown): value is string {
@@ -55,6 +57,7 @@ function parseWake(value: unknown): Wake | undefined {
   if (record(value)) {
     if (value.kind === "command" && only(value, ["kind", "cmd"]) && typeof value.cmd === "string" &&
         value.cmd.trim() && !value.cmd.includes("\0")) return { kind: value.kind, cmd: value.cmd };
+    if (value.kind === "url" && only(value, ["kind", "url"]) && httpUrl(value.url)) return { kind: value.kind, url: value.url };
     if (value.kind === "instabox" && only(value, ["kind", "accountId", "machineId"]) &&
         validId(value.accountId) && validId(value.machineId)) {
       return { kind: value.kind, accountId: value.accountId, machineId: value.machineId };
