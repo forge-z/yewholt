@@ -58,7 +58,7 @@ function oauthCredential(expires = Date.now() + 3_600_000) {
   return { type: "oauth", access: `test.${payload}.signature`, refresh: "test-refresh", expires };
 }
 
-test("saved OAuth logins list every supporting built-in provider except Anthropic in the daemon catalog", async (t) => {
+test("SDK daemon catalog shares Pi's supported OAuth logins", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "yewholt-oauth-catalog-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const providers = builtinProviders().filter((provider) => provider.auth.oauth);
@@ -73,7 +73,7 @@ test("saved OAuth logins list every supporting built-in provider except Anthropi
   try {
     const references = session.availableModelReferences();
     assert.ok(references.some((model) => model.startsWith("openai-codex/")));
-    assert.ok(!references.some((model) => model.startsWith("anthropic/")));
+    assert.ok(references.some((model) => model.startsWith("anthropic/")));
   } finally {
     await session.close();
   }

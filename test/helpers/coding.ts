@@ -40,7 +40,7 @@ export function scriptedModels(): Models {
     const write = text.match(/\bwrite:\s*(\S+)/);
     if (write) return fauxAssistantMessage(fauxToolCall("write", { path: write[1]!, content: "written\n" }), { stopReason: "toolUse" });
     const edit = text.match(/\bedit:\s*(\S+)/);
-    if (edit) return fauxAssistantMessage(fauxToolCall("edit", { path: edit[1]!, edits: [{ oldText: "old", newText: "new" }] }), { stopReason: "toolUse" });
+    if (edit) return fauxAssistantMessage(fauxToolCall("edit", { path: edit[1]!, oldText: "old", newText: "new" }), { stopReason: "toolUse" });
     return fauxAssistantMessage("ok");
   };
   faux.setResponses(Array.from({ length: 200 }, () => respond as never));

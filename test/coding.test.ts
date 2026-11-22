@@ -3,8 +3,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { MemoryStorage, type ConversationId } from "@earendil-works/pi-durable";
+import { MemoryStorage } from "@earendil-works/pi-durable";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { ensureOwnerKey, failureReason, instructionsFor, parseAdmins, type Yewholt } from "../src/session.js";
@@ -13,7 +12,6 @@ import { WorkspaceIsolation, type IsolationProbe } from "../src/isolation.js";
 import type { BotRecord } from "../src/registry.js";
 import { CHANNEL, chatFrom, createBot, emptyPiDir, human, openSession, testWorkspaces, waitUntil } from "./helpers/coding.js";
 
-const ctx = BACKGROUND_CONTEXT;
 const ELSEWHERE = "44444444-4444-4444-8444-444444444444";
 
 async function withCoding(
@@ -35,9 +33,7 @@ async function withCoding(
 }
 
 async function toolNames(session: Yewholt, bot: BotRecord): Promise<string[]> {
-  const conversation = await session.harness.conversation(bot.conversationId as unknown as ConversationId, ctx);
-  assert.ok(conversation);
-  return (await conversation.agent(ctx)).tools.map((tool) => tool.name).sort();
+  return (await session.botSession(bot.pubkey)).getActiveToolNames().sort();
 }
 
 async function lastReply(session: Yewholt, bot: BotRecord): Promise<string> {
@@ -55,7 +51,7 @@ test("permissions: only a bot whose stored permissions include code gets tools",
     assert.deepEqual(coder.permissions, ["post", "read", "code"]);
 
     await session.handleHuman(human("p1", "@Plain run: echo hi > plain.txt"));
-    assert.deepEqual(await toolNames(session, plain), []);
+    assert.deepEqual(await toolNames(session, plain), ["read", "tool_search"]);
     assert.match(await lastReply(session, plain), /done\[error\]/);
     assert.equal(existsSync(workspaceDir(testWorkspaces(home), plain.pubkey)), false);
 
@@ -75,16 +71,21 @@ test("permissions: granting and revoking code in the agent file applies on the n
     assert.match(await lastReply(session, plain), /done\[ok\]/);
     assert.equal(readFileSync(join(workspaceDir(testWorkspaces(home), plain.pubkey), "granted.txt"), "utf8"), "granted\n");
     assert.ok((await toolNames(session, plain)).includes("bash"));
+    const codeSession = await session.botSession(plain.pubkey);
+    const path = codeSession.sessionManager.getSessionFile();
 
     await createBot(session, "Plain", "post,read");
-    assert.deepEqual(await toolNames(session, plain), []);
+    assert.deepEqual(await toolNames(session, plain), ["read", "tool_search"]);
+    const chatSession = await session.botSession(plain.pubkey);
+    assert.notEqual(chatSession, codeSession);
+    assert.equal(chatSession.sessionManager.getSessionFile(), path);
     await session.handleHuman(human("r3", "@Plain run: echo revoked > revoked.txt"));
     assert.match(await lastReply(session, plain), /done\[error\]/);
     assert.equal(existsSync(join(workspaceDir(testWorkspaces(home), plain.pubkey), "revoked.txt")), false);
   });
 });
 
-test("instructions: a code bot is told about its workspace, tools and approvals; others keep the out-of-scope text", () => {
+test("instructions: a code bot is told about its workspace, tools and approvals; others can use installed skills and extensions", () => {
   const base: BotRecord = {
     conversationId: 1,
     name: "Coder",
@@ -101,7 +102,7 @@ test("instructions: a code bot is told about its workspace, tools and approvals;
     announced: true,
   };
   const plain = instructionsFor(base);
-  assert.match(plain, /Calendar, email, MCP, and repo access are out of scope\./);
+  assert.match(plain, /installed skills, MCP servers and extension tools/);
   const coder = instructionsFor({ ...base, permissions: ["post", "read", "code"] });
   assert.match(coder, /workspace/);
   assert.match(coder, /read, write, edit and bash/);
@@ -115,10 +116,11 @@ test("secrets: a bash call cannot see a variable set in the daemon's process.env
   try {
     await withCoding(async (session) => {
       const coder = await createBot(session, "Coder", "post,read,code");
-      await session.handleHuman(human("s1", "@Coder run: echo key=[$YEWHOLT_FAKE_PROVIDER_KEY] home=$HOME"));
+      await session.handleHuman(human("s1", "@Coder run: echo key=[$YEWHOLT_FAKE_PROVIDER_KEY] home=$HOME session=[$PI_SESSION_FILE] id=[$PI_SESSION_ID]"));
       const reply = await lastReply(session, coder);
       assert.match(reply, /done\[ok\]: key=\[\] home=/);
       assert.doesNotMatch(reply, /sk-test-must-not-leak/);
+      assert.match(reply, /session=\[\] id=\[\]/);
     });
   } finally {
     delete process.env.YEWHOLT_FAKE_PROVIDER_KEY;

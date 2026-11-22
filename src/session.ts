@@ -3,29 +3,16 @@ import { chmodSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import type { Models } from "@earendil-works/pi-ai";
-import type { MutableModels } from "@earendil-works/pi-ai/models";
-import {
-  createRegistry,
-  Harness,
-  UsageDoc,
-  type Conversation,
-  type ConversationId,
-  type EnvTarget,
-  type Extension,
-  type Registry,
-  type SettledSubmissionRecord,
-  type Storage,
-  type TaskId,
-} from "@earendil-works/pi-durable";
-import { createToolSearchExtension } from "@earendil-works/pi-durable/tool-search";
-import { CodingTools } from "@earendil-works/pi-durable/tools";
+import { createModels } from "@earendil-works/pi-ai/models";
+import { createRegistry, Harness, type Storage } from "@earendil-works/pi-durable";
+import { SessionManager, type AgentSession, type ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { PRESENCE, RUNTIME_PROFILE, presence, runtimeProfile, type AgentScan } from "./agents.js";
-import { ApprovalDecision, createGateExtension, type ApprovalAsk } from "./coding.js";
+import { APPROVAL_TTL_MS, type ApprovalAsk } from "./coding.js";
 import { isModelReference } from "./control-protocol.js";
-import { loadPackages, piDir } from "./packages.js";
-import { physicalPath, WorkspaceEnv, type Roots } from "./workspace.js";
+import { botModelRuntime, createBotSession, piDir } from "./bot-session.js";
+import { physicalPath, workspaceId, type Roots } from "./workspace.js";
 import { WorkspaceIsolation } from "./isolation.js";
-import { catalogHas, loadModels, type ModelChoice } from "./models.js";
+import { type ModelChoice } from "./models.js";
 import { readKey, writeKey } from "./keys.js";
 import { ownerAuthTag, pubkeyOf, signEvent, type NostrEvent } from "./nostr.js";
 import { effectiveScope } from "./membership.js";
@@ -54,7 +41,7 @@ export type SessionOptions = {
   defaultLimit?: number;
   models?: Models;
   isolation?: WorkspaceIsolation;
-  /** Pi's settings folder for `pi.durable` packages (default `PI_CODING_AGENT_DIR` or ~/.pi/agent). */
+  /** Pi's global resources, credentials and sessions directory. */
   piDir?: string;
   now?: () => number;
   /** Pubkeys besides the owner that may answer code-bot approvals (default `YEWHOLT_ADMINS`). */
@@ -66,17 +53,13 @@ export function isCoder(bot: Pick<BotRecord, "permissions">): boolean {
   return bot.permissions.includes("code");
 }
 
-/** What code bots run with, in selection order. Buzz's host.mjs installs the same base: CodingTools, tool search, packages. */
-type Coding = {
-  registry: Registry;
-  toolSearch: Extension;
-  gate: Extension;
-  packages: Extension[];
-  piDir: string;
-  loading?: Promise<void>;
-};
-
 export class Yewholt {
+  private readonly sessions = new Map<string, Promise<AgentSession>>();
+  private readonly retiring = new Map<string, Promise<void>>();
+  private readonly queues = new Map<string, Promise<void>>();
+  private readonly waiting = new Map<string, { pubkey: string; resolve: (allow: boolean) => void }>();
+  private readonly activeTurns = new Map<string, CodeTurn>();
+  private closing = false;
   private readonly memberChannels = new Map<string, ReadonlySet<string>>();
   private readonly directChannels = new Map<string, ReadonlySet<string>>();
   private readonly agentKeys = new Map<string, string>();
@@ -87,44 +70,16 @@ export class Yewholt {
 
   private constructor(
     readonly harness: Harness,
-    private readonly options: Required<Pick<SessionOptions, "home" | "turnTokens" | "defaultLimit" | "now">> & { models: Models; admins: ReadonlySet<string> },
-    private readonly coding: Coding,
+    private readonly options: Required<Pick<SessionOptions, "home" | "turnTokens" | "defaultLimit" | "now">> & { admins: ReadonlySet<string> },
+    private readonly agentDir: string,
+    private readonly runtime: ModelRuntime,
     private readonly isolation: WorkspaceIsolation,
   ) {}
 
   static async open(storage: Storage, options: SessionOptions): Promise<Yewholt> {
     const agentDir = options.piDir ?? piDir();
-    const models = options.models ?? (await loadModels(process.env, join(agentDir, "auth.json")));
-    const registry = createRegistry();
-    // Installed for every process, selected only by code bots' conversations (settings.extensions
-    // is empty, so nothing is selected by default, as before any extension existed).
-    // The gate and env need the session, which needs the open Harness. Harness.open runs no task,
-    // so they wait for it instead of deciding without it (a woken gate must not see "no workspace").
-    let ready!: (session: Yewholt) => void;
-    const opened = new Promise<Yewholt>((resolve) => (ready = resolve));
-    const gate = createGateExtension({
-      workspace: async (conversationId) => (await opened).toolWorkspace(conversationId),
-      request: async (ask) => (await opened).requestApproval(ask),
-      expire: async (taskId, key) => (await opened).dropApproval(taskId, key),
-    });
-    // Adapted from block/buzz-app src/bundled/pi/host.mjs (serve: install(CodingTools),
-    // install(createToolSearchExtension()), then the packages' extensions), commit
-    // 9657bb35451c99d3cf1687f1af9ca76fa7f001f0, Apache-2.0, see NOTICE. Yewholt adds its gate.
-    const toolSearch = createToolSearchExtension();
-    registry.install(CodingTools);
-    registry.install(toolSearch);
-    registry.install(gate);
-    const harness = await Harness.open(
-      storage,
-      {
-        models,
-        registry,
-        identity: { attribution: { name: "Yewholt", url: "https://github.com/forge-z/yewholt" } },
-        settings: { extensions: [], stream: { headers: { "Accept-Encoding": "identity" } } },
-        env: async (target) => (await opened).envFor(target),
-      },
-      ctx,
-    );
+    const runtime = await botModelRuntime(agentDir, options.models);
+    const harness = await Harness.open(storage, { models: createModels(), registry: createRegistry() }, ctx);
     const self = new Yewholt(
       harness,
       {
@@ -132,13 +87,12 @@ export class Yewholt {
         turnTokens: options.turnTokens ?? Number(process.env.YEWHOLT_TURN_TOKENS ?? "1000"),
         defaultLimit: options.defaultLimit ?? Number(process.env.YEWHOLT_BUDGET_TOKENS ?? "100000"),
         now: options.now ?? Date.now,
-        models,
         admins: new Set((options.admins ?? parseAdmins(process.env.YEWHOLT_ADMINS)).map((key) => key.toLowerCase())),
       },
-      { registry, toolSearch, gate, packages: [], piDir: agentDir },
+      agentDir,
+      runtime,
       options.isolation ?? new WorkspaceIsolation(options.home),
     );
-    ready(self);
     return self;
   }
 
@@ -159,19 +113,26 @@ export class Yewholt {
     }
   }
 
-  /**
-   * Re-attach to the chat turns of code bots that a previous process left unanswered: the same
-   * request id finds the same durable submission (no second input), its run continues where it
-   * stopped (a parked approval stays parked), and the reply is posted when it settles.
-   */
+  /** A restarted process cannot safely replay a tool call or an unfinished prompt. */
   async resumeTurns(): Promise<void> {
-    const state = await this.snapshot();
-    if (state.bots.some(isCoder)) await this.ensurePackages();
-    await Promise.all(
-      (state.turns ?? []).map((turn) =>
-        this.runTurn(turn).catch((error: unknown) => console.error(`resume turn ${turn.eventId}:`, error instanceof Error ? error.message : error)),
-      ),
-    );
+    await this.harness.commit(async (tx) => {
+      const reg = await tx.doc(RegistryDoc);
+      for (const request of reg.approvals ?? []) {
+        const bot = reg.bots.find((item) => item.pubkey === request.pubkey);
+        if (bot && (!bot.external || this.hasAgentKey(bot.pubkey))) reg.outbox.push(this.chatEvent(bot, request.channelId,
+          `The daemon restarted; request ${request.id} was cancelled, ask again.`));
+      }
+      for (const turn of reg.turns ?? []) {
+        const bot = reg.bots.find((item) => item.pubkey === turn.pubkey);
+        if (bot && (!bot.external || this.hasAgentKey(bot.pubkey))) reg.outbox.push(this.chatEvent(bot, turn.channelId,
+          "Interrupted by a restart, send it again."));
+        remember(reg, { channelId: turn.channelId, authorPubkey: turn.author, eventId: turn.eventId,
+          text: turn.text, createdAt: turn.createdAt, relay: turn.relay });
+      }
+      reg.approvals = [];
+      reg.turns = [];
+    }, ctx);
+    this.notifyOutbox();
   }
 
   /**
@@ -195,6 +156,11 @@ export class Yewholt {
   }
 
   async close(): Promise<void> {
+    this.closing = true;
+    for (const pubkey of this.sessions.keys()) this.disposeBot(pubkey);
+    await Promise.allSettled(this.queues.values());
+    await Promise.allSettled(this.retiring.values());
+    await this.runtime.settleCredentialWrites();
     await this.harness.close(ctx);
   }
 
@@ -214,15 +180,16 @@ export class Yewholt {
   }
 
   availableModelReferences(): string[] {
-    return [...new Set(this.options.models.getModels().map((model) => `${model.provider}/${model.id}`)
+    return [...new Set(this.runtime.getAvailableSnapshot().map((model) => `${model.provider}/${model.id}`)
       .filter(isModelReference))].sort();
   }
 
   hasModel(choice: ModelChoice): boolean {
-    return catalogHas(this.options.models, choice);
+    return this.availableModelReferences().includes(`${choice.provider}/${choice.modelId}`);
   }
 
   async forgetRemovedAgent(pubkey: string): Promise<void> {
+    this.disposeBot(pubkey);
     this.agentKeys.delete(pubkey);
     await this.harness.commit(async (tx) => {
       const reg = await tx.doc(RegistryDoc);
@@ -237,6 +204,8 @@ export class Yewholt {
       if (bot) bot.name = name;
     }, ctx);
     this.agentRuntime.delete(pubkey);
+    const bot = (await this.snapshot()).bots.find((item) => item.pubkey === pubkey);
+    if (bot) await this.syncAgent(bot);
   }
 
   reconcileAgents(scan: AgentScan): Promise<void> {
@@ -277,6 +246,7 @@ export class Yewholt {
         const stopped = current.stopped === true && (fileVersion === current.stoppedFileVersion || mtimeMs <= (current.stoppedAt ?? Infinity));
         Object.assign(current, fields, { agentFileVersion: fileVersion, stopped, status: stopped ? "stopped" : "active" });
       }, ctx);
+      if (changed) this.disposeBot(pubkey);
       if (changed || old.status !== "active") this.agentDisconnected(pubkey);
     }
     const missing = [...previous.values()].filter((bot) => bot.external && !valid.has(bot.pubkey));
@@ -287,6 +257,7 @@ export class Yewholt {
         const bot = reg.bots.find((item) => item.pubkey === pubkey)!;
         const status = scan.unavailable || scan.present.has(pubkey) ? "invalid" : "retired";
         if (bot.status === status) continue;
+        this.disposeBot(pubkey);
         discardAgentTraffic(reg, pubkey);
         if (!bot.stopped && status === "retired") this.queueOffline(reg, pubkey);
         bot.status = status;
@@ -364,6 +335,7 @@ export class Yewholt {
           rejected = true;
           continue;
         }
+        this.disposeBot(bot.pubkey);
         bot.stopped = true;
         bot.stoppedAt = this.options.now();
         bot.stoppedFileVersion = bot.agentFileVersion;
@@ -445,75 +417,127 @@ export class Yewholt {
   }
 
   private async answerWithModel(bot: BotRecord, message: HumanMessage): Promise<void> {
-    // A package may add the provider this bot's model comes from.
-    if (isCoder(bot)) await this.ensurePackages();
-    const choice = { provider: bot.provider, modelId: bot.modelId, label: bot.modelLabel };
-    if (!choice.provider || !choice.modelId || !catalogHas(this.options.models, choice)) {
-      const text = `${bot.name} is a durable session on ${choice.label || "an unset model"}. Free-text answers need a provider API key and a pi-ai catalog id (provider/modelId).`;
-      await this.reply(bot, message, text, 0);
-      return;
-    }
-    if (!(await this.canSpend(bot, this.options.turnTokens))) {
-      await this.reply(bot, message, budgetText(bot), 0);
-      return;
-    }
-    const conversation = await this.harness.conversation(asConversation(bot.conversationId), ctx);
-    if (!conversation) {
-      await this.reply(bot, message, "This session has no conversation.", 0);
-      return;
-    }
-    if (isCoder(bot)) {
-      await this.codeTurn(bot, message, conversation);
-      return;
-    }
-    // Fail closed: a bot without code never keeps coding extensions selected.
-    if ((await conversation.agent(ctx)).extensions.length > 0) {
-      await conversation.configure({ extensions: null, cwd: null, instructions: instructionsFor(bot) }, ctx);
-    }
-    const before = tokensOf(await this.harness.snapshot(UsageDoc, conversation.id, ctx));
-    const submission = await conversation.submit(
-      { type: "input", content: message.text, requestId: `nostr:${message.eventId}:${bot.pubkey}` },
-      ctx,
-    );
-    const settled = await submission.wait(ctx);
-    const after = tokensOf(await this.harness.snapshot(UsageDoc, conversation.id, ctx));
-    const spent = Math.max(this.options.turnTokens, after - before);
-    const answer = await this.answerText(bot, conversation, settled);
-    await this.reply(bot, message, answer, spent);
-  }
-
-  /** The model's text, or why the run gave none (`model_error: 429 ...`, `no_model`), also logged. */
-  private async answerText(bot: BotRecord, conversation: Conversation, settled: SettledSubmissionRecord): Promise<string> {
-    let reason: string;
-    let detail: unknown;
-    if (settled.status === "done" && settled.type === "input") {
-      const entry = await conversation.commit((tx) => tx.entry(settled.answer), ctx);
-      const content = entry?.model?.[0] && "content" in entry.model[0] ? entry.model[0].content : undefined;
-      const text = textOf(content);
-      if (text) return text;
-      reason = "empty_answer";
-    } else {
-      reason = settled.status === "unanswered" ? settled.reason : settled.status;
-      detail = settled.status === "unanswered" ? settled.detail : undefined;
-    }
-    const why = failureReason(reason, detail);
-    console.error(`turn: ${bot.name} (${bot.provider}/${bot.modelId}) got no answer: ${why}`);
-    return `I could not answer that (${why}).`;
+    const previous = this.queues.get(bot.pubkey) ?? Promise.resolve();
+    const run = previous.catch(() => undefined).then(async () => {
+      const state = await this.snapshot();
+      if (state.processed.includes(processedKey(message))) return;
+      const fresh = state.bots.find((item) => item.pubkey === bot.pubkey);
+      if (this.closing || !fresh || fresh.status !== "active") return;
+      if (!(await this.canSpend(fresh, this.options.turnTokens))) {
+        await this.reply(fresh, message, budgetText(fresh), 0);
+        return;
+      }
+      await this.runTurn(fresh, message);
+    });
+    this.queues.set(bot.pubkey, run);
+    try { await run; }
+    finally { if (this.queues.get(bot.pubkey) === run) this.queues.delete(bot.pubkey); }
   }
 
   private async createConversation(bot: BotRecord, register?: (reg: RegistryState) => void): Promise<void> {
-    const conversation = await this.harness.createConversation(
-      {
-        ownership: { kind: "ownerless" },
-        agent: agentChange(bot),
-        init: register && (async (tx, id) => {
-          bot.conversationId = id as unknown as number;
-          register(await tx.doc(RegistryDoc));
-        }),
-      },
-      ctx,
-    );
-    bot.conversationId = conversation.id as unknown as number;
+    await this.harness.commit(async (tx) => {
+      const reg = await tx.doc(RegistryDoc);
+      bot.conversationId = Math.max(0, ...reg.bots.map((item) => item.conversationId)) + 1;
+      register?.(reg);
+    }, ctx);
+  }
+
+  async botSession(pubkey: string): Promise<AgentSession> {
+    let pending = this.sessions.get(pubkey);
+    if (!pending) {
+      const retiring = this.retiring.get(pubkey);
+      pending = (async () => {
+        await retiring;
+        const bot = (await this.snapshot()).bots.find((item) => item.pubkey === pubkey);
+        if (!bot || bot.status !== "active" || this.closing) throw new Error("Bot is not active");
+        const cwd = isCoder(bot) ? this.isolation.workspace(pubkey) : join(this.agentDir, "yewholt", workspaceId(pubkey));
+        if (isCoder(bot)) this.isolation.prepare(pubkey);
+        else mkdirSync(cwd, { recursive: true, mode: 0o700 });
+        return createBotSession(bot, cwd, this.agentDir, this.runtime, instructionsFor(bot), {
+          roots: () => this.toolWorkspace(bot),
+          approve: (ask) => this.requestApproval(bot, ask),
+          bashUser: this.isolation.unsafe ? undefined : this.isolation.user,
+        });
+      })();
+      this.sessions.set(pubkey, pending);
+      void pending.catch(() => { if (this.sessions.get(pubkey) === pending) this.sessions.delete(pubkey); });
+    }
+    return pending;
+  }
+
+  private disposeBot(pubkey: string): void {
+    const pending = this.sessions.get(pubkey);
+    this.sessions.delete(pubkey);
+    for (const waiting of this.waiting.values()) if (waiting.pubkey === pubkey) waiting.resolve(false);
+    if (pending) {
+      const retiring = pending.then(async (session) => {
+        try {
+          await session.abort();
+          await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+        } finally { session.dispose(); }
+      }).catch(() => undefined);
+      this.retiring.set(pubkey, retiring);
+      void retiring.then(() => { if (this.retiring.get(pubkey) === retiring) this.retiring.delete(pubkey); });
+    }
+  }
+
+  private async syncAgent(bot: BotRecord): Promise<void> {
+    if (isCoder(bot)) this.isolation.prepare(bot.pubkey);
+    const session = await this.sessions.get(bot.pubkey);
+    if (session) {
+      session.setSessionName(bot.name);
+      this.disposeBot(bot.pubkey);
+    } else {
+      const dir = join(this.agentDir, "sessions", "yewholt-" + workspaceId(bot.pubkey));
+      const recent = (await SessionManager.listAll(dir))[0];
+      if (recent && recent.name !== bot.name) SessionManager.open(recent.path, dir).appendSessionInfo(bot.name);
+    }
+  }
+
+  private async runTurn(bot: BotRecord, message: HumanMessage): Promise<void> {
+    const turn: CodeTurn = {
+      ...(message.relay ? { relay: message.relay } : {}), requestId: `nostr:${message.eventId}:${bot.pubkey}`,
+      pubkey: bot.pubkey, channelId: message.channelId, eventId: message.eventId,
+      author: message.authorPubkey, text: message.text, createdAt: message.createdAt,
+    };
+    this.activeTurns.set(bot.pubkey, turn);
+    const drop = (reg: RegistryState) => { reg.turns = (reg.turns ?? []).filter((item) => item.requestId !== turn.requestId); };
+    await this.harness.commit(async (tx) => {
+      const reg = await tx.doc(RegistryDoc);
+      reg.turns ??= [];
+      reg.turns.push(turn);
+    }, ctx);
+    let spent = 0;
+    let answer: string;
+    try {
+      const session = await this.botSession(bot.pubkey);
+      const model = this.runtime.getModel(bot.provider, bot.modelId);
+      if (!model) {
+        answer = `${bot.name} is a Pi session on ${bot.modelLabel || "an unset model"}. Free-text answers need a provider API key and a pi-ai catalog id (provider/modelId).`;
+      } else {
+        await session.setModel(model);
+        const before = session.messages.length;
+        try { await session.prompt(message.text); }
+        finally {
+          spent = Math.max(this.options.turnTokens, session.messages.slice(before).reduce((sum, item) =>
+            sum + (item.role === "assistant" ? item.usage.totalTokens : 0), 0));
+        }
+        const replies = session.messages.slice(before).filter((item) => item.role === "assistant");
+        const last = replies.at(-1);
+        const text = session.getLastAssistantText();
+        const why = last?.role === "assistant" && last.stopReason === "error"
+          ? failureReason("model_error", last.errorMessage) : last?.role === "assistant" && last.stopReason === "aborted"
+            ? "aborted" : "empty_answer";
+        answer = text && last?.role === "assistant" && !["error", "aborted"].includes(last.stopReason)
+          ? text : `I could not answer that (${why}).`;
+      }
+    } catch (error) {
+      answer = `I could not answer that (${failureReason("model_error", error instanceof Error ? error.message : error)}).`;
+    } finally {
+      this.activeTurns.delete(bot.pubkey);
+    }
+    await this.reply(bot, message, answer, spent, true, drop);
+    this.notifyOutbox();
   }
 
   private async canSpend(bot: BotRecord, cost: number): Promise<boolean> {
@@ -561,186 +585,46 @@ export class Yewholt {
     await this.noteOnly(fresh, message, text);
   }
 
-  // ---- code bots -------------------------------------------------------------------------
-
-  /** Load the `pi.durable` parts of the user's Pi packages once per process, on first need. */
-  private ensurePackages(): Promise<void> {
-    this.coding.loading ??= (async () => {
-      const loaded = await loadPackages(this.coding.piDir);
-      for (const { source, error } of loaded.errors) console.error(`pi package ${source} skipped: ${error}`);
-      for (const extension of loaded.extensions) {
-        try {
-          this.coding.registry.install(extension);
-          this.coding.packages.push(extension);
-        } catch (error) {
-          console.error(`pi package extension ${extension.name} skipped: ${error instanceof Error ? error.message : error}`);
-        }
-      }
-      const models = this.options.models as unknown as Partial<MutableModels>;
-      for (const provider of loaded.providers) {
-        if (typeof models.setProvider === "function") models.setProvider(provider);
-        else console.error(`pi package provider ${provider.id} skipped: this model catalog is read-only`);
-      }
-    })().catch((error: unknown) => {
-      console.error(`pi packages skipped: ${error instanceof Error ? error.message : error}`);
-    });
-    return this.coding.loading;
-  }
-
-  /** Selection order: Pi's tools, tool search, packages (as host.mjs), then the gate last so it sees final arguments. */
-  private codeExtensions(): Extension[] {
-    return [CodingTools, this.coding.toolSearch, ...this.coding.packages, this.coding.gate];
-  }
-
-  /** Make the conversation match the bot's stored permissions: tools and workspace with `code`, none without. */
-  private async syncAgent(bot: BotRecord): Promise<void> {
-    const conversation = await this.harness.conversation(asConversation(bot.conversationId), ctx);
-    if (!conversation) return;
-    const change = bot.external
-      ? { ...agentChange(bot), model: bot.provider && bot.modelId ? { provider: bot.provider, modelId: bot.modelId } : null }
-      : { instructions: instructionsFor(bot) };
-    if (isCoder(bot)) {
-      await this.ensurePackages();
-      this.isolation.prepare(bot.pubkey);
-      const workspace = this.isolation.workspace(bot.pubkey);
-      await conversation.configure({ ...change, extensions: this.codeExtensions(), cwd: workspace }, ctx);
-      return;
-    }
-    const selected = (await conversation.agent(ctx)).extensions.length > 0;
-    await conversation.configure(selected ? { ...change, extensions: null, cwd: null } : change, ctx);
-  }
-
-  private async codeTurn(bot: BotRecord, message: HumanMessage, conversation: Conversation): Promise<void> {
-    const workspace = this.isolation.workspace(bot.pubkey);
-    await conversation.configure({ extensions: this.codeExtensions(), cwd: workspace, instructions: instructionsFor(bot) }, ctx);
-    const turn: CodeTurn = {
-      ...(message.relay && { relay: message.relay }),
-      requestId: `nostr:${message.eventId}:${bot.pubkey}`,
-      pubkey: bot.pubkey,
-      channelId: message.channelId,
-      eventId: message.eventId,
-      author: message.authorPubkey,
-      text: message.text,
-      createdAt: message.createdAt,
-    };
-    await this.harness.commit(async (tx) => {
-      const reg = await tx.doc(RegistryDoc);
-      reg.turns ??= [];
-      if (!reg.turns.some((item) => item.requestId === turn.requestId)) reg.turns.push(turn);
-    }, ctx);
-    await this.runTurn(turn);
-  }
-
-  /** Submit (or find again, by request id) the turn's input, wait for its run, post the answer, drop the turn. */
-  private async runTurn(turn: CodeTurn): Promise<void> {
-    const bot = (await this.snapshot()).bots.find((item) => item.pubkey === turn.pubkey);
-    const drop = (reg: RegistryState) => {
-      reg.turns = (reg.turns ?? []).filter((item) => item.requestId !== turn.requestId);
-    };
-    const conversation = bot && (await this.harness.conversation(asConversation(bot.conversationId), ctx));
-    if (!bot || !conversation) {
-      await this.harness.commit(async (tx) => drop(await tx.doc(RegistryDoc)), ctx);
-      return;
-    }
-    if (bot.external && bot.status !== "active") return;
-    const message: HumanMessage = {
-      relay: turn.relay,
-      channelId: turn.channelId,
-      authorPubkey: turn.author,
-      eventId: turn.eventId,
-      text: turn.text,
-      createdAt: turn.createdAt,
-    };
-    const before = tokensOf(await this.harness.snapshot(UsageDoc, conversation.id, ctx));
-    const submission = await conversation.submit({ type: "input", content: turn.text, requestId: turn.requestId }, ctx);
-    const settled = await submission.wait(ctx);
-    const after = tokensOf(await this.harness.snapshot(UsageDoc, conversation.id, ctx));
-    const spent = Math.max(this.options.turnTokens, after - before);
-    const answer = await this.answerText(bot, conversation, settled);
-    await this.reply(bot, message, answer, spent, true, drop);
-    this.notifyOutbox();
-  }
-
-  /** A resumed turn can still have the previous workspace path stored in its agent snapshot. */
-  private async envFor(target: EnvTarget): Promise<WorkspaceEnv | undefined> {
-    const bot = await this.coderFor(target.conversationId);
-    if (!bot) return undefined;
-    return new WorkspaceEnv(
-      this.isolation.workspace(bot.pubkey),
-      this.isolation.unsafe ? undefined : this.isolation.user,
-      () => this.isolation.prepare(bot.pubkey),
-    );
-  }
-
-  private async coderFor(conversationId: ConversationId): Promise<BotRecord | undefined> {
-    const bot = (await this.snapshot()).bots.find((item) => item.conversationId === (conversationId as unknown as number));
-    return bot && (!bot.external || bot.status === "active") && isCoder(bot) ? bot : undefined;
-  }
-
-  private async toolWorkspace(conversationId: ConversationId): Promise<(Roots & { homeAliases: string[] }) | { refusal: string } | undefined> {
-    const bot = await this.coderFor(conversationId);
-    if (!bot) return undefined;
+  private toolWorkspace(bot: BotRecord): (Roots & { homeAliases: string[] }) | { refusal: string } {
     const refusal = this.isolation.prepare(bot.pubkey);
     if (refusal) return { refusal };
     const home = this.options.home;
     let real = home;
-    try {
-      real = physicalPath(home);
-    } catch {
-      // keep the configured path
-    }
-    return {
-      home,
-      workspace: this.isolation.workspace(bot.pubkey),
-      homeAliases: real === home ? [] : [real],
-      credentialFile: join(this.coding.piDir, "auth.json"),
-    };
+    try { real = physicalPath(home); } catch { /* use configured path */ }
+    return { home, workspace: this.isolation.workspace(bot.pubkey),
+      homeAliases: real === home ? [] : [real], credentialFile: join(this.agentDir, "auth.json") };
   }
 
-  /** Store a parked call's request and post it in the channel of the turn it belongs to. Idempotent. */
-  private async requestApproval(ask: ApprovalAsk): Promise<void> {
-    const taskId = ask.taskId as unknown as number;
-    const state = await this.snapshot();
-    if ((state.approvals ?? []).some((item) => item.taskId === taskId && item.key === ask.key)) return;
-    const bot = state.bots.find((item) => item.conversationId === (ask.conversationId as unknown as number));
-    if (!bot || (bot.external && bot.status !== "active")) return;
-    const turn = (state.turns ?? []).find((item) => item.pubkey === bot.pubkey);
-    const channelId = turn?.channelId ?? bot.scope[0];
-    if (!channelId) return;
+  private async requestApproval(bot: BotRecord, ask: ApprovalAsk): Promise<boolean> {
+    const turn = this.activeTurns.get(bot.pubkey);
+    if (!turn || this.closing) return false;
     const id = randomUUID().slice(0, 8);
-    const event = this.chatEvent(bot, channelId, approvalText(bot, ask, id));
-    const request: ApprovalRequest = {
-      id,
-      pubkey: bot.pubkey,
-      conversationId: bot.conversationId,
-      taskId,
-      key: ask.key,
-      channelId,
-      tool: ask.tool,
-      subject: ask.subject,
-      reasons: ask.reasons,
-      eventId: event.id,
-      createdAt: Math.floor(Date.now() / 1000),
-    };
-    let added = false;
-    await this.harness.commit(async (tx) => {
-      const reg = await tx.doc(RegistryDoc);
-      reg.approvals ??= [];
-      if (reg.approvals.some((item) => item.taskId === taskId && item.key === ask.key)) return;
-      reg.approvals.push(request);
-      reg.outbox.push(event);
-      added = true;
-    }, ctx);
-    if (added) this.notifyOutbox();
-  }
-
-  private async dropApproval(taskId: TaskId, key: string): Promise<void> {
-    const id = taskId as unknown as number;
-    await this.harness.commit(async (tx) => {
-      const reg = await tx.doc(RegistryDoc);
-      if (!(reg.approvals ?? []).some((item) => item.taskId === id && item.key === key)) return;
-      reg.approvals = (reg.approvals ?? []).filter((item) => !(item.taskId === id && item.key === key));
-    }, ctx);
+    const event = this.chatEvent(bot, turn.channelId, approvalText(bot, ask, id));
+    let resolve!: (allow: boolean) => void;
+    const decision = new Promise<boolean>((done) => { resolve = done; });
+    this.waiting.set(id, { pubkey: bot.pubkey, resolve });
+    const timer = setTimeout(() => resolve(false), APPROVAL_TTL_MS);
+    try {
+      await this.harness.commit(async (tx) => {
+        const reg = await tx.doc(RegistryDoc);
+        reg.approvals ??= [];
+        reg.approvals.push({
+          id, pubkey: bot.pubkey, conversationId: bot.conversationId, taskId: 0, key: id,
+          channelId: turn.channelId, tool: ask.tool, subject: ask.subject, reasons: ask.reasons,
+          eventId: event.id, createdAt: Math.floor(this.options.now() / 1000),
+        });
+        reg.outbox.push(event);
+      }, ctx);
+      this.notifyOutbox();
+      return await decision;
+    } finally {
+      clearTimeout(timer);
+      this.waiting.delete(id);
+      await this.harness.commit(async (tx) => {
+        const reg = await tx.doc(RegistryDoc);
+        reg.approvals = (reg.approvals ?? []).filter((item) => item.id !== id);
+      }, ctx);
+    }
   }
 
   /**
@@ -819,13 +703,9 @@ export class Yewholt {
 
   private async resolveApproval(state: RegistryState, request: ApprovalRequest, message: HumanMessage, allow: boolean): Promise<void> {
     const bot = state.bots.find((item) => item.pubkey === request.pubkey);
-    const result = await this.harness.signal(
-      request.taskId as unknown as TaskId,
-      ApprovalDecision,
-      request.key,
-      { allow, by: message.authorPubkey },
-      ctx,
-    );
+    const waiting = this.waiting.get(request.id);
+    this.waiting.delete(request.id);
+    const result = waiting ? "delivered" : "ended";
     const text =
       result === "delivered"
         ? allow
@@ -839,33 +719,15 @@ export class Yewholt {
       remember(reg, message);
       if (event) reg.outbox.push(event);
     }, ctx);
+    waiting?.resolve(allow);
     this.notifyOutbox();
   }
 
   private async noteOnly(bot: BotRecord, message: HumanMessage, text: string): Promise<void> {
-    const conversation = await this.harness.conversation(asConversation(bot.conversationId), ctx);
-    if (!conversation) return;
-    await conversation.submit(
-      {
-        type: "write",
-        entry: {
-          kind: "yewholt.chat",
-          data: { author: message.authorPubkey, text: message.text, reply: text },
-        },
-      },
-      ctx,
-    );
+    const pending = this.sessions.get(bot.pubkey);
+    if (pending) (await pending).sessionManager.appendCustomEntry("yewholt.chat",
+      { author: message.authorPubkey, text: message.text, reply: text });
   }
-}
-
-function asConversation(id: number): ConversationId {
-  return id as unknown as ConversationId;
-}
-
-function agentChange(bot: BotRecord): { instructions: string; model?: { provider: string; modelId: string } } {
-  const instructions = instructionsFor(bot);
-  if (!bot.provider || !bot.modelId) return { instructions };
-  return { instructions, model: { provider: bot.provider, modelId: bot.modelId } };
 }
 
 export function instructionsFor(bot: BotRecord): string {
@@ -877,7 +739,7 @@ export function instructionsFor(bot: BotRecord): string {
     "Stay inside that scope. post lets you publish in those channels. read lets the daemon show them to you.",
   ];
   if (!isCoder(bot)) {
-    lines.push("Do not invent extra permissions. Calendar, email, MCP, and repo access are out of scope.");
+    lines.push("You may use installed skills, MCP servers and extension tools. The read tool is only for installed skill files; no shell or file writes.");
     return lines.join("\n");
   }
   lines.push(
@@ -885,7 +747,7 @@ export function instructionsFor(bot: BotRecord): string {
     "Tools: read, write, edit and bash work in the workspace. tool_search finds and loads more tools when you need them.",
     "Inside the workspace you work freely. These wait until a person approves them in the chat: recursive deletes (rm -r), git push, piping a download into a shell, sudo/su/doas, any command that mentions the Yewholt state folder ($YEWHOLT_HOME, .yewholt), and write or edit outside the workspace. The call waits; a rejection comes back to you as a refusal.",
     "Reading or writing Yewholt's state folder is refused and cannot be approved. Your commands do not get the daemon's environment or its API keys.",
-    "Do not invent extra permissions. Calendar, email and MCP are out of scope.",
+    "Installed skills, MCP servers and extension tools are available. Use only the permissions their owner granted.",
   );
   return lines.join("\n");
 }
@@ -947,11 +809,6 @@ function messageMentions(text: string, bot: BotRecord): boolean {
   return new RegExp(`(^|[^a-z0-9])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^a-z0-9]|$)`, "i").test(text);
 }
 
-function tokensOf(state: { models: Record<string, { totalTokens?: number }>; tools: Record<string, { totalTokens?: number }> } | undefined): number {
-  if (!state) return 0;
-  return [...Object.values(state.models), ...Object.values(state.tools)].reduce((sum, usage) => sum + (usage.totalTokens ?? 0), 0);
-}
-
 const MAX_REASON = 300;
 
 /** One line for the chat and the log. Long token-like runs (API keys) are masked. */
@@ -970,15 +827,6 @@ export function parseAdmins(value: string | undefined): string[] {
     else console.error(`YEWHOLT_ADMINS: skipped ${item.slice(0, 12)}…, not a 64-hex pubkey`);
   }
   return admins;
-}
-
-function textOf(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((block) => (block && typeof block === "object" && "text" in block && typeof block.text === "string" ? block.text : ""))
-    .filter(Boolean)
-    .join("\n");
 }
 
 export function bindHome(home: string): void {

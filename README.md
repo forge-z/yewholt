@@ -7,7 +7,7 @@ Yewholt has two roles:
 1. **Coding harness.** Type `yh` in any directory and it opens an interactive [pi](https://pi.dev) coding-agent session there. It is the same harness as the `pi` CLI and loads the same pi packages (extensions, skills, prompt templates, themes). `yewholt` is an alias. See [Harness](#harness).
 2. **Durable agents on Buzz.** The headless daemon runs on a Linux VM or natively on the Mac and connects to an existing [Buzz](https://github.com/block/buzz) relay. The Mac runs the Buzz app with the Yewholt plugin and bridge; a Mac-local daemon needs no Docker or local relay.
 
-Calendar, email, MCP, cron, memory, kanban, and browser tools are out of core. They belong in later Buzz plugins.
+MCP servers, skills and trusted Pi extensions are shared with the coding CLI. Calendar, email and other integrations can be supplied by those extensions or MCP servers.
 
 ## Agent-first setup
 
@@ -79,13 +79,13 @@ Buzz app (Mac/iOS) ──WebSocket──► stock buzz-relay (unmodified)
                                        ▲
 yewholt daemon ──NIP-42 client─────────┘
       │
-      └─ one @earendil-works/pi-durable harness
-            SQLite store, one conversation per bot
+      ├─ pi-durable registry/outbox in SQLite
+      └─ one Pi SDK AgentSession per bot, JSONL history
 ```
 
 - **Relay.** An existing, unmodified Buzz relay run by its administrator. Yewholt does not install, start, or stop it; `yh install` records its URL and public key.
-- **Daemon.** A Node process. It opens one pi-durable `Harness` on a SQLite file and calls `resume()` after every start, so a crashed run continues from the last committed step.
-- **Bot.** One ownerless pi-durable conversation (its own instructions, model, and transcript) plus its own Nostr key.
+- **Daemon.** A Node process. It keeps the registry, outbox, processed ids and budgets in a pi-durable SQLite store. On restart it cancels unfinished turns and pending approvals rather than replaying tool side effects.
+- **Bot.** One lazily created Pi coding-agent SDK `AgentSession` (instructions, model, transcript and global resources) plus its own Nostr key. Prompts to each bot are serialized; stopping, deleting or changing its permissions disposes the cached session.
 - **Bridge.** The daemon authenticates to the relay with NIP-42, like any other client. It reads kind 9 channel messages and publishes kind 9 replies, kind 0 profiles, and the membership events below. It does not embed the relay.
 - **Buzz agent provisioning.** `src/agents.ts` reads and validates provider-written files for agents created in the Buzz desktop app. The daemon reconciles those files with the durable bot registry and publishes the agents' runtime profile and presence.
 
@@ -233,7 +233,7 @@ Permissions that the daemon honors are `post` (publish kind 9), `read` (the mess
 
 A model label is mapped to a pi-ai `provider/modelId`. pi-ai will call it only when that provider and id exist in the catalog and the matching API key is set. Until then the session still exists, keeps its history, and says so when mentioned.
 
-When a model turn ends without an answer, the bot says why instead of a bare failure, for example `I could not answer that (model_error: 429 FreeUsageLimitError: ...).` or `I could not answer that (no_model).` The reason is pi-durable's settlement reason, and the detail is the provider's error text, flattened to one line, cut at 300 characters, with token-like runs of 32+ characters shown as `[redacted]`. The daemon logs the same line with the bot name and model.
+When a model turn ends without an answer, the bot says why instead of a bare failure, for example `I could not answer that (model_error: 429 FreeUsageLimitError: ...).` or `I could not answer that (no_model).` The reason describes the SDK turn outcome, and the detail is the provider's error text, flattened to one line, cut at 300 characters, with token-like runs of 32+ characters shown as `[redacted]`.
 
 Agents answer only when mentioned, and only while they are `active`. This holds in every channel an agent is a member of, see below.
 
@@ -571,11 +571,11 @@ unchanged. With the variable unset, the daemon connects directly as before.
 
 ### Coding bots (`code`)
 
-A bot whose stored permissions include `code` is a coding agent. It reads, writes, edits, and runs shell commands in its own workspace, and asks in the chat before anything on the approval list below. A bot without `code` has no tools and behaves as before.
+A bot whose stored permissions include `code` is a coding agent. It reads, writes, edits, and runs shell commands in its own workspace, and asks in the chat before anything on the approval list below. A bot without `code` can use MCP and extension tools and read installed skill files, but has no shell, write or edit tools.
 
-`code` is granted or revoked like any permission, in the agent's provisioning (`permissions` in its file). The change applies from that bot's next turn; the daemon does not restart. Under the hood every conversation selects no extensions by default; a code bot's conversation selects pi-durable's `CodingTools` (`read`, `write`, `edit`, `bash`), the tool search extension (`tool_search`, so deferred tools do not bloat every turn), the extensions of your Pi packages, and Yewholt's gate (`yewholt-code`), in that order. This follows Buzz's Pi host ([`host.mjs`](https://github.com/block/buzz-app/blob/main/src/bundled/pi/host.mjs)); see [NOTICE](NOTICE).
+`code` is granted or revoked in the agent provisioning file. A permission change disposes the cached SDK session before the next turn. Code bots get Pi’s built-in read/write/edit and an isolated bash tool, plus tool search, MCP and trusted extension tools. Yewholt’s inline `tool_call` approval gate runs before built-in filesystem and shell calls.
 
-The bot's instructions say it has a workspace, which tools it has, and what needs approval. Bots without `code` keep the old out-of-scope text.
+The bot's instructions say it has a workspace, which tools it has, and what needs approval. Bots without `code` are told that read is limited to installed skill files.
 
 #### Workspace
 
@@ -600,7 +600,7 @@ Everything inside the workspace runs without asking. These wait for a person in 
 
 The classifier looks into `;`, `&&`, `||`, pipes, subshells, quotes, escapes, `$(...)`, backticks, `<(...)`, wrappers such as `env`, `xargs`, `timeout`, `find -exec`, and `-c` scripts of sh/bash/zsh/dash/ksh/su. When it cannot parse a command, or the command name is a variable or substitution (`$CMD -rf x`), it asks (fail closed). Look-alikes such as `rm -f file`, `git status`, `git stash push`, and `curl -o file url` run freely.
 
-How it works: a pi-durable `beforeTool` gate parks the call before it runs (pi-durable README, "Gates before a tool runs"). The bot posts one message in the channel of the message it is answering, with the exact command or path and why, and asks for `aprovo` or `rejeito`. The call holds no process while it waits; it is a sleeping task in the SQLite store with a 24-hour deadline, after which it is refused. The request is also kept in the registry and shown in `status.json` as `approvals`.
+How it works: an inline Pi `tool_call` extension blocks execution while awaiting a chat decision. The bot posts the exact command or path and why in the channel of the turn, asking for `aprovo` or `rejeito`. It waits in memory without starting a process, with a 24-hour deadline after which it is refused. The request is also kept in the registry and shown in `status.json` as `approvals`.
 
 Who may answer, and which request an answer resolves:
 
@@ -610,11 +610,11 @@ Who may answer, and which request an answer resolves:
 - `@Coder aprovo` answers Coder's oldest request in the channel.
 - A plain `aprovo` answers the only request in the channel. If more than one command is waiting, the daemon lists them and asks which one instead of guessing.
 
-The decision is delivered as a pi-durable signal to the parked call's task. A signal key holds one value, so a second `aprovo` finds nothing to run (`duplicate`). A daemon killed while a call is parked keeps it parked: on restart the daemon re-attaches to the bot's unfinished turn by its request id (no second input), `aprovo` still resolves it, the command runs once, and the reply is posted. `bash` is not replay-safe in pi-durable, so a crash while an approved command is running ends it `interrupted`; it is never started a second time.
+The decision resolves that call's in-memory promise once. A second `aprovo` finds nothing to run (`duplicate`). After a restart, pending requests are cancelled with “the daemon restarted; request <id> was cancelled, ask again”. Unfinished turns get “interrupted by a restart, send it again”. Neither approvals nor tool side effects are replayed; send a new request instead of approving an old one.
 
 #### Secret isolation
 
-Code-bot commands run as the dedicated, unprivileged bot account through `sudo -n -u`. The bot has only the workspace group and cannot access the daemon's login HOME. Commands start in the workspace with a clean environment containing `PATH`, `HOME` (the workspace), `LANG=C.UTF-8`, `LC_ALL=C.UTF-8`, `TERM=dumb`, and `TMPDIR` (the workspace's `.tmp` directory). Bash commands and package commands that use the execution environment receive these same restrictions.
+Code-bot commands run as the dedicated, unprivileged bot account through `sudo -n -u`. The bot has only the workspace group and cannot access the daemon's login HOME. Commands start in the workspace with a clean environment containing `PATH`, `HOME` (the workspace), `LANG=C.UTF-8`, `LC_ALL=C.UTF-8`, `TERM=dumb`, and `TMPDIR` (the workspace's `.tmp` directory). Pi's session environment variables are not exposed to bash. MCP and extension tools are trusted daemon code and do not inherit these restrictions.
 
 Yewholt checks isolation at startup and before code-bot tool calls, and caches a successful check for at most 60 seconds. If the account, sudo access, group membership, workspace root, or daemon HOME fails validation, the tools return a refusal with the failed check and the setup command. The daemon logs the first failure and exposes the check result in `status.json` and `yewholt status`. For local development only, `YEWHOLT_UNSAFE_SHARED_USER=1` runs shell commands as the daemon user, with workspaces still outside the state directory. Every daemon start in this mode logs a warning.
 
@@ -622,17 +622,36 @@ Yewholt checks isolation at startup and before code-bot tool calls, and caches a
 
 The bot shell can reach the network and access files available to the bot account. All code bots share one Unix user, so shell commands can read or modify each other's workspaces. Package code runs inside the daemon with access to its environment and permissions. Install only packages you trust.
 
-#### Pi packages
+#### Pi resources and bot sessions
 
-Code bots load the Pi durable parts of the Pi packages in Pi's settings, the same way Buzz does. Follow Buzz's guide, [Add your own Pi extensions to Buzz](https://github.com/block/buzz-app/blob/main/src/bundled/pi/EXTENSIONS.md): list a local package folder in `packages` of `~/.pi/agent/settings.json` (or `$PI_CODING_AGENT_DIR/settings.json`); the package lists its entries under `"pi": { "durable": ["./durable.ts"] }`; each entry's default export returns `{ extensions?, providers? }` and may be async.
+All bots use the daemon user's Pi configuration directory, `~/.pi/agent` (or
+`PI_CODING_AGENT_DIR`), including `auth.json`, `models.json`, skills,
+extensions and ordinary Pi packages. Configure them as the daemon user:
 
-- Packages load once per daemon process, when a code bot first needs them (its first turn, or at start when a code bot exists). Code bots select every package's extensions; other bots never do. A provider a package adds joins the model catalog once loaded.
-- Only local folders load; `npm:`, `git:`, and URL sources are skipped. An extension may not be named `buzz`, `coding-tools`, `tool-search`, `yewholt-code`, or another package's extension name. TypeScript entries run without a build, as in Buzz.
-- A package that fails (its setup throws or takes over 30 seconds, a reserved name, a malformed provider) is skipped with one log line, `pi package <source> skipped: <why>`, and the others still load.
-- Extensions written for the pi coding agent (`pi.extensions`, `(pi) => {}`) are not loaded, as in Buzz.
-- Package code runs inside the daemon with your permissions. Install only packages you trust.
+```sh
+yh code mcp add docs --url https://mcp.example.com/mcp
+yh code install npm:trusted-package
+```
 
-MCP servers, skills (`SKILL.md`), git credentials, and push or PR automation are not part of the coding runtime.
+MCP servers come from the global `mcp.json`. Put skills in
+`~/.pi/agent/skills/<name>/SKILL.md`. Pi package extensions can register
+tools and model providers; providers become visible to hosted model listing
+once loaded by a bot. Restart the daemon after changing global resources.
+
+These integrations run with the daemon's permissions, not the isolated bot
+user. Install only trusted MCP servers, packages and extensions. The built-in
+bash tool still uses Yewholt's clean environment and bot user. A non-code bot's
+read tool can read only installed skill files. Workspace project resources
+(`.pi/settings.json`, extensions, packages, MCP configuration, skills and
+context files) are never loaded or trusted: a bot can write its workspace.
+
+Each bot's history is a persistent Pi JSONL session under
+`<agentDir>/sessions/yewholt-<workspaceId>/`. It continues the most recent
+session after restart, but interrupted work is not replayed. Sessions carry
+the bot's display name and follow renames. As the same daemon user, run
+`yh` and use `/resume`, switch to all projects, then search for the bot's
+name; `yh code --resume` also opens the session picker. Do not run concurrent
+writers against a bot's session file while its daemon is active.
 
 ### Keys
 
@@ -646,7 +665,7 @@ Run `/login` inside `yewholt`, or log in with an API key from the terminal. For 
 yewholt code auth login deepseek --api-key
 ```
 
-The daemon reads API keys and supported OAuth logins from the same Pi `auth.json`; there is nothing to copy. For example, log in to `openai-codex` in Pi to list and use ChatGPT/Codex subscription models in Buzz. Anthropic remains API-key only: Claude subscription OAuth and `sk-ant-oat` tokens are refused. Log in on the machine running the daemon, with the same Unix user and HOME it uses. Pi defaults to `~/.pi/agent/auth.json`; if you set `PI_CODING_AGENT_DIR`, use the same absolute directory for login and the daemon. The daemon's `--home` changes Yewholt's state directory, not Pi's. Keep the auth file private to the daemon user. Restart the daemon after logging in, changing a key, or logging out so it rebuilds its model catalog.
+The daemon reads API keys and supported OAuth logins from the same Pi `auth.json`; there is nothing to copy. For example, log in to `openai-codex` in Pi to list and use ChatGPT/Codex subscription models in Buzz. Provider support and login flows match Pi's SDK. Log in on the machine running the daemon, with the same Unix user and HOME it uses. Pi defaults to `~/.pi/agent/auth.json`; if you set `PI_CODING_AGENT_DIR`, use the same absolute directory for login and the daemon. The daemon's `--home` changes Yewholt's state directory, not Pi's. Keep the auth file private to the daemon user. Restart the daemon after logging in, changing a key, or logging out so it rebuilds its model catalog.
 
 OAuth request authentication and token refresh use Pi's built-in provider flows. Refreshed tokens are persisted to the same `auth.json` using Pi's file-locked credential store, preserving other logins and serializing concurrent refreshes with the Pi app. Token refresh does not require a daemon restart; failed refreshes fail the request rather than using an expired token.
 
@@ -658,13 +677,13 @@ You can also supply provider keys in the daemon's environment or `$YEWHOLT_HOME/
 
 Daemon model streams request `Accept-Encoding: identity` through Pi's request-header options for providers that support custom HTTP headers. This avoids raw gzip SSE responses and `Stream ended without finish_reason` errors with Node 26.0's native fetch and a dependency-installed Undici dispatcher. It does not change global fetch or dispatcher settings.
 
-None of these are required. A built-in provider is registered when its credential resolves from the environment, a saved Pi API key, or a saved OAuth login supported by that provider (except Anthropic). Usable environment credentials retain precedence over saved credentials. The set is `builtinProviders()` from `@earendil-works/pi-ai` 1.6.0.
+None of these are required. A built-in provider is registered when its credential resolves from the environment, a saved Pi API key, or a saved OAuth login supported by that provider. Usable environment credentials retain precedence over saved credentials. The set is `builtinProviders()` from `@earendil-works/pi-ai` 1.6.0.
 
 | Provider | Env | Notes |
 |---|---|---|
 | `amazon-bedrock` | `AWS_BEARER_TOKEN_BEDROCK`, or `AWS_PROFILE`, or `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`, or `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`, or `AWS_CONTAINER_CREDENTIALS_FULL_URI`, or `AWS_WEB_IDENTITY_TOKEN_FILE` | Any one source |
 | `ant-ling` | `ANT_LING_API_KEY` | |
-| `anthropic` | `ANTHROPIC_API_KEY` | API key only. A value containing `sk-ant-oat` is ignored. `ANTHROPIC_OAUTH_TOKEN` is not read |
+| `anthropic` | `ANTHROPIC_API_KEY` | Saved Pi logins are also supported |
 | `azure` | `AZURE_OPENAI_API_KEY` | |
 | `baseten` | `BASETEN_API_KEY` | |
 | `cerebras` | `CEREBRAS_API_KEY` | |
@@ -717,7 +736,7 @@ None of these are required. A built-in provider is registered when its credentia
 
 The full commented list is in `.env.example`. No dependency was added for this; the file parser is a few lines in `src/env-file.ts`.
 
-Model turns also add pi-durable `pi.usage` token totals, and the session is charged the larger of that delta and one interpreter turn. Approval and rejection do not spend the budget. A session over its cap refuses new work.
+Each model turn sums its SDK assistant-message token usage, and the bot is charged the larger of that total and one configured turn. Approval and rejection do not spend the budget. A session over its cap refuses new work.
 
 `yewholt admin budget <name> <tokens>` changes a cap while the daemon is stopped. `admin keys` and `admin bots` are safe while it is up. Do not open the SQLite file from a second process; pi-durable allows one writer.
 

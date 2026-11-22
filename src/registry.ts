@@ -28,7 +28,7 @@ export type BotRecord = {
   shutdownEventIds?: string[];
 };
 
-/** A chat message a `code` bot is answering. Kept until its reply is stored, so a restart re-attaches to it. */
+/** An unfinished chat turn. A restart cancels it rather than replaying tool side effects. */
 export type CodeTurn = {
   relay?: { url: string; primary: boolean };
   requestId: string;

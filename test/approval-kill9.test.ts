@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 
 const worker = fileURLToPath(new URL("./helpers/approval-worker.js", import.meta.url));
 
-test("approval survives kill -9 while parked: approve after reopen runs the command exactly once", { timeout: 60_000 }, async () => {
+test("restart cancels pending approvals and interrupted turns without replaying side effects", { timeout: 60_000 }, async () => {
   const dir = mkdtempSync(join(tmpdir(), "yewholt-approval-kill9-"));
   try {
     const first = spawn(process.execPath, [worker, "park", dir], { stdio: "inherit" });
@@ -25,16 +25,17 @@ test("approval survives kill -9 while parked: approve after reopen runs the comm
 
     const second = spawn(process.execPath, [worker, "approve", dir], { stdio: "inherit" });
     assert.equal(await exitOf(second), 0);
-    assert.equal(readFileSync(ran, "utf8"), "ran\n");
+    assert.equal(existsSync(ran), false);
     const approved = JSON.parse(readFileSync(join(dir, "approve.json"), "utf8")) as { replies: string[]; approvals: unknown[]; turns: unknown[] };
     assert.deepEqual(approved.approvals, []);
     assert.deepEqual(approved.turns, []);
-    assert.ok(approved.replies.some((text) => /done\[ok\]/.test(text)), approved.replies.join("\n---\n"));
+    assert.ok(approved.replies.some((text) => /daemon restarted; request .* was cancelled, ask again/i.test(text)), approved.replies.join("\n---\n"));
+    assert.ok(approved.replies.some((text) => /Interrupted by a restart, send it again/.test(text)));
 
     // A further restart has nothing left to run.
     const third = spawn(process.execPath, [worker, "idle", dir], { stdio: "inherit" });
     assert.equal(await exitOf(third), 0);
-    assert.equal(readFileSync(ran, "utf8"), "ran\n");
+    assert.equal(existsSync(ran), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
