@@ -575,6 +575,8 @@ A bot whose stored permissions include `code` is a coding agent. It reads, write
 
 `code` is granted or revoked in the agent provisioning file. A permission change disposes the cached SDK session before the next turn. Code bots get Pi’s built-in read/write/edit and an isolated bash tool, plus tool search, MCP and trusted extension tools. Yewholt’s inline `tool_call` approval gate runs before built-in filesystem and shell calls.
 
+The same gate covers built-in calls nested through `codemode` scripts or through a tool-search-loaded extension's `ctx.executeTool()`. Non-code bots cannot reach bash or write through either route.
+
 The bot's instructions say it has a workspace, which tools it has, and what needs approval. Bots without `code` are told that read is limited to installed skill files.
 
 #### Workspace
@@ -665,7 +667,7 @@ Run `/login` inside `yewholt`, or log in with an API key from the terminal. For 
 yewholt code auth login deepseek --api-key
 ```
 
-The daemon reads API keys and supported OAuth logins from the same Pi `auth.json`; there is nothing to copy. For example, log in to `openai-codex` in Pi to list and use ChatGPT/Codex subscription models in Buzz. Provider support and login flows match Pi's SDK. Log in on the machine running the daemon, with the same Unix user and HOME it uses. Pi defaults to `~/.pi/agent/auth.json`; if you set `PI_CODING_AGENT_DIR`, use the same absolute directory for login and the daemon. The daemon's `--home` changes Yewholt's state directory, not Pi's. Keep the auth file private to the daemon user. Restart the daemon after logging in, changing a key, or logging out so it rebuilds its model catalog.
+The daemon reads API keys and supported OAuth logins from the same Pi `auth.json`; there is nothing to copy. For example, log in to `openai-codex` in Pi to list and use ChatGPT/Codex subscription models in Buzz. Anthropic remains API-key only: Claude subscription OAuth and `sk-ant-oat` tokens are refused. Log in on the machine running the daemon, with the same Unix user and HOME it uses. Pi defaults to `~/.pi/agent/auth.json`; if you set `PI_CODING_AGENT_DIR`, use the same absolute directory for login and the daemon. The daemon's `--home` changes Yewholt's state directory, not Pi's. Keep the auth file private to the daemon user. Restart the daemon after logging in, changing a key, or logging out so it rebuilds its model catalog.
 
 OAuth request authentication and token refresh use Pi's built-in provider flows. Refreshed tokens are persisted to the same `auth.json` using Pi's file-locked credential store, preserving other logins and serializing concurrent refreshes with the Pi app. Token refresh does not require a daemon restart; failed refreshes fail the request rather than using an expired token.
 
@@ -677,13 +679,13 @@ You can also supply provider keys in the daemon's environment or `$YEWHOLT_HOME/
 
 Daemon model streams request `Accept-Encoding: identity` through Pi's request-header options for providers that support custom HTTP headers. This avoids raw gzip SSE responses and `Stream ended without finish_reason` errors with Node 26.0's native fetch and a dependency-installed Undici dispatcher. It does not change global fetch or dispatcher settings.
 
-None of these are required. A built-in provider is registered when its credential resolves from the environment, a saved Pi API key, or a saved OAuth login supported by that provider. Usable environment credentials retain precedence over saved credentials. The set is `builtinProviders()` from `@earendil-works/pi-ai` 1.6.0.
+None of these are required. A built-in provider is registered when its credential resolves from the environment, a saved Pi API key, or a saved OAuth login supported by that provider (except Anthropic). Usable environment credentials retain precedence over saved credentials. The set is `builtinProviders()` from `@earendil-works/pi-ai` 1.6.0.
 
 | Provider | Env | Notes |
 |---|---|---|
 | `amazon-bedrock` | `AWS_BEARER_TOKEN_BEDROCK`, or `AWS_PROFILE`, or `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`, or `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`, or `AWS_CONTAINER_CREDENTIALS_FULL_URI`, or `AWS_WEB_IDENTITY_TOKEN_FILE` | Any one source |
 | `ant-ling` | `ANT_LING_API_KEY` | |
-| `anthropic` | `ANTHROPIC_API_KEY` | Saved Pi logins are also supported |
+| `anthropic` | `ANTHROPIC_API_KEY` | API key only. A value containing `sk-ant-oat` is ignored. `ANTHROPIC_OAUTH_TOKEN` is not read |
 | `azure` | `AZURE_OPENAI_API_KEY` | |
 | `baseten` | `BASETEN_API_KEY` | |
 | `cerebras` | `CEREBRAS_API_KEY` | |

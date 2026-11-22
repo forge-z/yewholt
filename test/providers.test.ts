@@ -8,6 +8,7 @@ import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { MemoryStorage } from "@earendil-works/pi-durable";
 import { ensureEnvFile, loadEnvFile } from "../src/env-file.js";
 import { catalogHas, loadModels, parseModelLabel } from "../src/models.js";
+import { botModelRuntime } from "../src/bot-session.js";
 import { Yewholt } from "../src/session.js";
 
 const readmePath = fileURLToPath(new URL("../../README.md", import.meta.url));
@@ -58,7 +59,7 @@ function oauthCredential(expires = Date.now() + 3_600_000) {
   return { type: "oauth", access: `test.${payload}.signature`, refresh: "test-refresh", expires };
 }
 
-test("SDK daemon catalog shares Pi's supported OAuth logins", async (t) => {
+test("saved OAuth logins list every supporting built-in provider except Anthropic in the daemon catalog", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "yewholt-oauth-catalog-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const providers = builtinProviders().filter((provider) => provider.auth.oauth);
@@ -73,7 +74,7 @@ test("SDK daemon catalog shares Pi's supported OAuth logins", async (t) => {
   try {
     const references = session.availableModelReferences();
     assert.ok(references.some((model) => model.startsWith("openai-codex/")));
-    assert.ok(references.some((model) => model.startsWith("anthropic/")));
+    assert.ok(!references.some((model) => model.startsWith("anthropic/")));
   } finally {
     await session.close();
   }
@@ -179,6 +180,47 @@ test("Anthropic registers an API key and refuses subscription tokens", async () 
   const models = await loadModels({ ANTHROPIC_API_KEY: "sk-ant-api03-test" });
   assert.deepEqual(models.getProviders().map((provider) => provider.id), ["anthropic"]);
   assert.equal(catalogHas(models, parseModelLabel("anthropic/claude-sonnet-4-5")), true);
+});
+
+test("SDK Anthropic auth is API-key only without changing the shared Pi credentials", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "yewholt-anthropic-policy-"));
+  const names = ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN"];
+  const original = names.map((name) => process.env[name]);
+  t.after(() => {
+    names.forEach((name, index) => {
+      if (original[index] === undefined) delete process.env[name];
+      else process.env[name] = original[index];
+    });
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const cases = [
+    { env: {}, saved: undefined, key: undefined },
+    { env: { ANTHROPIC_OAUTH_TOKEN: "sk-ant-oat01-test" }, saved: undefined, key: undefined },
+    { env: { ANTHROPIC_API_KEY: "sk-ant-oat01-test" }, saved: undefined, key: undefined },
+    { env: { ANTHROPIC_AUTH_TOKEN: "bearer-test" }, saved: undefined, key: undefined },
+    { env: { ANTHROPIC_API_KEY: "sk-ant-api03-env" }, saved: undefined, key: "sk-ant-api03-env" },
+    { env: {}, saved: oauthCredential(), key: undefined },
+    { env: {}, saved: { type: "api_key", key: "sk-ant-oat01-stored" }, key: undefined },
+    { env: {}, saved: { type: "api_key", key: "sk-ant-api03-stored" }, key: "sk-ant-api03-stored" },
+    { env: { ANTHROPIC_API_KEY: "sk-ant-api03-env" }, saved: oauthCredential(), key: "sk-ant-api03-env" },
+    { env: { ANTHROPIC_API_KEY: "sk-ant-api03-env" }, saved: { type: "api_key", key: "sk-ant-api03-stored" }, key: "sk-ant-api03-env" },
+  ];
+  for (const scenario of cases) {
+    for (const name of names) delete process.env[name];
+    Object.assign(process.env, scenario.env);
+    const content = JSON.stringify({ anthropic: scenario.saved, deepseek: { type: "api_key", key: "deepseek-test" } });
+    const path = join(dir, "auth.json");
+    writeFileSync(path, content, { mode: 0o600 });
+    const runtime = await botModelRuntime(dir);
+    try {
+      assert.equal(runtime.getProvider("anthropic")?.auth.oauth, undefined);
+      assert.equal(runtime.isUsingOAuth("anthropic"), false);
+      assert.equal(runtime.getAvailableSnapshot().some((model) => model.provider === "anthropic"), scenario.key !== undefined);
+      assert.equal((await runtime.getAuth("anthropic"))?.auth.apiKey, scenario.key);
+      assert.equal((await runtime.getAuth("deepseek"))?.auth.apiKey, "deepseek-test");
+      assert.equal(readFileSync(path, "utf8"), content);
+    } finally { await runtime.settleCredentialWrites(); }
+  }
 });
 
 test("every api-key provider registers from the env vars it asks for", async () => {

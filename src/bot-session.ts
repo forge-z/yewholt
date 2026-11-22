@@ -1,7 +1,8 @@
 import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { Models } from "@earendil-works/pi-ai";
+import type { Credential, CredentialStore, Models } from "@earendil-works/pi-ai";
+import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import {
   createAgentSession, createBashToolDefinition, createCodemodeExtension, createMcpExtension,
   createToolSearchExtension, DefaultResourceLoader, getAgentDir, ModelRuntime,
@@ -9,6 +10,7 @@ import {
   type AgentSession, type ExtensionFactory, type LoadedMcpConfig, type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { judgeCall, type ApprovalAsk } from "./coding.js";
+import { anthropicApiKeyOnly } from "./models.js";
 import type { BotRecord } from "./registry.js";
 import { physicalPath, toolPath, within, workspaceCommand, workspaceId, type Roots } from "./workspace.js";
 import { runWorkspaceCommand } from "./workspace-process.js";
@@ -22,13 +24,37 @@ export type BotSessionHost = {
 };
 
 export async function botModelRuntime(agentDir: string, models?: Models): Promise<ModelRuntime> {
+  const { AuthStorage } = await import(new URL("./core/auth-storage.js",
+    import.meta.resolve("@earendil-works/pi-coding-agent")).href) as {
+      AuthStorage: { create(path: string): CredentialStore };
+    };
+  const stored = AuthStorage.create(join(agentDir, "auth.json"));
+  const allowed = (id: string, credential: Credential | undefined): Credential | undefined =>
+    id !== "anthropic" || (credential?.type === "api_key" && !credential.key?.includes("sk-ant-oat"))
+      ? credential : undefined;
+  const credentials: CredentialStore = {
+    read: async (id, options) => {
+      if (id === "anthropic" && process.env.ANTHROPIC_API_KEY?.trim() && !process.env.ANTHROPIC_API_KEY.includes("sk-ant-oat")) return undefined;
+      return allowed(id, await stored.read(id, options));
+    },
+    list: async (options) => {
+      const entries = await stored.list(options);
+      const anthropic = allowed("anthropic", await stored.read("anthropic", options));
+      return entries.filter((entry) => entry.providerId !== "anthropic" || anthropic !== undefined);
+    },
+    modify: async (id, fn, options) => allowed(id, await stored.modify(id, async (current) => {
+      const next = await fn(allowed(id, current));
+      if (next && !allowed(id, next)) throw new Error("Anthropic requires an API key; subscription OAuth tokens are refused.");
+      return next;
+    }, options)),
+    delete: (id, options) => stored.delete(id, options),
+  };
   const runtime = await ModelRuntime.create({
-    authPath: join(agentDir, "auth.json"), modelsPath: join(agentDir, "models.json"),
+    credentials, modelsPath: join(agentDir, "models.json"), refreshOnCreate: false,
   });
-  if (models) {
-    for (const provider of models.getProviders()) runtime.registerNativeProvider(provider);
-    await runtime.refresh({ allowNetwork: false });
-  }
+  if (models) for (const provider of models.getProviders()) runtime.registerNativeProvider(provider);
+  runtime.registerNativeProvider(anthropicApiKeyOnly(anthropicProvider()));
+  await runtime.refresh({ allowNetwork: false });
   return runtime;
 }
 

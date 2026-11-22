@@ -27,7 +27,7 @@ function officialProviders(): Provider[] {
  * OAuth access token (`sk-ant-oat`) is refused. Mirrors pi-bot
  * `anthropicApiKeyProvider`.
  */
-function anthropicApiKeyOnly(provider: Provider): Provider {
+export function anthropicApiKeyOnly(provider: Provider): Provider {
   const apiKey = provider.auth.apiKey;
   if (!apiKey) return provider;
   return {
