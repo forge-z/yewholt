@@ -10,6 +10,10 @@ type Launchctl = (args: string[]) => { status: number | null; stderr?: string; e
 
 const runLaunchctl: Launchctl = (args) => spawnSync("/bin/launchctl", args, { encoding: "utf8" });
 
+function pause(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 function string(value: string): string {
   return "<string>" + value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;") + "</string>";
 }
@@ -67,6 +71,9 @@ export function launchAgent(home: string, {
         if (!succeeded(result)) {
           throw new Error(`Could not stop the macOS daemon LaunchAgent: ${result.stderr?.trim() || result.status}`);
         }
+        // launchd can still list the job right after bootout; a start in that window would skip bootstrap.
+        const started = Date.now();
+        while (loaded() && Date.now() - started < 10_000) pause(100);
       }
       rmSync(plist, { force: true });
     },

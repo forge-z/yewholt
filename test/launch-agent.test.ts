@@ -13,18 +13,22 @@ function fixture(t: TestContext) {
   const agentsDir = join(userHome, "Library", "LaunchAgents");
   const calls: string[][] = [];
   let loaded = false;
+  let lingering = 0;
+  let linger = 0;
   let failure: string | undefined;
   const agent = launchAgent(home, {
     platform: "darwin", userHome, uid: 501,
     run: (args) => {
       calls.push(args);
       if (args[0] === failure) return { status: 5, stderr: "launchctl failed" };
-      if (args[0] === "print") return { status: loaded ? 0 : 113 };
+      if (args[0] === "print") return { status: loaded || lingering-- > 0 ? 0 : 113 };
       loaded = args[0] === "bootstrap";
+      if (args[0] === "bootout") lingering = linger;
       return { status: 0 };
     },
   })!;
-  return { agent, agentsDir, calls, fail: (command: string) => { failure = command; } };
+  return { agent, agentsDir, calls, fail: (command: string) => { failure = command; },
+    linger: (prints: number) => { linger = prints; } };
 }
 
 test("user LaunchAgent starts at login, uses the selected daemon home and stops persistently", (t) => {
@@ -45,7 +49,7 @@ test("user LaunchAgent starts at login, uses the selected daemon home and stops 
   agent.start("/repo <one>/dist/src/cli.js");
   agent.stop();
   assert.deepEqual(calls, [
-    ["print", service], ["bootstrap", "gui/501", plist], ["print", service], ["print", service], ["bootout", service],
+    ["print", service], ["bootstrap", "gui/501", plist], ["print", service], ["print", service], ["bootout", service], ["print", service],
   ]);
   assert.equal(agent.installed(), false);
   assert.equal(existsSync(plist), false);
@@ -60,6 +64,15 @@ test("a failed bootstrap leaves no new login job and a failed bootout keeps the 
   agent.start("/repo/cli.js");
   assert.throws(() => agent.stop(), /Could not stop.*launchctl failed/);
   assert.equal(agent.installed(), true);
+});
+
+test("stop waits until launchd forgets the job so an immediate start bootstraps again", (t) => {
+  const { agent, calls, linger } = fixture(t);
+  linger(2);
+  agent.start("/repo/cli.js");
+  agent.stop();
+  agent.start("/repo/cli.js");
+  assert.deepEqual(calls.map(([command]) => command), ["print", "bootstrap", "print", "bootout", "print", "print", "print", "print", "bootstrap"]);
 });
 
 test("Linux does not use launchctl", () => {
