@@ -11,7 +11,8 @@ import { BotLinks, Inbox, publishAll } from "./bridge.js";
 import { accepted, RelayClient, type RelayLoopback } from "./nostr-client.js";
 import { ownerAuthTag, pubkeyOf, signEvent, type NostrEvent } from "./nostr.js";
 import { defaultModel } from "./models.js";
-import { daemonProfileEvent, machineLabel, readPairingOffer } from "./pairing-offer.js";
+import { daemonProfileEvent, readPairingOffer } from "./pairing-offer.js";
+import { publishServiceProfile } from "./service-profile.js";
 import { ownerKeyPath, pidPath, sqlitePath, statusPath } from "./paths.js";
 import type { BotRecord } from "./registry.js";
 import { sameRelay } from "./relay-url.js";
@@ -144,14 +145,14 @@ async function serve(
     primary ? Math.max(state.highWater, state.highWaterByRelay?.[relayUrl] ?? 0) : state.highWaterByRelay?.[relayUrl];
   try {
     await owner.connect(5000);
-    const publishProfile = (afterPairing = false) => {
-      const offer = readPairingOffer(control.home);
-      const open = offer && sameRelay(offer.relayUrl, relayUrl) ? offer : undefined;
-      const name = daemonName() ?? (open || afterPairing ? machineLabel() : undefined);
-      if (!name) return Promise.resolve();
-      return agentRelayDeadline(owner.publish(daemonProfileEvent(ownerSecret, control.pubkey, name, open))).then((result) => {
-        if (!accepted(result)) console.error(`relay ${relayUrl}: daemon profile rejected`);
-      }, () => console.error(`relay ${relayUrl}: daemon profile not acknowledged`));
+    let profileWork = Promise.resolve();
+    const publishProfile = () => {
+      profileWork = profileWork.then(() => publishServiceProfile(owner, control.pubkey, (current) => {
+        const offer = readPairingOffer(control.home);
+        const open = offer && sameRelay(offer.relayUrl, relayUrl) ? offer : undefined;
+        return daemonProfileEvent(ownerSecret, control.pubkey, daemonName(), open, undefined, current);
+      })).catch(() => console.error(`relay ${relayUrl}: daemon profile not updated`));
+      return profileWork;
     };
     void publishProfile();
     if (doze.enabled) {
@@ -271,7 +272,7 @@ async function serve(
             await refreshStatus();
           },
           reconcileModel: async () => { await reconcile(true); await refreshStatus(); },
-          paired: () => publishProfile(true),
+          paired: publishProfile,
           reconcileRemoval: async (pubkey) => {
             await reconcile(true);
             try {

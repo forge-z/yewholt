@@ -16,7 +16,7 @@ import { discoverRelayPubkey, readRelayMembers } from "../src/relay-discovery.js
 import { RelayClient } from "../src/nostr-client.js";
 import { pubkeyOf, verifyEvent, type NostrEvent } from "../src/nostr.js";
 import { OFFER_TAG, OWNER_TAG, offerKey, offerTag, pairingProof, writePairingOffer } from "../src/pairing-offer.js";
-import { waitForConfirmation } from "./relay.js";
+import { publishProviderProfile, waitForConfirmation } from "./relay.js";
 import { claimInvite, consentToPolicy, inviteRelayPubkey, relayOperator, withInviteInput, type Invite, type JoinOptions } from "../src/relay-join.js";
 import { normalizeRelay, sameRelay } from "../src/relay-url.js";
 import { targetIds } from "./install.js";
@@ -115,6 +115,7 @@ type Dependencies = {
   running: typeof readPid; log: (line: string) => void;
   members: (relay: string, secret: string) => Promise<ReadonlySet<string>>;
   checkModels: typeof checkTargetModels;
+  profile?: typeof publishProviderProfile;
   offers: (relay: string, secret: string, key: string, members: () => Promise<ReadonlySet<string>>) => Promise<PairingOfferFound[]>;
   pair: (relay: string, daemon: string, secret: string, event: NostrEvent, requestId: string) =>
     Promise<{ result: "confirmed" | "refused" | "timeout"; error?: string }>;
@@ -147,12 +148,13 @@ function offeringProfiles(events: Iterable<NostrEvent>, members: ReadonlySet<str
   }
   return [...newest.values()].flatMap((event) => {
     if (!offers(event)) return [];
-    let label = "";
+    let label = event.tags.find((tag) => tag[0] === OFFER_TAG)?.[2] ?? "";
     try {
       const profile: unknown = JSON.parse(event.content);
       const name = profile && typeof profile === "object" ? (profile as Record<string, unknown>).name : undefined;
-      if (typeof name === "string") label = name.replace(/[\p{Cc}\p{Cf}]/gu, "").trim().slice(0, 120);
+      if (!label && typeof name === "string") label = name;
     } catch { /* Unnamed daemons get a generic label. */ }
+    label = label.replace(/[\p{Cc}\p{Cf}]/gu, "").trim().slice(0, 120);
     return [{ daemon: event.pubkey, label: label || "Yewholt VM" }];
   });
 }
@@ -378,7 +380,13 @@ export async function joinMachines(invite: Invite, hosts: string[], options: Mac
   }
   secret ||= deps.identity();
   const provider = pubkeyOf(secret);
-  await attempt("Mac provider", async () => providerMember ? "already_member" : deps.claim(invite, consent, secret));
+  await attempt("Mac provider", async () => {
+    const status = providerMember ? "already_member" : await deps.claim(invite, consent, secret);
+    await deps.profile?.(invite.relayUrl, secret).catch(() => {
+      deps.log("Provider joined, but its profile was not updated. Retry with yh provider profile " + invite.relayUrl);
+    });
+    return status;
+  });
   if (local) await attempt(localName, async () => {
     const owner = localOwner!;
     const daemon = pubkeyOf(owner);
@@ -516,7 +524,7 @@ export async function joinCommunity(args: string[]): Promise<void> {
       acceptPolicy: parsed.values["accept-policy"], confirmAge: parsed.values["confirm-age"],
     }, ask) : await joinMachines(invite, parsed.values.ssh ?? [], {
       local: parsed.values.local, acceptPolicy: parsed.values["accept-policy"], confirmAge: parsed.values["confirm-age"],
-    }, ask);
+    }, ask, { profile: publishProviderProfile });
     process.exitCode = joinExitCode(summary);
   });
 }

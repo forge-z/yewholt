@@ -8,8 +8,10 @@ import { ownerKeyPath, yewholtHome } from "../src/paths.js";
 import { addPairing } from "../src/pairing.js";
 import { joinRelay } from "../src/relay-join.js";
 import { discoverableId, installProvider } from "./install.js";
+import { namedRelayMembers, publishProviderProfile } from "./relay.js";
 import { ProviderSecrets } from "./secrets.js";
 import { InvalidTargetRelay, targetFile, validateTarget } from "./target.js";
+import { normalizeRelay } from "../src/relay-url.js";
 import { doctorTargets, listTargets } from "./status.js";
 
 class CliError extends Error {}
@@ -75,12 +77,32 @@ function parseTarget(id: string, args: string[]) {
 
 export async function providerCommand(command: "provider" | "targets" | "pair", args: string[]): Promise<void> {
   if (command === "provider" && args[0] === "join") {
-    return joinRelay(args.slice(1), () => ({ identity: () => new ProviderSecrets().identity() }));
+    return joinRelay(args.slice(1), (relay) => {
+      const identity = () => new ProviderSecrets().identity();
+      return { identity, finish: async () => {
+        try {
+          await publishProviderProfile(relay, identity());
+        } catch {
+          console.error("Provider joined, but its profile was not updated. Retry with yh provider profile " + relay);
+        }
+      } };
+    });
+  }
+  if (command === "provider" && (args[0] === "profile" || args[0] === "members")) {
+    const relay = args.length === 2 && normalizeRelay(args[1]);
+    if (!relay) throw new CliError("Usage: yh provider " + args[0] + " <relay-url>");
+    const secret = new ProviderSecrets().identity(false);
+    if (args[0] === "members") console.log(JSON.stringify(await namedRelayMembers(relay, secret), null, 2));
+    else {
+      await publishProviderProfile(relay, secret);
+      console.log("Provider profile is up to date.");
+    }
+    return;
   }
   try {
     if (command === "pair") return printPairing();
     if (command === "provider") {
-      if (args.length !== 1 || args[0] !== "install") throw new CliError("Usage: yewholt provider install | join [<invite-url>]");
+      if (args.length !== 1 || args[0] !== "install") throw new CliError("Usage: yewholt provider install | join [<invite-url>] | profile <relay-url> | members <relay-url>");
       const plugin = installProvider();
       console.log("Buzz plugin folder: " + plugin);
       return printPairing();

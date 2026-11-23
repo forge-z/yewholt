@@ -3,8 +3,9 @@ import { rmSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { readJson, record, writePrivateJson } from "./control-files.js";
-import { pubkeyOf, signEvent, verifyAuthSignature, type NostrEvent } from "./nostr.js";
+import { pubkeyOf, verifyAuthSignature, type NostrEvent } from "./nostr.js";
 import { normalizeRelay } from "./relay-url.js";
+import { serviceProfileEvent, serviceProfileName } from "./service-profile.js";
 
 /** A daemon joined from its own machine waits for the provider that holds the same invite. */
 export type PairingOffer = { key: string; relayUrl: string; label: string; createdAt: number; expiresAt: number; owner?: string };
@@ -60,9 +61,14 @@ export function removePairingOffer(home: string): void {
 }
 
 /** The daemon's kind 0 profile, tagged while a pairing offer is open. */
-export function daemonProfileEvent(secret: string, daemon: string, name: string, offer?: PairingOffer, createdAt?: number): NostrEvent {
-  return signEvent(secret, 0, JSON.stringify({ name, display_name: name, about: "Yewholt daemon" }),
-    offer ? [[OFFER_TAG, offerTag(offer.key, daemon)], ...(offer.owner ? [[OWNER_TAG, offer.owner]] : [])] : [], createdAt);
+export function daemonProfileEvent(secret: string, daemon: string, name?: string, offer?: PairingOffer, createdAt?: number): NostrEvent;
+export function daemonProfileEvent(secret: string, daemon: string, name: string | undefined, offer: PairingOffer | undefined,
+  createdAt: number | undefined, current: NostrEvent | undefined): NostrEvent | undefined;
+export function daemonProfileEvent(secret: string, daemon: string, name?: string, offer?: PairingOffer, createdAt?: number,
+  current?: NostrEvent): NostrEvent | undefined {
+  const tags = offer ? [[OFFER_TAG, offerTag(offer.key, daemon), name ?? offer.label], ...(offer.owner ? [[OWNER_TAG, offer.owner]] : [])] : [];
+  return serviceProfileEvent(secret, serviceProfileName("daemon"), current,
+    { name, tags, managedTags: [OFFER_TAG, OWNER_TAG], createdAt });
 }
 
 /**

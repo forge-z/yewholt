@@ -131,6 +131,7 @@ async function fixture(t: TestContext) {
     const setup = `
       const { RelayClient } = await import(${JSON.stringify(new URL("../src/nostr-client.js", import.meta.url).href)});
       RelayClient.prototype.connect = async () => {};
+      RelayClient.prototype.publish = async () => ({ ok: true, message: "" });
       RelayClient.prototype.subscribe = function(id, filters, onEvent, onClosed, onEose) {
         onEvent(${JSON.stringify(signEvent(relayIdentity.secret, 39000, "", [["d", "test"]]))});
         onEose?.();

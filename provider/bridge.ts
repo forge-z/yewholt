@@ -10,7 +10,7 @@ import { generateKeyPair, verifyAuthSignature } from "../src/nostr.js";
 import { sameRelay } from "../src/relay-url.js";
 import { targetIds } from "./install.js";
 import { addOwnerOfferTargets } from "./join.js";
-import { sendControl, waitForConfirmation, type RelayWait } from "./relay.js";
+import { publishProviderProfile, sendControl, waitForConfirmation, type RelayWait } from "./relay.js";
 import { ProviderSecrets } from "./secrets.js";
 import { recordOutcome } from "./status.js";
 import { InvalidTargetRelay, loadTarget, privateJson, providerHome, relayUrl, targetRelays, validId, type Target } from "./target.js";
@@ -110,8 +110,12 @@ async function modelCatalog(target: Extract<Target, { transport: "relay" }>, sec
 /** A VM its operator joined from the VM itself shows up as a target; discovery never blocks the list for long. */
 async function discoverOwnerTargets(community: string): Promise<void> {
   let timer: NodeJS.Timeout | undefined;
+  const secret = new ProviderSecrets().identity();
   await Promise.race([
-    addOwnerOfferTargets(community, new ProviderSecrets().identity()).catch(() => []),
+    Promise.all([
+      addOwnerOfferTargets(community, secret).catch(() => []),
+      publishProviderProfile(community, secret).catch(() => undefined),
+    ]),
     new Promise((resolve) => { timer = setTimeout(resolve, 8_000); }),
   ]);
   clearTimeout(timer);
