@@ -209,7 +209,8 @@ export class Yewholt {
   async refreshModels(): Promise<void> {
     if (this.modelRefresh) return this.modelRefresh;
     const inputs = modelInputs(this.agentDir, this.options.reloadModelEnv ? envFilePath(this.options.home) : undefined);
-    if (inputs.env === this.inputs.env && inputs.settings === this.inputs.settings && inputs.catalog === this.inputs.catalog) return;
+    if (inputs.env === this.inputs.env && inputs.settings === this.inputs.settings && inputs.catalog === this.inputs.catalog &&
+        this.runtime.getAvailableSnapshot().length) return;
     this.modelRefresh = (async () => {
       if (inputs.env !== this.inputs.env) this.options.reloadModelEnv?.();
       if (inputs.settings !== this.inputs.settings) await reloadBotProviders(this.agentDir, this.runtime);

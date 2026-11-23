@@ -81,7 +81,7 @@ test("the Buzz picker drops a cached target when the bridge says its file is mis
         onStdout(JSON.stringify(JSON.parse(input).op === "targets"
           ? { ok: true, targets: ["stale", "live"], relays: { stale: "wss://community.example", live: "wss://community.example" } }
           : { ok: false, code: "target_missing", error: "Reopen the target list." }));
-      }, exited: Promise.resolve(0) };
+      }, async kill() {}, exited: Promise.resolve(0) };
     } },
     react: {
       createElement: (...parts: unknown[]) => parts,

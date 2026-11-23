@@ -69,6 +69,7 @@ export async function reloadBotProviders(agentDir: string, runtime: ModelRuntime
     settingsManager: SettingsManager.create(agentDir, agentDir, { projectTrusted: false }),
     resourceLoaderOptions: { noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true },
   });
+  await runtime.refresh({ allowNetwork: false });
 }
 
 export async function createBotSession(
