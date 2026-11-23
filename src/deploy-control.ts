@@ -127,7 +127,18 @@ export class DeployControl {
                 body.offset < 0 || !effects?.models ||
                 (this.scope && (body.relay !== undefined || pairingRelay) &&
                   !(typeof body.relay === "string" && sameRelay(body.relay, relay)))) confirmation.error = "model catalog unavailable";
-            else confirmation.catalog = modelPage(effects.models(), body.offset);
+            else {
+              const models = effects.models();
+              confirmation.catalog = modelPage(models, body.offset);
+              if (body.doctor === true && body.offset === 0 && !models.length) {
+                const missing = await effects.piLoginMissing?.();
+                if (authorized()) confirmation.piLoginMissing = missing;
+                else {
+                  delete confirmation.catalog;
+                  confirmation.error = "provider not paired";
+                }
+              }
+            }
           } else {
             const isReserved = envelope.agentPubkey === this.pubkey || await reserved(envelope.agentPubkey);
             if (!authorized()) confirmation.error = "provider not paired";

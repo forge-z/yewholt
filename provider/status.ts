@@ -1,9 +1,12 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { record, writePrivateJson } from "../src/control-files.js";
+import { isModelReference } from "../src/control-protocol.js";
+import { pubkeyOf } from "../src/nostr.js";
 import { RelayClient } from "../src/nostr-client.js";
 import { targetIds } from "./install.js";
+import { probeModelCatalog } from "./relay.js";
 import { InvalidTargetRelay, loadTarget, privateJson, providerHome, targetRelays, type Target } from "./target.js";
 import { ProviderSecrets } from "./secrets.js";
 
@@ -91,17 +94,44 @@ export function listTargets(): void {
   }
 }
 
-async function probe(target: Target, secret: string | undefined): Promise<string> {
-  if (!secret) return "not tested (run yewholt provider install)";
+const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+
+async function probe(id: string, target: Target, secret: string | undefined): Promise<{ ok: boolean; message: string }> {
+  const fail = (message: string) => ({ ok: false, message });
+  if (!secret) return fail("Provider identity missing; run yh provider install on this machine.");
   const client = new RelayClient(target.relay, secret, undefined, false);
   const start = performance.now();
+  const host = target.ssh ? "target host (" + target.ssh + ")" : "target host";
+  const login = `on the ${host}, run yh as the daemon user (same HOME and PI_CODING_AGENT_DIR), then enter /login`;
+  const restart = "restart the daemon (yh stop && yh start for a CLI-managed daemon)";
+  const admit = "ask the relay administrator to run buzz-admin add-member --pubkey " + pubkeyOf(secret) + " for this relay";
+  const relayFix = `restore the relay at ${safeText(target.relay)} or rerun yh targets add ${id} --relay <reachable-url> --daemon ${target.daemonPubkey} with any other relay, label and wake options`;
   let opened = false;
+  let authenticated = false;
   try {
     await client.connect(4_000, () => { opened = true; });
-    return "reachable, NIP-42 authenticated; connect + AUTH latency " +
-      Math.round(performance.now() - start) + " ms";
+    authenticated = true;
+    const latency = Math.round(performance.now() - start);
+    const result = await probeModelCatalog(client, target, secret, randomUUID(), 4_000);
+    if (result === "relay") return fail(`Relay control request not acknowledged; ${admit} and check that the relay allows kind 1059 traffic.`);
+    if (result === "daemon") return fail(`Daemon offline or not responding; on the ${host}, run yh start as the daemon user (or start its configured service). If already running, run yh status and verify this relay and daemon pubkey.`);
+    if (!result.ok && result.error === "provider not paired") {
+      return fail(`Provider not paired; on the ${host}, run yh pair add ${pubkeyOf(secret)} --label ${id} --relay ${quote(new URL(target.relay).href)} as the daemon user.`);
+    }
+    const catalog = result.catalog;
+    if (!result.ok || !record(catalog) || !Array.isArray(catalog.models) || !catalog.models.every(isModelReference) ||
+        (catalog.next !== undefined && (!catalog.models.length || catalog.next !== catalog.models.length))) {
+      return fail(`Model catalog unavailable; run yh update on the ${host}, ${restart}, then rerun yh targets doctor ${id}.`);
+    }
+    if (!catalog.models.length) {
+      if (result.piLoginMissing === true) return fail(`Pi login missing for the daemon user (model catalog empty); ${login}; ${restart}.`);
+      return fail(`Model catalog empty; ${login} and select a supported provider; ${restart}.`);
+    }
+    return { ok: true, message: `OK — Relay reachable, NIP-42 authenticated; connect + AUTH latency ${latency} ms; daemon online, provider paired, models available.` };
   } catch {
-    return opened ? "reachable, NIP-42 AUTH failed or timed out" : "unreachable or timed out";
+    if (authenticated) return fail(`Relay control request failed; ${admit} and check that the relay allows kind 1059 traffic.`);
+    if (opened) return fail(`Relay reachable, NIP-42 AUTH failed or timed out; ${admit}.`);
+    return fail(`Relay unreachable or timed out; ${relayFix}.`);
   } finally {
     await client.close();
   }
@@ -117,8 +147,8 @@ export async function doctorTargets(id?: string): Promise<void> {
     try {
       target = loadTarget(id);
     } catch (error) {
-      if (error instanceof InvalidTargetRelay) throw error;
-      throw new Error("Invalid or missing target configuration");
+      return [{ ok: false, configError: true, message: id + ": " + (error instanceof InvalidTargetRelay
+        ? error.message : "Invalid or missing target configuration; run yh targets add " + id + " --relay <url> --daemon <pubkey>.") }];
     }
     if (!identityLoaded) {
       identityLoaded = true;
@@ -130,16 +160,13 @@ export async function doctorTargets(id?: string): Promise<void> {
     }
     const relays = targetRelays(target);
     return Promise.all(relays.map(async (relay) => {
-      const route = { ...target, relay };
-      const { lastDeploy } = evidence(id, route);
-      return [
-        id + (relays.length === 1 ? ":" : " (" + safeText(relay) + "):"),
-        "  Relay: " + await probe(route, identity),
-        "  Pairing / daemon: " + daemonEvidence(lastDeploy) + " (recorded evidence only; no live daemon probe)",
-        "  Last confirmation: " + date(lastDeploy),
-        "  Daemon version: unavailable (control v1 does not report it)",
-      ];
+      const { ok, message } = await probe(id, { ...target, relay }, identity);
+      return { ok, configError: false, message: id + (relays.length === 1 ? ": " : " (" + safeText(relay) + "): ") + message };
     }));
   }));
-  for (const row of rows.flat()) console.log(row.join("\n"));
+  for (const { ok, configError, message } of rows.flat()) {
+    if (configError) console.error(message);
+    else console.log(message);
+    if (!ok) process.exitCode = 1;
+  }
 }

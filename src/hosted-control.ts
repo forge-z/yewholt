@@ -21,6 +21,7 @@ export type HostedEffects = {
   reconcileRemoval: (pubkey: string) => Promise<void>;
   reconcileModel?: () => Promise<void>;
   models?: () => string[];
+  piLoginMissing?: () => Promise<boolean | undefined>;
   hasModel?: (choice: AgentProvisioning["model"]) => boolean;
 };
 

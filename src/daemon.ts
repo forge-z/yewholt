@@ -240,6 +240,7 @@ async function serve(
         const reply = await serialize(() => control.handle(event, async (pubkey) =>
           (await session.snapshot()).bots.some((bot) => bot.pubkey === pubkey && !bot.external), {
           models: () => session.availableModelReferences(),
+          piLoginMissing: () => session.piLoginMissing(),
           hasModel: (choice) => session.hasModel(choice),
           publishProfile: async (agent, profile) => {
             const client = new RelayClient(relayUrl, agent.nsec, agent.authTag, false, loopback);

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { once } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -8,7 +9,8 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { WebSocketServer } from "ws";
-import { generateKeyPair, ownerAuthTag } from "../src/nostr.js";
+import { CONTROL_KIND, controlEvent } from "../src/control-protocol.js";
+import { generateKeyPair, ownerAuthTag, type NostrEvent } from "../src/nostr.js";
 import { readPairing } from "../src/pairing.js";
 
 const cli = fileURLToPath(new URL("../src/cli.js", import.meta.url));
@@ -177,35 +179,118 @@ test("additional daemon relays keep legacy pairings separate and local targets a
   assert.deepEqual(JSON.parse(readFileSync(target("instabox"), "utf8")).relays, [secondary]);
 });
 
-test("targets doctor measures relay AUTH and never prints a relay-supplied refusal", async (t) => {
-  const { run, env } = fixture(t);
+test("targets doctor checks the live relay, daemon, pairing and model catalog without printing refusals", async (t) => {
+  const { home, run, env } = fixture(t);
   assert.equal(run("provider", "install").status, 0);
+  const piDir = join(home, "daemon-pi");
+  const daemonEnv = { ...env, PI_CODING_AGENT_DIR: piDir };
+  const invoke = (args: string[], envOverride = env) =>
+    exec(process.execPath, [cli, ...args], { env: envOverride, timeout: 20_000 });
+  const doctor = (...id: string[]) => invoke(["targets", "doctor", ...id]);
+  const failure = async (...id: string[]) => {
+    try {
+      await doctor(...id);
+      assert.fail("doctor should exit nonzero");
+    } catch (error) {
+      const result = error as { code: unknown; stdout: string; stderr: string };
+      assert.equal(result.code, 1);
+      return result;
+    }
+  };
   const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  t.after(async () => {
+    for (const ws of server.clients) ws.terminate();
+    if (server.address()) await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+  const closeServer = () => new Promise<void>((resolve) => server.close(() => resolve()));
+  let started = false;
   try {
     await new Promise<void>((resolve) => server.once("listening", resolve));
     const addr = server.address();
     assert.ok(addr && typeof addr === "object");
+    const relay = "ws://127.0.0.1:" + addr.port;
+    assert.equal(run("install", "--relay", relay, "--relay-pubkey", agent.pubkey).status, 0);
+    const owner = run("admin", "keys").stdout.match(/^owner ([a-f0-9]{64})$/m)![1];
     let allow = true;
+    let acceptRequest = true;
     server.on("connection", (ws) => {
+      let pubkey: string;
+      const subscriptions = new Map<string, string>();
       ws.send(JSON.stringify(["AUTH", "test"]));
       ws.on("message", (data) => {
-        const [type, event] = JSON.parse(data.toString());
-        assert.equal(type, "AUTH");
-        ws.send(JSON.stringify(["OK", event.id, allow, hidden + agent.secret]));
+        const [type, item, filter] = JSON.parse(data.toString());
+        if (type === "AUTH") {
+          pubkey = item.pubkey;
+          ws.send(JSON.stringify(["OK", item.id, allow, hidden + agent.secret]));
+        } else if (type === "REQ") {
+          if (filter.kinds?.includes(CONTROL_KIND)) subscriptions.set(item, pubkey);
+          ws.send(JSON.stringify(["EOSE", item]));
+          if (item === "deploy-control" && pubkey === owner) server.emit("daemon-ready");
+        } else if (type === "EVENT") {
+          const event: NostrEvent = item;
+          const accepted = event.kind !== CONTROL_KIND || acceptRequest;
+          ws.send(JSON.stringify(["OK", event.id, accepted, accepted ? "" : hidden]));
+          if (!accepted || event.kind !== CONTROL_KIND) return;
+          if (!started && subscriptions.has("deploy-confirmation")) {
+            const { requestId, agentPubkey } = JSON.parse(event.content);
+            const wrongSigner = controlEvent(agent.secret, pubkey, "confirmation", { requestId, agentPubkey },
+              { job: requestId, agentPubkey, ok: true, catalog: { models: ["fake/fake"] } });
+            ws.send(JSON.stringify(["EVENT", "deploy-confirmation", wrongSigner]));
+          }
+          server.emit("control-event", event);
+        }
       });
+      const forward = (event: NostrEvent) => {
+        for (const [id, recipient] of subscriptions) {
+          if (event.tags.some(([name, value]) => name === "p" && value === recipient)) {
+            ws.send(JSON.stringify(["EVENT", id, event]));
+          }
+        }
+      };
+      server.on("control-event", forward);
+      ws.once("close", () => server.off("control-event", forward));
     });
-    assert.equal(run("targets", "add", "vm", "--relay", "ws://127.0.0.1:" + addr.port, "--daemon", daemon.pubkey).status, 0);
-    const doctor = () => exec(process.execPath, [cli, "targets", "doctor", "vm"], { env, timeout: 7_000 });
-    const accepted = await doctor();
-    assert.match(accepted.stdout, /reachable, NIP-42 authenticated; connect \+ AUTH latency \d+ ms/);
-    assert.match(accepted.stdout, /no confirmation \(recorded evidence only; no live daemon probe\)/);
-    assert.match(accepted.stdout, /Daemon version: unavailable/);
+    assert.equal(run("targets", "add", "vm", "--relay", relay, "--daemon", owner).status, 0);
+    const offline = await failure("vm");
+    assert.match(offline.stdout, /^vm: Daemon offline or not responding;.*yh start.*\n$/);
     allow = false;
-    const rejected = await doctor();
+    const rejected = await failure("vm");
     assert.match(rejected.stdout, /reachable, NIP-42 AUTH failed or timed out/);
     assert.ok(!(rejected.stdout + rejected.stderr).includes(hidden) && !(rejected.stdout + rejected.stderr).includes(agent.secret));
+    allow = true;
+    acceptRequest = false;
+    const blocked = await failure("vm");
+    assert.match(blocked.stdout, /Relay control request not acknowledged.*buzz-admin add-member/);
+    assert.ok(!blocked.stdout.includes(hidden));
+    acceptRequest = true;
+
+    const start = async (settings: typeof daemonEnv & { DEEPSEEK_API_KEY?: string }) => {
+      started = true;
+      await Promise.all([once(server, "daemon-ready", { signal: AbortSignal.timeout(20_000) }), invoke(["start"], settings)]);
+    };
+    await start(daemonEnv);
+    const unpaired = await failure("vm");
+    const pubkey = run("pair").stdout.match(/Provider pubkey: ([a-f0-9]{64})/)![1];
+    assert.ok(unpaired.stdout.includes(`Provider not paired; on the target host, run yh pair add ${pubkey} --label vm --relay '${relay}/'`));
+    assert.equal(run("pair", "add", pubkey, "--label", "vm", "--relay", relay).status, 0);
+    const noLogin = await failure();
+    assert.match(noLogin.stdout, /^vm: Pi login missing for the daemon user \(model catalog empty\);.*then enter \/login;.*yh stop && yh start.*\n$/);
+    mkdirSync(piDir, { recursive: true });
+    writeFileSync(join(piDir, "auth.json"), JSON.stringify({ "unsupported-provider": { type: "api_key", key: hidden } }), { mode: 0o600 });
+    const empty = await failure("vm");
+    assert.match(empty.stdout, /^vm: Model catalog empty;.*then enter \/login.*yh stop && yh start.*\n$/);
+    assert.ok(!empty.stdout.includes(hidden));
+    await invoke(["stop"], daemonEnv);
+    rmSync(join(piDir, "auth.json"));
+    await start({ ...daemonEnv, DEEPSEEK_API_KEY: hidden });
+    const accepted = await doctor("vm");
+    assert.match(accepted.stdout, /reachable, NIP-42 authenticated; connect \+ AUTH latency \d+ ms/);
+    assert.match(accepted.stdout, /daemon online, provider paired, models available/);
   } finally {
-    for (const ws of server.clients) ws.terminate();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (started) await invoke(["stop"], daemonEnv);
   }
+  for (const ws of server.clients) ws.terminate();
+  await closeServer();
+  const unreachable = await failure("vm");
+  assert.match(unreachable.stdout, /^vm: Relay unreachable or timed out;.*yh targets add vm --relay <reachable-url> --daemon [a-f0-9]{64}.*\n$/);
 });

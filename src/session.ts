@@ -9,7 +9,7 @@ import { SessionManager, type AgentSession, type ModelRuntime } from "@earendil-
 import { PRESENCE, RUNTIME_PROFILE, presence, runtimeProfile, type AgentScan } from "./agents.js";
 import { APPROVAL_TTL_MS, type ApprovalAsk } from "./coding.js";
 import { isModelReference } from "./control-protocol.js";
-import { botModelRuntime, createBotSession, piDir } from "./bot-session.js";
+import { botModelRuntime, createBotSession, piDir, piLoginMissing } from "./bot-session.js";
 import { physicalPath, workspaceId, type Roots } from "./workspace.js";
 import { WorkspaceIsolation } from "./isolation.js";
 import { type ModelChoice } from "./models.js";
@@ -185,6 +185,10 @@ export class Yewholt {
   availableModelReferences(): string[] {
     return [...new Set(this.runtime.getAvailableSnapshot().map((model) => `${model.provider}/${model.id}`)
       .filter(isModelReference))].sort();
+  }
+
+  piLoginMissing(): Promise<boolean | undefined> {
+    return piLoginMissing(this.agentDir);
   }
 
   hasModel(choice: ModelChoice): boolean {
