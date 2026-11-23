@@ -18,7 +18,98 @@ import { DeployControl } from "../src/deploy-control.js";
 import { WorkspaceIsolation } from "../src/isolation.js";
 import { generateKeyPair, ownerAuthTag, pubkeyOf, verifyAuthSignature, verifyEvent, type NostrEvent } from "../src/nostr.js";
 import { addPairing } from "../src/pairing.js";
+import { writePairingOffer } from "../src/pairing-offer.js";
 import { Yewholt } from "../src/session.js";
+
+test("model lookup distinguishes a missing target, no reply, relay refusal and a closed pairing offer", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "yewholt-model-lookup-"));
+  const old = { ...process.env };
+  process.env.YEWHOLT_PROVIDER_HOME = join(root, "provider");
+  process.env.YEWHOLT_PROVIDER_FILE_STORAGE = "1";
+  t.after(() => {
+    for (const key of ["YEWHOLT_PROVIDER_HOME", "YEWHOLT_PROVIDER_FILE_STORAGE"]) {
+      if (old[key] === undefined) delete process.env[key];
+      else process.env[key] = old[key];
+    }
+    rmSync(root, { recursive: true, force: true });
+  });
+  const daemon = generateKeyPair(), owner = generateKeyPair();
+  const community = "wss://community.example";
+  const home = join(root, "daemon");
+  const target = "build-vm";
+  const request = { op: "models", target, community };
+  const expectFailure = async (message: RegExp, wait?: RelayWait) => {
+    const result = await bridge(request, wait);
+    assert.equal(result.ok, false);
+    assert.match(result.error, message);
+  };
+  assert.deepEqual(await bridge(request), { ok: false, code: "target_missing",
+    error: "This Yewholt target no longer exists. Reopen the target list to refresh it, then select a current machine." });
+  writePrivateJson(targetFile(target), { id: target, label: target, transport: "relay", relay: community, daemonPubkey: daemon.pubkey });
+  await expectFailure(/No model reply.*online/, async () => "timeout");
+  await expectFailure(/relay refused/, async () => "refused");
+  await expectFailure(/Could not send the model request/, async () => { throw Error("disconnected"); });
+  const control = new DeployControl(home, daemon.secret, { relayUrl: community,
+    model: { provider: "", modelId: "", label: "unset" } }, undefined, { primaryRelay: community });
+  const send: RelayWait = async (_target, secret, event, _request, _agent, _timeout, onConfirmation) => {
+    const reply = await control.handle(event, async () => false, { models: async () => ["test/offline"],
+      publishProfile: async () => {}, updateName: async () => {}, reconcileRemoval: async () => {} });
+    assert.ok(reply);
+    const envelope = verifiedEnvelope(reply, pubkeyOf(secret), "confirmation");
+    assert.ok(envelope);
+    const body = decryptControl(envelope, secret, daemon.pubkey) as Confirmation;
+    onConfirmation?.(body);
+    return body.ok ? "confirmed" : "refused";
+  };
+  await expectFailure(/not paired.*yh join --daemon/, send);
+  writePairingOffer(home, "invite", community, target, Date.now() - 1000, owner.pubkey);
+  assert.deepEqual(await bridge(request, send), { ok: true, models: ["test/offline"] });
+});
+
+test("the Buzz picker drops a cached target when the bridge says its file is missing", async () => {
+  const { apply } = await import(new URL("../../buzz-plugin/plugin.js", import.meta.url).href);
+  const state: unknown[] = [];
+  const effects: (() => void)[] = [];
+  let cursor = 0;
+  let picker!: (props: { config: { target: string }; onChange: () => void }) => unknown;
+  apply({
+    agents: { registerTab() {}, register({ CreateConfiguration }: { CreateConfiguration: typeof picker }) { picker = CreateConfiguration; } },
+    effect() {},
+    relay: { selected: () => "https://community.example" },
+    host: { async spawn(_kind: string, { onStdout }: { onStdout: (output: string) => void }) {
+      return { async end(input: string) {
+        onStdout(JSON.stringify(JSON.parse(input).op === "targets"
+          ? { ok: true, targets: ["stale", "live"], relays: { stale: "wss://community.example", live: "wss://community.example" } }
+          : { ok: false, code: "target_missing", error: "Reopen the target list." }));
+      }, exited: Promise.resolve(0) };
+    } },
+    react: {
+      createElement: (...parts: unknown[]) => parts,
+      useEffect: (effect: () => void) => effects.push(effect),
+      useState: (initial: unknown) => {
+        const index = cursor++;
+        if (!(index in state)) state[index] = initial;
+        return [state[index], (next: unknown) => { state[index] = typeof next === "function" ? next(state[index]) : next; }];
+      },
+      useSyncExternalStore: (_subscribe: unknown, get: () => unknown) => get(),
+    },
+  });
+  const render = () => {
+    cursor = 0;
+    effects.length = 0;
+    return JSON.stringify(picker({ config: { target: "stale" }, onChange() {} }));
+  };
+  render();
+  effects[0]();
+  await new Promise(setImmediate);
+  assert.match(render(), /"value":"stale"/);
+  effects[1]();
+  await new Promise(setImmediate);
+  const updated = render();
+  assert.doesNotMatch(updated, /"value":"stale"/);
+  assert.match(updated, /"value":"live"/);
+  assert.match(updated, /Reopen the target list/);
+});
 
 test("two targets provision independent agents in the same Buzz community", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "yewholt-shared-community-"));

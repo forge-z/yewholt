@@ -73,7 +73,7 @@ Usage:
   yewholt targets add <id> --local [--home dir] [--label <label>]
     [--wake command --cmd <command> | --wake instabox --account <id> --machine <id> | --wake url --url <url>]
   yewholt targets list
-  yewholt targets remove <id>
+  yewholt targets remove <id> --daemon <pubkey>
   yewholt targets doctor [id]
   yewholt pair                    Show the provider pubkey and pairing instructions
   yewholt pair add <providerPubkey> --label <label> [--relay <url>] [--home dir]

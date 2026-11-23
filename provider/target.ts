@@ -1,4 +1,4 @@
-import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readFileSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { record } from "../src/control-files.js";
@@ -70,9 +70,29 @@ export function loadTarget(id: string, home = providerHome()): Target {
   return validateTarget(id, privateJson(targetFile(id, home)));
 }
 
+export function findTarget(id: string, home = providerHome()): Target | undefined {
+  try { return loadTarget(id, home); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
 export function targetFile(id: string, home = providerHome()): string {
   if (!validId(id)) throw new Error("Invalid target id");
   return join(home, "targets", id + ".json");
+}
+
+export function removeTarget(id: string, daemon: string | undefined, home = providerHome()):
+  { state: "missing" | "removed" } | { state: "unconfirmed"; daemon: string } {
+  const target = findTarget(id, home);
+  if (!target) return { state: "missing" };
+  if (target.daemonPubkey !== daemon) return { state: "unconfirmed", daemon: target.daemonPubkey };
+  try { unlinkSync(targetFile(id, home)); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return { state: "missing" };
+  }
+  return { state: "removed" };
 }
 
 export function validateTarget(id: string, value: unknown): Target {

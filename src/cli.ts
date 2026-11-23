@@ -54,6 +54,8 @@ async function main(): Promise<void> {
   const home = (target.kind === "harness" || (target.kind === "command" && target.command === "install")
     ? undefined : flag("--home")) ?? yewholtHome();
   if (target.kind === "command" && target.command === "install") return install(target.args);
+  if (target.kind === "command" && target.command === "daemon") return runDaemon(home);
+  if (target.kind === "command" && target.command === "start") return start(home);
   loadEnvFile(home);
   if (target.kind === "harness") return runHarness(withDefaultModel(target.args, process.env));
   if (target.kind === "usage") {
@@ -61,16 +63,12 @@ async function main(): Promise<void> {
     process.exit(target.exitCode);
   }
   switch (target.command) {
-    case "start":
-      return start(home);
     case "stop":
       return stop(home);
     case "status":
       return status(home);
     case "admin":
       return admin(home, target.args);
-    case "daemon":
-      return runDaemon(home);
     case "pair":
       return pair(home, commandArgs(target.args));
     case "relay":

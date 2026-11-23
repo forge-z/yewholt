@@ -59,12 +59,16 @@ export async function botModelRuntime(agentDir: string, models?: Models): Promis
   });
   if (models) for (const provider of models.getProviders()) runtime.registerNativeProvider(provider);
   runtime.registerNativeProvider(anthropicApiKeyOnly(anthropicProvider()));
+  await reloadBotProviders(agentDir, runtime);
+  return runtime;
+}
+
+export async function reloadBotProviders(agentDir: string, runtime: ModelRuntime): Promise<void> {
   await createAgentSessionServices({
     cwd: agentDir, agentDir, modelRuntime: runtime,
     settingsManager: SettingsManager.create(agentDir, agentDir, { projectTrusted: false }),
     resourceLoaderOptions: { noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true },
   });
-  return runtime;
 }
 
 export async function createBotSession(

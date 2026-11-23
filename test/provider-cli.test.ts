@@ -64,7 +64,12 @@ test("provider install, target add, pair and remove end to end; install deletes 
   assert.equal(existsSync(legacy("vm")), false);
   assert.equal(run("provider", "install").stdout, initial.stdout);
   assert.match(run("targets", "list").stdout, /vm \(VM's \$\(ignored\)\)\twss:\/\/relay\.example\t[a-f0-9]{64} \(no confirmation\)\t—\t0\t—/);
-  assert.equal(run("targets", "remove", "vm").status, 0);
+  const unconfirmed = run("targets", "remove", "vm");
+  assert.equal(unconfirmed.status, 1);
+  assert.ok(unconfirmed.stderr.includes(`still configured for daemon ${daemon.pubkey}; nothing was removed`));
+  assert.equal(run("targets", "remove", "vm", "--daemon", agent.pubkey).status, 1);
+  assert.equal(existsSync(target("vm")), true);
+  assert.equal(run("targets", "remove", "vm", "--daemon", daemon.pubkey).status, 0);
   assert.equal(existsSync(target("vm")), false);
 });
 
@@ -315,12 +320,14 @@ test("targets doctor checks the live relay, daemon, pairing and model catalog wi
     assert.ok(unpaired.stdout.includes(`Provider not paired; on the target host, run yh pair add ${pubkey} --label vm --relay '${relay}/'`));
     assert.equal(run("pair", "add", pubkey, "--label", "vm", "--relay", relay).status, 0);
     const noLogin = await failure();
-    assert.match(noLogin.stdout, /^vm: Pi login missing for the daemon user \(model catalog empty\);.*then enter \/login;.*yh stop && yh start.*\n$/);
+    assert.match(noLogin.stdout, /^vm: Pi login missing for the daemon user \(model catalog empty\);.*then enter \/login\.\n$/);
     mkdirSync(piDir, { recursive: true });
     writeFileSync(join(piDir, "auth.json"), JSON.stringify({ "unsupported-provider": { type: "api_key", key: hidden } }), { mode: 0o600 });
     const empty = await failure("vm");
-    assert.match(empty.stdout, /^vm: Model catalog empty;.*then enter \/login.*yh stop && yh start.*\n$/);
+    assert.match(empty.stdout, /^vm: Model catalog empty;.*then enter \/login and select a supported provider\.\n$/);
     assert.ok(!empty.stdout.includes(hidden));
+    writeFileSync(join(piDir, "auth.json"), JSON.stringify({ deepseek: { type: "api_key", key: hidden } }), { mode: 0o600 });
+    assert.match((await doctor("vm")).stdout, /daemon online, provider paired, models available/);
     await invoke(["stop"], daemonEnv);
     rmSync(join(piDir, "auth.json"));
     await start({ ...daemonEnv, DEEPSEEK_API_KEY: hidden, YEWHOLT_WAKE_URL: wakeUrl, YEWHOLT_WAKE_PORT: "8787" });

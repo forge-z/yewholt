@@ -100,7 +100,8 @@ carry over. Check what is available with `yh code --list-models`. If it is empty
   (`claude auth login`), not an Anthropic key. The
   built-in `anthropic` provider takes API keys only.
 
-Then restart the daemon so it rebuilds the catalog: `yh stop && yh start`.
+Reopen the model picker in Buzz to load the updated catalog. The daemon does
+not need a restart after a Pi login, API key change, or Pi package install.
 
 ## 5. Verify and report
 

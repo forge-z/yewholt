@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import type { Models } from "@earendil-works/pi-ai";
@@ -9,7 +9,7 @@ import { SessionManager, type AgentSession, type ModelRuntime } from "@earendil-
 import { PRESENCE, RUNTIME_PROFILE, presence, runtimeProfile, type AgentScan } from "./agents.js";
 import { APPROVAL_TTL_MS, type ApprovalAsk } from "./coding.js";
 import { isModelReference } from "./control-protocol.js";
-import { botModelRuntime, createBotSession, piDir, piLoginMissing } from "./bot-session.js";
+import { botModelRuntime, createBotSession, piDir, piLoginMissing, reloadBotProviders } from "./bot-session.js";
 import { physicalPath, workspaceId, type Roots } from "./workspace.js";
 import { WorkspaceIsolation } from "./isolation.js";
 import { type ModelChoice } from "./models.js";
@@ -17,12 +17,25 @@ import { readKey, writeKey } from "./keys.js";
 import { ownerAuthTag, pubkeyOf, signEvent, type NostrEvent } from "./nostr.js";
 import { effectiveScope } from "./membership.js";
 import { approvalWord, stripLeadingMentions } from "./parser.js";
-import { botKeyPath, ownerKeyPath } from "./paths.js";
+import { botKeyPath, envFilePath, ownerKeyPath } from "./paths.js";
 import { RegistryDoc, type ApprovalRequest, type BotRecord, type CodeTurn, type RegistryState } from "./registry.js";
 import { sameRelay } from "./relay-url.js";
 
 const ctx: Context = BACKGROUND_CONTEXT;
 const PROCESSED_CAP = 400;
+
+function fileVersion(path: string): string {
+  const stat = statSync(path, { throwIfNoEntry: false });
+  return stat ? `${stat.ino}:${stat.size}:${stat.mtimeMs}` : "";
+}
+
+function modelInputs(agentDir: string, envFile?: string) {
+  return {
+    settings: fileVersion(join(agentDir, "settings.json")),
+    env: envFile ? fileVersion(envFile) : "",
+    catalog: ["auth.json", "models.json", "models-store.json"].map((file) => fileVersion(join(agentDir, file))).join("|"),
+  };
+}
 
 export type HumanMessage = {
   relay?: CodeTurn["relay"];
@@ -40,6 +53,7 @@ export type SessionOptions = {
   turnTokens?: number;
   defaultLimit?: number;
   models?: Models;
+  reloadModelEnv?: () => void;
   isolation?: WorkspaceIsolation;
   now?: () => number;
   /** Pubkeys besides the owner that may answer code-bot approvals (default `YEWHOLT_ADMINS`). */
@@ -67,17 +81,21 @@ export class Yewholt {
   private readonly ignoredShutdowns = new Set<string>();
   private agentReconcile: Promise<void> = Promise.resolve();
   private outboxListener: (() => void) | undefined;
+  private modelRefresh?: Promise<void>;
 
   private constructor(
     readonly harness: Harness,
-    private readonly options: Required<Pick<SessionOptions, "home" | "turnTokens" | "defaultLimit" | "now">> & { admins: ReadonlySet<string>; wakeUrl?: string },
+    private readonly options: Required<Pick<SessionOptions, "home" | "turnTokens" | "defaultLimit" | "now">> &
+      Pick<SessionOptions, "reloadModelEnv" | "wakeUrl"> & { admins: ReadonlySet<string> },
     private readonly agentDir: string,
     private readonly runtime: ModelRuntime,
     private readonly isolation: WorkspaceIsolation,
+    private inputs: ReturnType<typeof modelInputs>,
   ) {}
 
   static async open(storage: Storage, options: SessionOptions): Promise<Yewholt> {
     const agentDir = piDir();
+    const inputs = modelInputs(agentDir, options.reloadModelEnv ? envFilePath(options.home) : undefined);
     const runtime = await botModelRuntime(agentDir, options.models);
     const harness = await Harness.open(storage, { models: createModels(), registry: createRegistry() }, ctx);
     const self = new Yewholt(
@@ -89,10 +107,12 @@ export class Yewholt {
         now: options.now ?? Date.now,
         admins: new Set((options.admins ?? parseAdmins(process.env.YEWHOLT_ADMINS)).map((key) => key.toLowerCase())),
         wakeUrl: options.wakeUrl,
+        reloadModelEnv: options.reloadModelEnv,
       },
       agentDir,
       runtime,
       options.isolation ?? new WorkspaceIsolation(options.home),
+      inputs,
     );
     return self;
   }
@@ -161,6 +181,7 @@ export class Yewholt {
     for (const pubkey of this.sessions.keys()) this.disposeBot(pubkey);
     await Promise.allSettled(this.queues.values());
     await Promise.allSettled(this.retiring.values());
+    await Promise.allSettled(this.modelRefresh ? [this.modelRefresh] : []);
     await this.runtime.settleCredentialWrites();
     await this.harness.close(ctx);
   }
@@ -183,6 +204,19 @@ export class Yewholt {
   availableModelReferences(): string[] {
     return [...new Set(this.runtime.getAvailableSnapshot().map((model) => `${model.provider}/${model.id}`)
       .filter(isModelReference))].sort();
+  }
+
+  async refreshModels(): Promise<void> {
+    if (this.modelRefresh) return this.modelRefresh;
+    const inputs = modelInputs(this.agentDir, this.options.reloadModelEnv ? envFilePath(this.options.home) : undefined);
+    if (inputs.env === this.inputs.env && inputs.settings === this.inputs.settings && inputs.catalog === this.inputs.catalog) return;
+    this.modelRefresh = (async () => {
+      if (inputs.env !== this.inputs.env) this.options.reloadModelEnv?.();
+      if (inputs.settings !== this.inputs.settings) await reloadBotProviders(this.agentDir, this.runtime);
+      else await this.runtime.refresh({ allowNetwork: false });
+      this.inputs = inputs;
+    })();
+    try { await this.modelRefresh; } finally { this.modelRefresh = undefined; }
   }
 
   piLoginMissing(): Promise<boolean | undefined> {
@@ -521,6 +555,7 @@ export class Yewholt {
     let spent = 0;
     let answer: string;
     try {
+      await this.refreshModels();
       const session = await this.botSession(bot.pubkey);
       const model = this.runtime.getModel(bot.provider, bot.modelId);
       if (!model) {

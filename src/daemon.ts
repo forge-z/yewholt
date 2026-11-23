@@ -5,6 +5,7 @@ import { AgentFiles, PRESENCE, agentStatuses, daemonName, type AgentDiagnostics,
 import { configuredRelays, loadConfig, type RelayConfig, type YewholtConfig } from "./config.js";
 import { CONTROL_KIND } from "./control-protocol.js";
 import { DeployControl, lastDeploys } from "./deploy-control.js";
+import { liveEnvFile } from "./env-file.js";
 import { WorkspaceIsolation } from "./isolation.js";
 import { readKey } from "./keys.js";
 import { BotLinks, Inbox, publishAll } from "./bridge.js";
@@ -23,6 +24,8 @@ import { DelegatedReaders, delegationEvent } from "./wake-delegation.js";
 let stopping = false;
 
 export async function runDaemon(home: string): Promise<void> {
+  const reloadModelEnv = liveEnvFile(home);
+  reloadModelEnv();
   const config = loadConfig(home);
   const routes = configuredRelays(config);
   const localPort = process.env.YEWHOLT_LOCAL_PORT?.trim();
@@ -52,7 +55,7 @@ export async function runDaemon(home: string): Promise<void> {
     doze.wake();
   });
   ensureOwnerKey(home);
-  const session = await Yewholt.open(await openNodeSqliteStorage(sqlitePath(home)), { home, isolation, wakeUrl: wakeConfig.url });
+  const session = await Yewholt.open(await openNodeSqliteStorage(sqlitePath(home)), { home, isolation, wakeUrl: wakeConfig.url, reloadModelEnv });
   const wakeServer = wakeConfig.port === undefined ? undefined : startWakeServer(wakeConfig.port, () => doze.wake());
   const ownerSecret = readKey(ownerKeyPath(home));
   try {
@@ -254,9 +257,15 @@ async function serve(
         if (!serving || stopping || !owner.isOpen()) return;
         const reply = await serialize(() => control.handle(event, async (pubkey) =>
           (await session.snapshot()).bots.some((bot) => bot.pubkey === pubkey && !bot.external), {
-          models: () => session.availableModelReferences(),
+          models: async () => {
+            await session.refreshModels();
+            return session.availableModelReferences();
+          },
           piLoginMissing: () => session.piLoginMissing(),
-          hasModel: (choice) => session.hasModel(choice),
+          hasModel: async (choice) => {
+            await session.refreshModels();
+            return session.hasModel(choice);
+          },
           publishProfile: async (agent, profile) => {
             const client = new RelayClient(relayUrl, agent.nsec, agent.authTag, false, loopback);
             try {

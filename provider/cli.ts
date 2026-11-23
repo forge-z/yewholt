@@ -1,4 +1,3 @@
-import { unlinkSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { writePrivateJson } from "../src/control-files.js";
 import { pubkeyOf } from "../src/nostr.js";
@@ -10,7 +9,7 @@ import { joinRelay } from "../src/relay-join.js";
 import { discoverableId, installProvider } from "./install.js";
 import { namedRelayMembers, publishProviderProfile } from "./relay.js";
 import { ProviderSecrets } from "./secrets.js";
-import { InvalidTargetRelay, targetFile, validateTarget } from "./target.js";
+import { InvalidTargetRelay, removeTarget, targetFile, validateTarget } from "./target.js";
 import { normalizeRelay } from "../src/relay-url.js";
 import { doctorTargets, listTargets } from "./status.js";
 
@@ -125,17 +124,17 @@ export async function providerCommand(command: "provider" | "targets" | "pair", 
       console.log("Configured target " + id);
     } else if (sub === "list" && args.length === 1) {
       listTargets();
-    } else if (sub === "remove" && args.length === 2 && discoverableId(id)) {
-      try {
-        unlinkSync(targetFile(id));
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      }
-      console.log("Removed target " + id + "; running agents were not changed.");
+    } else if (sub === "remove" && discoverableId(id) && (args.length === 2 ||
+      (args.length === 4 && args[2] === "--daemon" && /^[a-f0-9]{64}$/.test(args[3])))) {
+      const result = removeTarget(id, args[3]);
+      if (result.state === "unconfirmed") throw new CliError(
+        `Target ${id} is still configured for daemon ${result.daemon}; nothing was removed. Verify the machine with yh targets doctor ${id}, then confirm with yh targets remove ${id} --daemon <pubkey>.`);
+      if (result.state === "missing") console.log("Target " + id + " is not configured.");
+      else console.log("Removed target " + id + "; running agents were not changed.");
     } else if (sub === "doctor" && (args.length === 1 || args.length === 2 && discoverableId(id))) {
       await doctorTargets(id);
     } else {
-      throw new CliError("Usage: yewholt targets add <id> [options] | list | remove <id> | doctor [id]");
+      throw new CliError("Usage: yewholt targets add <id> [options] | list | remove <id> --daemon <pubkey> | doctor [id]");
     }
   } catch (error) {
     if (error instanceof CliError || error instanceof InvalidTargetRelay) throw error;

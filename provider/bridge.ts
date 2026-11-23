@@ -13,7 +13,7 @@ import { addOwnerOfferTargets } from "./join.js";
 import { publishProviderProfile, sendControl, waitForConfirmation, type RelayWait } from "./relay.js";
 import { ProviderSecrets } from "./secrets.js";
 import { recordOutcome } from "./status.js";
-import { InvalidTargetRelay, loadTarget, privateJson, providerHome, relayUrl, targetRelays, validId, type Target } from "./target.js";
+import { InvalidTargetRelay, findTarget, loadTarget, privateJson, providerHome, relayUrl, targetRelays, validId, type Target } from "./target.js";
 import { runWake } from "./wake.js";
 
 type Binding = {
@@ -96,82 +96,130 @@ function wakeWithSecrets(secrets: ProviderSecrets): WakeTarget {
 async function modelCatalog(target: Extract<Target, { transport: "relay" }>, secret: string, wait: RelayWait, wake: WakeTarget) {
   const models: string[] = [];
   let deadline = Date.now() + 15_000;
+  const invalidCatalog = () => fail("The daemon returned an invalid model catalog. Update the daemon and this provider, then retry.");
   for (let pages = 0, offset = 0; pages < 12 && Date.now() < deadline; pages++) {
     const requestId = randomUUID();
     const agentPubkey = target.daemonPubkey;
     const body = { offset, relay: target.relay };
-    let catalog: unknown;
-    const onConfirmation = (confirmation: Record<string, unknown>) => { catalog = confirmation.catalog; };
+    let confirmation: Record<string, unknown> | undefined;
+    const onConfirmation = (body: Record<string, unknown>) => { confirmation = body; };
     let result;
-    if (pages === 0) {
-      ({ result } = await sendControl(target, secret, "hosted-models", requestId, agentPubkey, body,
-        { wait, wake, onConfirmation }, "read"));
-      deadline = Date.now() + 15_000;
-    } else {
-      const event = controlEvent(secret, target.daemonPubkey, "hosted-models", { requestId, agentPubkey }, body);
-      result = await wait(target, secret, event, requestId, agentPubkey, Math.max(1, deadline - Date.now()), onConfirmation);
+    try {
+      if (pages === 0) {
+        const response = await sendControl(target, secret, "hosted-models", requestId, agentPubkey, body,
+          { wait, wake, onConfirmation }, "read");
+        if (response.wakeFailed && response.result === "timeout") {
+          return fail("Could not wake the selected daemon, and it did not reply. Start the machine and daemon, then retry.");
+        }
+        result = response.result;
+        deadline = Date.now() + 15_000;
+      } else {
+        const event = controlEvent(secret, target.daemonPubkey, "hosted-models", { requestId, agentPubkey }, body);
+        result = await wait(target, secret, event, requestId, agentPubkey, Math.max(1, deadline - Date.now()), onConfirmation);
+      }
+    } catch {
+      return fail("Could not send the model request. Check the selected target and relay, then retry.");
     }
-    if (result !== "confirmed" || !record(catalog) || !Array.isArray(catalog.models) ||
-        !catalog.models.every(isModelReference)) break;
+    if (result === "timeout") {
+      return fail("No model reply from the selected daemon. Check that the machine and daemon are online and connected to the relay.");
+    }
+    if (result === "refused") {
+      switch (confirmation?.error) {
+        case "provider not paired":
+          return fail("This provider is not paired and the daemon has no active owner offer for this community. Pair with yh join on the Mac, or reopen the offer with yh join --daemon on the target.");
+        case "deploy outside pairing window":
+          return fail("The daemon rejected the request timestamp. Check the clocks on this Mac and the daemon, then retry.");
+        case "model catalog unavailable":
+          return fail("The daemon does not serve the model catalog for this request. Check the target's relay and update the daemon.");
+        default:
+          return fail(confirmation ? "The daemon rejected the model request. Run yh targets doctor for the selected target."
+            : "The relay refused the model request. Check that the provider can access this community relay.");
+      }
+    }
+    const catalog = confirmation?.catalog;
+    if (!record(catalog) || !Array.isArray(catalog.models) || !catalog.models.every(isModelReference)) return invalidCatalog();
     models.push(...catalog.models);
     if (catalog.next === undefined) return { ...ok, models };
-    if (!catalog.models.length || catalog.next !== offset + catalog.models.length) break;
+    if (!catalog.models.length || catalog.next !== offset + catalog.models.length) return invalidCatalog();
     offset = catalog.next;
   }
-  return fail("Could not load models from the daemon. Check that it is updated, online and paired, then retry.");
+  return fail("The daemon did not return a complete model catalog in time. Retry the model lookup.");
 }
 
 /** VMs their operator joined from the VM itself become targets; discovery never blocks the list for long. */
 async function discoverOwnerTargets(community: string | undefined, discover: OwnerDiscover,
-  publishProfile: typeof publishProviderProfile): Promise<void> {
+  publishProfile: typeof publishProviderProfile): Promise<Map<string, ReadonlySet<string>>> {
   const communities = community ? [community] : knownRelays();
-  if (!communities.length) return;
+  const roster = new Map<string, ReadonlySet<string>>();
+  if (!communities.length) return roster;
   let timer: NodeJS.Timeout | undefined;
   const secret = new ProviderSecrets().identity();
   await Promise.race([
     Promise.all([
-      ...communities.map((relay) => discover(relay, secret).catch(() => [])),
+      ...communities.map((relay) => discover(relay, secret, (members) => {
+        roster.set(relay, members);
+      }).catch(() => [])),
       community && publishProfile(community, secret).catch(() => undefined),
     ]),
     new Promise((resolve) => { timer = setTimeout(resolve, 8_000); }),
   ]);
   clearTimeout(timer);
+  return roster;
 }
 
 /** Relays of the configured targets, so a Buzz plugin that sends no community still finds owner offers. */
 function knownRelays(): string[] {
   const relays = targetIds().flatMap((id) => {
-    const target = loadTarget(id);
-    return target.transport === "relay" ? targetRelays(target) : [];
+    const target = findTarget(id);
+    return target ? targetRelays(target) : [];
   });
   return relays.filter((relay, index) => relays.findIndex((other) => sameRelay(other, relay)) === index);
 }
 
-type OwnerDiscover = (community: string, secret: string) => Promise<string[]>;
+type OwnerDiscover = (community: string, secret: string, reportMembers: (members: ReadonlySet<string>) => void) => Promise<string[]>;
 
-export async function bridge(input: unknown, wait: RelayWait = waitForConfirmation, discover: OwnerDiscover = addOwnerOfferTargets,
+const discoverOffers: OwnerDiscover = (community, secret, report) =>
+  addOwnerOfferTargets(community, secret, undefined, undefined, report);
+
+export async function bridge(input: unknown, wait: RelayWait = waitForConfirmation, discover: OwnerDiscover = discoverOffers,
   publishProfile = publishProviderProfile) {
   try {
     if (!record(input)) return fail("Invalid Yewholt request");
     if (input.op === "targets") {
       const community = normalizeRelay(input.community);
-      await discoverOwnerTargets(community, discover, publishProfile);
+      const roster = await discoverOwnerTargets(community, discover, publishProfile);
       const relays = Object.fromEntries(targetIds().flatMap((id) => {
-        const target = loadTarget(id);
-        return target.transport === "relay" ? [[id, target.relays ? targetRelays(target) : target.relay] as const] : [];
+        const target = findTarget(id);
+        if (!target) return [];
+        const configured = targetRelays(target);
+        const available = configured.filter((relay) => {
+          const members = [...roster].find(([url]) => sameRelay(url, relay))?.[1];
+          return !members || members.has(target.daemonPubkey);
+        });
+        if (!available.length || (community && configured.some((relay) => sameRelay(relay, community)) &&
+            !available.some((relay) => sameRelay(relay, community)))) return [];
+        return [[id, target.relays ? available : target.relay] as const];
       }));
       return { ...ok, targets: Object.keys(relays), ...(input.details === true && { relays }) };
     }
     if (input.op === "models") {
       if (!validId(input.target)) return fail("Select a Yewholt relay target");
-      const target = loadTarget(input.target);
-      if (target.transport !== "relay") return fail("Select a Yewholt relay target");
+      let target: Target | undefined;
+      try { target = findTarget(input.target); }
+      catch (error) {
+        if (error instanceof InvalidTargetRelay) return fail(error.message);
+        return fail(`Cannot read target ${input.target}. Run yh targets doctor ${input.target} and check its configuration.`);
+      }
+      if (!target) return { ...fail("This Yewholt target no longer exists. Reopen the target list to refresh it, then select a current machine."), code: "target_missing" };
       const community = input.community;
       const relay = community === undefined ? target.relay : relayUrl(community) &&
         targetRelays(target).find((url) => sameRelay(url, community));
       if (!relay) return fail("The selected Yewholt target does not serve this Buzz community");
       const secrets = new ProviderSecrets();
-      return await modelCatalog({ ...target, relay }, secrets.identity(), wait, wakeWithSecrets(secrets));
+      let secret: string;
+      try { secret = secrets.identity(); }
+      catch { return fail("Cannot read the Yewholt provider identity. Check the provider's Keychain or private file permissions."); }
+      return await modelCatalog({ ...target, relay }, secret, wait, wakeWithSecrets(secrets));
     }
     const { op, community, pubkey } = input;
     if (!relayUrl(community)) return fail("Invalid Buzz community");

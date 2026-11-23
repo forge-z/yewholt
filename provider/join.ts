@@ -22,7 +22,7 @@ import { normalizeRelay, sameRelay } from "../src/relay-url.js";
 import { targetIds } from "./install.js";
 import { ProviderSecrets } from "./secrets.js";
 import { checkTargetModels } from "./status.js";
-import { loadTarget, providerHome, targetFile, targetRelays, validateTarget, validSshHost, type Target } from "./target.js";
+import { findTarget, loadTarget, providerHome, targetFile, targetRelays, validateTarget, validSshHost, type Target } from "./target.js";
 
 export type Runner = (file: string, args: string[], stdin?: string) => Promise<string>;
 
@@ -197,18 +197,23 @@ type OwnerDiscovery = {
  * operator's Buzz signs the first agent created on it, so listing it here grants nothing by itself.
  */
 export async function addOwnerOfferTargets(community: string, secret: string, home = providerHome(),
-  overrides: Partial<OwnerDiscovery> = {}): Promise<string[]> {
+  overrides: Partial<OwnerDiscovery> = {}, reportMembers?: (members: ReadonlySet<string>) => void): Promise<string[]> {
   const deps: OwnerDiscovery = {
     operator: relayOperator, members: async (relay, key) => readRelayMembers(relay, key, await discoverRelayPubkey(relay, key)),
     profiles: readProfiles, ...overrides,
   };
   const relay = normalizeRelay(community);
   if (!relay) return [];
-  const owner = await deps.operator(relay.replace(/^ws/, "http").replace(/\/$/, ""), secret);
+  const [owner, members] = await Promise.all([
+    deps.operator(relay.replace(/^ws/, "http").replace(/\/$/, ""), secret).catch(() => undefined),
+    deps.members(relay, secret).then((members) => { reportMembers?.(members); return members; }),
+  ]);
   if (!owner) return [];
-  const members = await deps.members(relay, secret);
   const offers = ownerOffers(await deps.profiles(relay, secret, members), members, owner);
-  const targets = targetIds(home).map((id) => ({ id, target: loadTarget(id, home) }));
+  const targets = targetIds(home).flatMap((id) => {
+    const target = findTarget(id, home);
+    return target ? [{ id, target }] : [];
+  });
   const added: string[] = [];
   for (const { daemon, label } of offers) {
     if (targets.some(({ target }) => target.daemonPubkey === daemon && targetRelays(target).some((url) => sameRelay(url, relay)))) continue;
@@ -273,8 +278,7 @@ async function modelCheckMessage({ id, target }: StoredTarget, relay: string, se
     // Still give the login steps if the account lookup fails.
   }
   const location = host ? `on ${host} (ssh -t ${quote(host)})` : "on this Mac";
-  return `No models available. As ${account} ${location}, run yh and enter /login using the daemon's HOME and Pi agent directory. ` +
-    `Then restart the daemon (yh stop && yh start for a CLI-managed daemon). ${retest}`;
+  return `No models available. As ${account} ${location}, run yh and enter /login using the daemon's HOME and Pi agent directory. ${retest}`;
 }
 
 export async function joinMachines(invite: Invite, hosts: string[], options: MachineOptions,
@@ -501,7 +505,7 @@ export async function joinDaemon(invite: Invite, options: JoinOptions, ask: (que
         "That first agent pairs the Mac's provider with this daemon; no invite is needed there."
       : "Next, on the Mac: run yh join and paste the same invite within 24 hours. The Mac pairs with this daemon over Buzz " +
         "without spending another invite use when its provider is already a member.");
-    deps.log("Models: run yh here and enter /login, then restart the daemon (yh stop && yh start).");
+    deps.log("Models: run yh here and enter /login, then reopen the model picker in Buzz.");
     return [{ machine, status }];
   } catch (error) {
     return [{ machine, status: "failed", reason: error instanceof Error ? error.message : "Join failed" }];
