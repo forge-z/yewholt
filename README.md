@@ -44,9 +44,11 @@ yh update [--home dir] [--archive <tar file>]
 ```
 
 Run `yh update` on the Mac and each daemon VM. It updates the checkout of the
-running CLI (not the current directory) with `git pull --ff-only`, removes old
-`dist` output, runs `npm ci` and `npm run build`, and refreshes the Buzz bridge
-if installed. A running daemon for `--home` (default `$YEWHOLT_HOME` or
+running CLI (not the current directory). Git checkouts use `git pull --ff-only`;
+installations without Git download and extract the latest `main` tarball from
+GitHub without authentication. Both remove old `dist` output, run `npm ci` and
+`npm run build`, and refresh the Buzz bridge if installed. A running daemon for
+`--home` (default `$YEWHOLT_HOME` or
 `~/.yewholt`) is restarted with the new build. On macOS, an installed daemon
 LaunchAgent is restarted even if its process is temporarily down. A daemon
 you deliberately stopped with `yh stop` stays stopped.
@@ -55,9 +57,9 @@ plugins → Yewholt → Update** to reload the plugin; refreshing the bridge
 doesn't update the copy already loaded by Buzz. The CLI update stops at the
 first failed command with that command's exit code.
 
-On a VM without access to the Git repository, transfer a `git archive` tarball
-and run `yh update --archive /path/to/yewholt.tar [--home dir]`. The tarball is
-extracted over the existing checkout before the same build and refresh steps.
+To use a local tarball instead, transfer a `git archive` tarball and run
+`yh update --archive /path/to/yewholt.tar [--home dir]`. The tarball is extracted
+over the existing checkout before the same build and refresh steps.
 
 ## Harness
 
@@ -497,8 +499,7 @@ carrying Buzz's NIP-OA owner attestation; Buzz writes its own agent listing.
 Model changes use the same paired, owner-attested channel. The daemon stores
 the new model separately from the provisioning file, so editing it cannot
 serve as new provisioning for a stopped agent. Run `yh update` on the daemon
-host and on the Mac to get the matching daemon, bridge, and plugin (use
-`--archive <tar file>` on hosts without git).
+host and on the Mac to get the matching daemon, bridge, and plugin.
 Removal unlinks provisioning, retires the runtime, clears its in-process
 signing key, and writes a durable tombstone under
 `$YEWHOLT_HOME/state/hosted-agents/`. Backups made before removal can still

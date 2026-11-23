@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -9,7 +10,7 @@ import { checkoutRoot, update, UpdateError } from "../src/update.js";
 for (const archive of [false, true]) {
   for (const bridge of [false, true]) {
     for (const running of [false, true]) {
-      test(`update archive=${archive} bridge=${bridge} running=${running}`, (t) => {
+      test(`update archive=${archive} bridge=${bridge} running=${running}`, async (t) => {
         const checkout = mkdtempSync(join(tmpdir(), "yh-update-"));
         t.after(() => rmSync(checkout, { recursive: true, force: true }));
         if (!archive) mkdirSync(join(checkout, ".git"));
@@ -20,8 +21,9 @@ for (const archive of [false, true]) {
         const calls: [string, string[]][] = [];
         const messages: string[] = [];
         const home = join(checkout, "custom home");
-        update({ checkout, home, archive: archive ? "source.tar" : undefined }, {
+        await update({ checkout, home, archive: archive ? "source.tar" : undefined }, {
           bridgePath,
+          fetch: () => assert.fail("must not download"),
           readPid: (value) => { assert.equal(value, home); return running ? 123 : null; },
           log: (message) => messages.push(message),
           run: (command, args, cwd) => {
@@ -46,13 +48,13 @@ for (const archive of [false, true]) {
   }
 }
 
-test("update restarts a supervised daemon with no running PID", (t) => {
+test("update restarts a supervised daemon with no running PID", async (t) => {
   const checkout = mkdtempSync(join(tmpdir(), "yh-update-"));
   t.after(() => rmSync(checkout, { recursive: true, force: true }));
   const home = join(checkout, "daemon");
   const calls: string[][] = [];
   const messages: string[] = [];
-  update({ checkout, home, archive: "source.tar" }, {
+  await update({ checkout, home, archive: "source.tar" }, {
     bridgePath: join(checkout, "bridge"),
     readPid: () => null,
     supervised: (value) => value === home,
@@ -67,23 +69,72 @@ test("update restarts a supervised daemon with no running PID", (t) => {
   assert.match(messages[0], /daemon restarted/);
 });
 
-test("a checkout without git requires an archive and runs nothing", (t) => {
+test("a checkout without git downloads and extracts the main archive before building", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "yh-update-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const checkout = join(dir, "checkout");
+  const home = join(dir, "daemon");
+  mkdirSync(checkout);
+  mkdirSync(home);
+  writeFileSync(join(home, "state"), "preserved");
+  const root = "yewholt-main";
+  mkdirSync(join(dir, root));
+  writeFileSync(join(dir, root, "package.json"), "{}");
+  const fixture = spawnSync("tar", ["-czf", "-", "-C", dir, root]);
+  assert.equal(fixture.status, 0, fixture.stderr.toString());
+  const calls: string[][] = [];
+  const messages: string[] = [];
+  const downloads: string[] = [];
+  await update({ checkout, home }, {
+    fetch: async (url, init) => {
+      assert.equal(url, "https://codeload.github.com/forge-z/yewholt/tar.gz/refs/heads/main");
+      assert.equal(new Headers(init?.headers).get("accept-encoding"), "identity");
+      return new Response(new Uint8Array(fixture.stdout));
+    },
+    bridgePath: join(checkout, "bridge"),
+    readPid: () => null,
+    log: (message) => messages.push(message),
+    run: (command, args, cwd) => {
+      assert.equal(cwd, checkout);
+      if (command === "tar") {
+        downloads.push(args[1]);
+        const result = spawnSync(command, args, { cwd });
+        assert.equal(result.status, 0, result.stderr.toString());
+      } else {
+        assert.equal(readFileSync(join(checkout, "package.json"), "utf8"), "{}");
+        calls.push([command, ...args]);
+      }
+      return 0;
+    },
+  });
+  assert.equal(downloads.length, 1);
+  assert.equal(existsSync(downloads[0]), false);
+  assert.equal(existsSync(join(checkout, root)), false);
+  assert.equal(readFileSync(join(home, "state"), "utf8"), "preserved");
+  assert.deepEqual(calls, [["npm", "ci"], ["npm", "run", "build"]]);
+  assert.match(messages[0], /main archive extracted/);
+});
+
+test("a failed main archive download does not change the checkout or run commands", async (t) => {
   const checkout = mkdtempSync(join(tmpdir(), "yh-update-"));
   t.after(() => rmSync(checkout, { recursive: true, force: true }));
-  assert.throws(() => update({ checkout, home: checkout }, {
+  mkdirSync(join(checkout, "dist"));
+  await assert.rejects(update({ checkout, home: checkout }, {
+    fetch: async () => new Response(null, { status: 503 }),
     readPid: () => null, run: () => assert.fail("must not run"),
-  }), /Pass --archive <tar file>/);
+  }), (error) => error instanceof UpdateError && error.exitCode === 1 && /HTTP 503/.test(error.message));
+  assert.equal(existsSync(join(checkout, "dist")), true);
 });
 
 for (let failure = 0; failure < 6; failure++) {
-  test(`stops at failing step ${failure} and retains its exit code`, (t) => {
+  test(`stops at failing step ${failure} and retains its exit code`, async (t) => {
     const checkout = mkdtempSync(join(tmpdir(), "yh-update-"));
     t.after(() => rmSync(checkout, { recursive: true, force: true }));
     mkdirSync(join(checkout, ".git"));
     const bridgePath = join(checkout, "bridge");
     writeFileSync(bridgePath, "installed");
     let calls = 0;
-    assert.throws(() => update({ checkout, home: checkout }, {
+    await assert.rejects(update({ checkout, home: checkout }, {
       bridgePath, readPid: () => 123, log: () => assert.fail("no success summary"),
       run: () => calls++ === failure ? 42 : 0,
     }), (error) => error instanceof UpdateError && error.exitCode === 42);
