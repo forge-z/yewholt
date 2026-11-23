@@ -34,18 +34,24 @@ const runCommand: Runner = (command, args, cwd) => {
 
 const mainArchiveUrl = "https://codeload.github.com/forge-z/yewholt/tar.gz/refs/heads/main";
 
-async function downloadMainArchive(path: string, request: typeof fetch): Promise<void> {
+export async function downloadMainArchive(path: string, request: typeof fetch, etag?: string): Promise<{ etag: string | null } | null> {
   try {
     const response = await request(mainArchiveUrl, {
-      headers: { "Accept-Encoding": "identity" },
+      headers: { "Accept-Encoding": "identity", ...(etag && { "If-None-Match": etag }) },
       redirect: "error",
       signal: AbortSignal.timeout(120_000),
     });
+    const receivedTag = response.headers.get("etag");
+    if (etag && (response.status === 304 || (response.ok && receivedTag === etag))) {
+      await response.body?.cancel();
+      return null;
+    }
     if (!response.ok || !response.body) {
       await response.body?.cancel();
       throw new Error(`HTTP ${response.status}`);
     }
     await pipeline(response.body, createWriteStream(path));
+    return { etag: receivedTag };
   } catch (error) {
     throw new UpdateError(`Could not download the Yewholt main archive: ${error instanceof Error ? error.message : error}`, 1);
   }

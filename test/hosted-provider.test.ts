@@ -66,21 +66,32 @@ test("model lookup distinguishes a missing target, no reply, relay refusal and a
   assert.deepEqual(await bridge(request, send), { ok: true, models: ["test/offline"] });
 });
 
-test("the Buzz picker drops a cached target when the bridge says its file is missing", async () => {
+test("the Buzz picker drops a cached target when the bridge says its file is missing", async (t) => {
   const { apply } = await import(new URL("../../buzz-plugin/plugin.js", import.meta.url).href);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const dispose: (() => void)[] = [];
+  t.after(() => dispose.forEach((cleanup) => cleanup()));
+  let updateChecks = 0;
   const state: unknown[] = [];
   const effects: (() => void)[] = [];
   let cursor = 0;
   let picker!: (props: { config: { target: string }; onChange: () => void }) => unknown;
-  apply({
+  await apply({
     agents: { registerTab() {}, register({ CreateConfiguration }: { CreateConfiguration: typeof picker }) { picker = CreateConfiguration; } },
-    effect() {},
+    effect(effect: () => () => void) { dispose.push(effect()); },
     relay: { selected: () => "https://community.example" },
     host: { async spawn(_kind: string, { onStdout }: { onStdout: (output: string) => void }) {
       return { async end(input: string) {
-        onStdout(JSON.stringify(JSON.parse(input).op === "targets"
-          ? { ok: true, targets: ["stale", "live"], relays: { stale: "wss://community.example", live: "wss://community.example" } }
-          : { ok: false, code: "target_missing", error: "Reopen the target list." }));
+        const message = JSON.parse(input);
+        if (message.op === "plugin-update-v1") {
+          updateChecks++;
+          onStdout(JSON.stringify({ ok: true }));
+          return;
+        }
+        onStdout(JSON.stringify(message.op === "plugin-ui-v1" ? await bridge(message)
+          : message.op === "targets"
+            ? { ok: true, targets: ["stale", "live"], relays: { stale: "wss://community.example", live: "wss://community.example" } }
+            : { ok: false, code: "target_missing", error: "Reopen the target list." }));
       }, async kill() {}, exited: Promise.resolve(0) };
     } },
     react: {
@@ -93,7 +104,13 @@ test("the Buzz picker drops a cached target when the bridge says its file is mis
       },
       useSyncExternalStore: (_subscribe: unknown, get: () => unknown) => get(),
     },
-  });
+  }, (source: string) => import("data:text/javascript;base64," + Buffer.from(source).toString("base64")));
+  t.mock.timers.tick(1);
+  await new Promise(setImmediate);
+  assert.equal(updateChecks, 1);
+  t.mock.timers.tick(60 * 60 * 1000);
+  await new Promise(setImmediate);
+  assert.equal(updateChecks, 2);
   const render = () => {
     cursor = 0;
     effects.length = 0;
