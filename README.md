@@ -12,8 +12,10 @@
    can already reach over SSH, or both. No Docker is needed.
 2. Use [`yh join`](#join-a-buzz-community) from the Mac
    and paste the community invite when prompted. Use `--local` to set up
-   a fresh Mac daemon or `--ssh <alias>` for each VM. The invite provides the
-   relay details; `join` sets up, admits and pairs the daemons without copying keys.
+   a fresh Mac daemon or `--ssh <alias>` for each VM. A VM the Mac can't reach
+   over SSH runs [`yh join --daemon`](#join-from-the-vm-itself) itself with the
+   same invite. The invite provides the relay details; `join` sets up, admits and
+   pairs the daemons without copying keys.
    If the community doesn't use invites, the skill covers direct admission.
 3. In Buzz, add and approve the [Yewholt plugin](#buzz-106-yewholt-remote-agents).
    In the matching community, open **Harness → Remote → Yewholt**, select a
@@ -131,8 +133,13 @@ npm run build
 npm link
 ```
 
-With a Buzz invite, run [`yh join --ssh <alias>`](#join-a-buzz-community)
-from the Mac to initialize the daemon. For manual setup instead, use the
+If the npm global prefix isn't writable, link into a user-owned prefix instead
+of using sudo: `npm_config_prefix="$HOME/.local" npm link`, with
+`$HOME/.local/bin` on the login PATH.
+
+With a Buzz invite, run [`yh join --daemon`](#join-from-the-vm-itself) on the VM,
+or [`yh join --ssh <alias>`](#join-a-buzz-community) from the Mac, to initialize
+the daemon. For manual setup instead, use the
 existing relay's WebSocket URL and public signing key (64 lowercase hex
 characters). This is the relay's key, not the administrator's or the daemon's.
 
@@ -289,6 +296,28 @@ Each newly admitted identity consumes one use. Use a separate link per key if
 **Max uses** is 1, or reuse a link with enough uses for all keys. If the
 administrator admits the keys directly instead, use `yh relay add` to
 configure the extra relay; the provider needs no join command.
+
+
+#### Join from the VM itself
+
+When the Mac can't reach a VM over SSH (or an agent sets it up from inside the
+VM), run this on the VM and paste the invite:
+
+```sh
+yh join --daemon
+```
+
+It creates the daemon home from the invite if needed, admits the daemon with
+one invite use, starts or restarts it, and opens a pairing offer for 24 hours.
+Then run `yh join` on the Mac with the same invite. The Mac finds daemons whose
+offer matches the invite, pairs with each over Buzz and adds its target. No SSH,
+key copy or `yh pair add` is needed. The VM must be awake when the Mac joins.
+
+The offer is a tag on the daemon's public profile: an HMAC of the daemon key
+keyed by the invite. It doesn't reveal the invite code. The daemon only accepts
+a pairing request that proves knowledge of the invite and was sent after the
+offer opened, then closes the offer, so only one provider pairs through it.
+Anyone holding the same invite could pair, so treat the invite as a secret.
 
 ### Chat
 

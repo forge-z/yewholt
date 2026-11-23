@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { AgentFiles, PRESENCE, agentStatuses, daemonName, daemonProfile, type AgentDiagnostics, type AgentScan } from "./agents.js";
+import { AgentFiles, PRESENCE, agentStatuses, daemonName, type AgentDiagnostics, type AgentScan } from "./agents.js";
 import { configuredRelays, loadConfig, type RelayConfig, type YewholtConfig } from "./config.js";
 import { CONTROL_KIND } from "./control-protocol.js";
 import { DeployControl, lastDeploys } from "./deploy-control.js";
@@ -11,6 +11,7 @@ import { BotLinks, Inbox, publishAll } from "./bridge.js";
 import { accepted, RelayClient, type RelayLoopback } from "./nostr-client.js";
 import { ownerAuthTag, pubkeyOf, signEvent, type NostrEvent } from "./nostr.js";
 import { defaultModel } from "./models.js";
+import { daemonProfileEvent, machineLabel, readPairingOffer } from "./pairing-offer.js";
 import { ownerKeyPath, pidPath, sqlitePath, statusPath } from "./paths.js";
 import type { BotRecord } from "./registry.js";
 import { sameRelay } from "./relay-url.js";
@@ -143,10 +144,16 @@ async function serve(
     primary ? Math.max(state.highWater, state.highWaterByRelay?.[relayUrl] ?? 0) : state.highWaterByRelay?.[relayUrl];
   try {
     await owner.connect(5000);
-    const name = daemonName();
-    if (name) void agentRelayDeadline(owner.publish(daemonProfile(ownerSecret, name))).then((result) => {
-      if (!accepted(result)) console.error(`relay ${relayUrl}: daemon profile rejected`);
-    }, () => console.error(`relay ${relayUrl}: daemon profile not acknowledged`));
+    const publishProfile = (afterPairing = false) => {
+      const offer = readPairingOffer(control.home);
+      const open = offer && sameRelay(offer.relayUrl, relayUrl) ? offer : undefined;
+      const name = daemonName() ?? (open || afterPairing ? machineLabel() : undefined);
+      if (!name) return Promise.resolve();
+      return agentRelayDeadline(owner.publish(daemonProfileEvent(ownerSecret, control.pubkey, name, open))).then((result) => {
+        if (!accepted(result)) console.error(`relay ${relayUrl}: daemon profile rejected`);
+      }, () => console.error(`relay ${relayUrl}: daemon profile not acknowledged`));
+    };
+    void publishProfile();
     if (doze.enabled) {
       const runtime = signEvent(ownerSecret, RUNTIME_PROFILE_KIND,
         JSON.stringify({ daemon: true, wake_url: doze.settings.url }), []);
@@ -264,6 +271,7 @@ async function serve(
             await refreshStatus();
           },
           reconcileModel: async () => { await reconcile(true); await refreshStatus(); },
+          paired: () => publishProfile(true),
           reconcileRemoval: async (pubkey) => {
             await reconcile(true);
             try {

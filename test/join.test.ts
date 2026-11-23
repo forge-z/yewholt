@@ -27,7 +27,8 @@ function fixture(t: TestContext) {
   const home = mkdtempSync(join(tmpdir(), "yewholt-join-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const daemonHome = join(home, "daemon"), targetsHome = join(home, "provider");
-  return { daemonHome, targetsHome, checkModels: async () => ({ ok: true, message: "Models available." }) };
+  return { daemonHome, targetsHome, checkModels: async () => ({ ok: true, message: "Models available." }),
+    offers: async () => [] };
 }
 
 function install(home: string) {
@@ -37,7 +38,7 @@ function install(home: string) {
 
 test("join routes as a provider-side command and documents all flags", () => {
   assert.deepEqual(route(["join", "--ssh", "vm"]), { kind: "command", command: "join", args: ["--ssh", "vm"] });
-  assert.match(usageText(), /join \[<invite-url>\] \[--local\] \[--ssh <host> \.\.\.\] \[--accept-policy\] \[--confirm-age\]/);
+  assert.match(usageText(), /join \[<invite-url>\] \[--daemon \| --local\] \[--ssh <host> \.\.\.\] \[--accept-policy\] \[--confirm-age\]/);
 });
 
 test("SSH helper quotes remote yh arguments, uses login bash, and sends invite only on stdin", async () => {

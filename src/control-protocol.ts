@@ -8,7 +8,7 @@ const MAX_CONTENT = 48 * 1024;
 const hexKey = /^[0-9a-f]{64}$/;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export type HostedOperation = "hosted-activate" | "hosted-profile" | "hosted-remove" | "hosted-model";
-export type ControlType = "deploy" | "confirmation" | "hosted-models" | "wake-delegation" | HostedOperation;
+export type ControlType = "deploy" | "confirmation" | "hosted-models" | "wake-delegation" | "pair" | HostedOperation;
 export type ControlEnvelope = ControlContext & {
   version: 1;
   type: ControlType;

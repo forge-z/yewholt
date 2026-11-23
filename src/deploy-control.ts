@@ -6,7 +6,8 @@ import { readJson, record, writePrivateJson } from "./control-files.js";
 import { controlEvent, decryptControl, verifiedEnvelope, type Confirmation, type ControlEnvelope, type ModelPage } from "./control-protocol.js";
 import { HostedControl, hostedLastDeploy, type HostedEffects } from "./hosted-control.js";
 import { pubkeyOf, type NostrEvent } from "./nostr.js";
-import { readPairing } from "./pairing.js";
+import { addPairing, readPairing } from "./pairing.js";
+import { pairingProof, readPairingOffer, removePairingOffer, sameProof } from "./pairing-offer.js";
 import { agentsDir } from "./paths.js";
 import { sameRelay } from "./relay-url.js";
 
@@ -83,7 +84,7 @@ export class DeployControl {
   readonly pubkey: string;
   private readonly hosted: HostedControl;
 
-  constructor(private readonly home: string, private readonly secret: string,
+  constructor(readonly home: string, private readonly secret: string,
     private readonly defaults: Defaults, private readonly now = () => Date.now(),
     private readonly scope?: { primaryRelay: string }) {
     this.pubkey = pubkeyOf(secret);
@@ -100,12 +101,22 @@ export class DeployControl {
       verifiedEnvelope(event, this.pubkey, "hosted-profile") ??
       verifiedEnvelope(event, this.pubkey, "hosted-remove") ??
       verifiedEnvelope(event, this.pubkey, "hosted-model") ??
-      verifiedEnvelope(event, this.pubkey, "hosted-models");
+      verifiedEnvelope(event, this.pubkey, "hosted-models") ??
+      verifiedEnvelope(event, this.pubkey, "pair");
     if (!envelope) return null;
     const confirmation: Confirmation = { job: envelope.requestId, agentPubkey: envelope.agentPubkey, ok: false };
     const now = this.now();
     const relay = this.defaults.relayUrl;
     const pairingRelay = this.scope && relay !== this.scope.primaryRelay ? relay : undefined;
+    if (envelope.type === "pair") {
+      try {
+        confirmation.error = await this.pair(event, envelope, now, pairingRelay, effects);
+      } catch {
+        confirmation.error = "pairing could not be recorded";
+      }
+      confirmation.ok = confirmation.error === undefined;
+      return controlEvent(this.secret, event.pubkey, "confirmation", envelope, confirmation, this.now());
+    }
     try {
       const pairing = readPairing(this.home, event.pubkey, pairingRelay);
       if (!pairing) confirmation.error = "provider not paired";
@@ -159,6 +170,33 @@ export class DeployControl {
     }
     confirmation.ok = confirmation.error === undefined;
     return controlEvent(this.secret, event.pubkey, "confirmation", envelope, confirmation, this.now());
+  }
+
+  /** Pairs the first provider that proves it holds the invite this daemon joined with. */
+  private async pair(event: NostrEvent, envelope: ControlEnvelope, now: number, pairingRelay: string | undefined,
+    effects?: HostedEffects): Promise<string | undefined> {
+    if (envelope.agentPubkey !== this.pubkey) return "invalid pairing request";
+    if (readPairing(this.home, event.pubkey, pairingRelay)) return undefined;
+    const offer = readPairingOffer(this.home, now);
+    if (!offer) return "no pairing offer";
+    if (!sameRelay(offer.relayUrl, this.defaults.relayUrl)) return "pairing offer belongs to another relay";
+    if (envelope.issuedAt < offer.createdAt || envelope.issuedAt > now + 60_000) return "pairing request outside offer window";
+    let body: unknown;
+    try {
+      body = decryptControl(envelope, this.secret, event.pubkey);
+    } catch {
+      return "invalid ciphertext";
+    }
+    if (!record(body) || !sameProof(body.proof, pairingProof(offer.key, event.pubkey, this.pubkey, envelope.requestId))) {
+      return "invalid pairing proof";
+    }
+    const label = typeof body.label === "string" ? body.label.replace(/[\p{Cc}\p{Cf}]/gu, "").trim().slice(0, 128) : "";
+    addPairing(this.home, event.pubkey, label || "Buzz provider", now, pairingRelay);
+    removePairingOffer(this.home);
+    try {
+      await effects?.paired?.();
+    } catch { /* The stale profile tag only advertises an offer that no longer exists. */ }
+    return undefined;
   }
 
   private apply(event: NostrEvent, envelope: ControlEnvelope, body: unknown, reserved: boolean, now: number): JobError | undefined {

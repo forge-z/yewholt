@@ -69,8 +69,9 @@ async function fixture(t: TestContext) {
     const setup = `
       const { RelayClient } = await import(${JSON.stringify(new URL("../src/nostr-client.js", import.meta.url).href)});
       RelayClient.prototype.connect = async () => {};
-      RelayClient.prototype.subscribe = function(id, filters, onEvent) {
+      RelayClient.prototype.subscribe = function(id, filters, onEvent, onClosed, onEose) {
         onEvent(${JSON.stringify(signEvent(relayIdentity.secret, 39000, "", [["d", "test"]]))});
+        onEose?.();
       };
       ${replies.length ? 'Object.defineProperty(process.stdin, "isTTY", {value: true});' : ""}
       const realFetch = globalThis.fetch;

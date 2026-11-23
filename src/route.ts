@@ -65,7 +65,7 @@ Usage:
   yewholt admin keys|bots [--home dir]
   yewholt admin budget <name> <tokens> [--home dir]
   yewholt provider install
-  yewholt join [<invite-url>] [--local] [--ssh <host> ...] [--accept-policy] [--confirm-age]
+  yewholt join [<invite-url>] [--daemon | --local] [--ssh <host> ...] [--accept-policy] [--confirm-age]
   yewholt provider join [<invite-url>] [--accept-policy] [--confirm-age]
   yewholt targets add <id> --relay <url> [--relay <url> ...] --daemon <pubkey> [--label <label>]
   yewholt targets add <id> --local [--home dir] [--label <label>]
