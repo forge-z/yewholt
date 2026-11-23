@@ -60,7 +60,7 @@ export class Yewholt {
   private readonly retiring = new Map<string, Promise<void>>();
   private readonly queues = new Map<string, Promise<void>>();
   private readonly waiting = new Map<string, { pubkey: string; resolve: (allow: boolean) => void }>();
-  private readonly activeTurns = new Map<string, CodeTurn>();
+  private readonly activeTurns = new Map<string, { turn: CodeTurn; isolationRefusal?: string }>();
   private closing = false;
   private readonly memberChannels = new Map<string, ReadonlySet<string>>();
   private readonly directChannels = new Map<string, ReadonlySet<string>>();
@@ -512,7 +512,8 @@ export class Yewholt {
       pubkey: bot.pubkey, channelId: message.channelId, eventId: message.eventId,
       author: message.authorPubkey, text: message.text, createdAt: message.createdAt,
     };
-    this.activeTurns.set(bot.pubkey, turn);
+    const active: { turn: CodeTurn; isolationRefusal?: string } = { turn };
+    this.activeTurns.set(bot.pubkey, active);
     const drop = (reg: RegistryState) => { reg.turns = (reg.turns ?? []).filter((item) => item.requestId !== turn.requestId); };
     await this.harness.commit(async (tx) => {
       const reg = await tx.doc(RegistryDoc);
@@ -548,6 +549,8 @@ export class Yewholt {
     } finally {
       this.activeTurns.delete(bot.pubkey);
     }
+    const refusal = active.isolationRefusal;
+    if (refusal && !answer.includes(refusal)) answer += `\n\nCode tools unavailable. ${refusal}`;
     await this.reply(bot, message, answer, spent, true, drop);
     this.notifyOutbox();
   }
@@ -599,7 +602,11 @@ export class Yewholt {
 
   private toolWorkspace(bot: BotRecord): (Roots & { homeAliases: string[] }) | { refusal: string } {
     const refusal = this.isolation.prepare(bot.pubkey);
-    if (refusal) return { refusal };
+    if (refusal) {
+      const active = this.activeTurns.get(bot.pubkey);
+      if (active) active.isolationRefusal ??= refusal;
+      return { refusal };
+    }
     const home = this.options.home;
     let real = home;
     try { real = physicalPath(home); } catch { /* use configured path */ }
@@ -608,7 +615,7 @@ export class Yewholt {
   }
 
   private async requestApproval(bot: BotRecord, ask: ApprovalAsk): Promise<boolean> {
-    const turn = this.activeTurns.get(bot.pubkey);
+    const turn = this.activeTurns.get(bot.pubkey)?.turn;
     if (!turn || this.closing) return false;
     const id = randomUUID().slice(0, 8);
     const event = this.chatEvent(bot, turn.channelId, approvalText(bot, ask, id));
