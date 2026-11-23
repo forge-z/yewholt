@@ -270,6 +270,7 @@ test("each target list looks for owner offers in the open community, or in the t
     rmSync(root, { recursive: true, force: true });
   });
   const searched: string[][] = [];
+  const published: string[] = [];
   const discover = async (community: string) => {
     searched.at(-1)!.push(community);
     if (community === "wss://forge.example") {
@@ -281,7 +282,7 @@ test("each target list looks for owner offers in the open community, or in the t
   };
   const list = async (input: Record<string, unknown>) => {
     searched.push([]);
-    return bridge({ op: "targets", ...input }, undefined, discover);
+    return bridge({ op: "targets", ...input }, undefined, discover, async (relay) => { published.push(relay); });
   };
   assert.deepEqual(await list({}), { ok: true, targets: [] });
   assert.deepEqual(searched.at(-1), []);
@@ -291,4 +292,5 @@ test("each target list looks for owner offers in the open community, or in the t
     relays: ["wss://forge.example/"], daemonPubkey: generateKeyPair().pubkey });
   assert.deepEqual(await list({}), { ok: true, targets: ["mac", "vm"] });
   assert.deepEqual(searched.at(-1)!.sort(), ["wss://forge.example/", "wss://other.example"]);
+  assert.deepEqual(published, ["wss://forge.example"]);
 });

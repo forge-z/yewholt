@@ -61,7 +61,7 @@ async function request(origin: string, path: string, body?: string, auth?: strin
 }
 
 async function responseObject(
-  response: Response, action: string, secrets: (string | undefined)[],
+  response: Response, action: string, secrets: readonly (string | undefined)[],
 ): Promise<Record<string, unknown>> {
   const body = await (async () => {
     const bytes = Buffer.from(await response.arrayBuffer());
@@ -90,11 +90,15 @@ async function responseObject(
   return object;
 }
 
-export async function inviteRelayPubkey(invite: Invite): Promise<string> {
-  const response = await request(invite.origin, "/", undefined, undefined, "application/nostr+json");
-  const { self } = await responseObject(response, "Could not read relay information (NIP-11)", [invite.code]);
+export async function relaySigningPubkey(origin: string, redactions: readonly string[] = []): Promise<string> {
+  const response = await request(origin, "/", undefined, undefined, "application/nostr+json");
+  const { self } = await responseObject(response, "Could not read relay information (NIP-11)", redactions);
   if (!isPubkey(self)) throw new Error("Relay did not publish its signing key in NIP-11; ask the relay admin for the public key and use yh install");
   return self;
+}
+
+export function inviteRelayPubkey(invite: Invite): Promise<string> {
+  return relaySigningPubkey(invite.origin, [invite.code]);
 }
 
 /** Prefer NIP-11's operator; otherwise identify the owner from the roster signed by NIP-11's self key. */

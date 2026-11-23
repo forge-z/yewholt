@@ -241,11 +241,6 @@ export function runtimeProfile(bot: BotRecord, nsec: string, createdAt: number, 
   }), [], createdAt);
 }
 
-/** Kind 0 for the daemon's own key, so Buzz member lists show a name instead of a bare pubkey. */
-export function daemonProfile(secret: string, name: string, createdAt?: number): NostrEvent {
-  return signEvent(secret, 0, JSON.stringify({ name, display_name: name, about: "Yewholt daemon" }), [], createdAt);
-}
-
 export function daemonName(env: NodeJS.ProcessEnv = process.env): string | undefined {
   return env.YEWHOLT_NAME?.trim() || undefined;
 }

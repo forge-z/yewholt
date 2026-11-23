@@ -67,6 +67,8 @@ Usage:
   yewholt provider install
   yewholt join [<invite-url>] [--daemon | --local] [--ssh <host> ...] [--accept-policy] [--confirm-age]
   yewholt provider join [<invite-url>] [--accept-policy] [--confirm-age]
+  yewholt provider profile <relay-url>
+  yewholt provider members <relay-url>
   yewholt targets add <id> --relay <url> [--relay <url> ...] --daemon <pubkey> [--label <label>]
   yewholt targets add <id> --local [--home dir] [--label <label>]
     [--wake command --cmd <command> | --wake instabox --account <id> --machine <id> | --wake url --url <url>]

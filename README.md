@@ -620,6 +620,41 @@ buzz-admin add-member --pubkey <daemon-pubkey>
 buzz-admin add-member --pubkey <provider-pubkey>
 ```
 
+### Identify Yewholt keys in the Buzz member list
+
+Yewholt publishes a profile (Nostr kind 0) under each service's own key. In
+Buzz's community **Members** panel, look for `Yewholt · provider do Mac
+(hostname)` or `Yewholt · daemon (hostname)`. On other platforms the provider
+label uses `provider`. The profile says not to remove the service key: removing
+it from the roster cuts off that service's relay access. Existing profile names
+are preserved unless you explicitly set the daemon's `YEWHOLT_NAME`. Set that
+variable to a distinct name on a dedicated watcher, such as `Yewholt watcher`.
+
+After updating Yewholt, restart each daemon or watcher using its usual service
+manager (for a daemon started with `yh start`, run `yh stop && yh start`).
+To update the already-admitted provider on the Mac without joining again, run
+the following, substituting your relay URL:
+
+```sh
+yh provider profile wss://relay.example
+```
+
+The provider also updates its profile when joining or when the Buzz target picker
+opens for that relay. None of these profile updates adds members or grants roles.
+If a key was removed, have the relay administrator readmit that same key first.
+Then reopen the **Members** panel to see the updated profiles.
+
+Buzz 0.3.0's `buzz-admin list-members` reads the roster without looking up
+profile names. To list current relay members with names (or `null` for no name),
+run this on the already-admitted provider machine using its stored identity.
+It is read-only: it fetches the signed roster and its members' public profiles.
+
+```sh
+yh provider members wss://relay.example
+```
+
+### Connect to the Mac-local target
+
 Open the same relay community in Buzz, then select **Harness → Remote →
 Yewholt → My Mac**. Configure model credentials as the daemon login user and
 keep the Mac awake and daemon running. Do not copy a remote daemon's
@@ -916,7 +951,7 @@ None of these are required. A built-in provider is registered when its credentia
 | `YEWHOLT_TURN_TOKENS` | Tokens charged for one interpreter turn (default 1000) |
 | `YEWHOLT_BUDGET_TOKENS` | Per-session cap (default 100000) |
 | `YEWHOLT_HOME` | State directory. Host configuration and optional provider variables are in `$YEWHOLT_HOME/.env` |
-| `YEWHOLT_NAME` | Optional name for the daemon's own Buzz profile (kind 0). Set it on either a native daemon or a watcher container to identify it in the member list |
+| `YEWHOLT_NAME` | Optional name for the daemon's own Buzz profile (kind 0), including a dedicated watcher. When unset, Yewholt preserves an existing name or uses `Yewholt · daemon (hostname)` |
 | `YEWHOLT_WAKE_URL`, `YEWHOLT_WAKE_PORT` | Public HTTP(S) wake URL and the local port it maps to. Set both to allow idle disconnection |
 | `YEWHOLT_IDLE_MINUTES` | Idle time before the daemon disconnects (default 10 minutes), not the VM provider's pause timeout |
 | `YEWHOLT_WATCHER_PUBKEY` | Optional public key of a trusted always-on daemon for DM/private-channel wake |
