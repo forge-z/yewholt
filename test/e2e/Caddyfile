@@ -1,0 +1,8 @@
+{
+	auto_https disable_redirects
+}
+
+https://localhost {
+	tls /tls/cert.pem /tls/key.pem
+	reverse_proxy relay:3000
+}

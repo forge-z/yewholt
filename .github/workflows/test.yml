@@ -20,3 +20,15 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+  onboarding-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: node --test test/e2e/onboarding.test.mjs

@@ -80,6 +80,25 @@ Invite**). Node.js 22.19 or newer on every machine.
 
 To use only the coding CLI, step 1 up to `npm link` is enough; run `yh`.
 
+### Onboarding smoke test
+
+Every pull request runs the onboarding flow on a disposable Linux runner with a
+real, local Buzz relay. The test mints a single-use invite, pipes it into
+`yh join --daemon`, and drives the Buzz plugin's bridge to discover the daemon,
+list its Pi models, and create an agent. It checks that Buzz stores the agent's
+profile and that the daemon reports it active with the selected model. The test
+does not run the Buzz GUI or call a model API; no credentials are required.
+
+To run locally on Linux with Node.js 24, Docker Compose and OpenSSL:
+
+```sh
+npm ci
+npm run build
+node --test test/e2e/onboarding.test.mjs
+```
+
+The relay binds to loopback only. Set `YEWHOLT_E2E_PORT` if port 3443 is in use.
+
 ## Models
 
 A daemon's model catalog is whatever Pi sees on that machine, as the daemon's
