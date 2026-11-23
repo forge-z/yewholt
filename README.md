@@ -863,8 +863,9 @@ yh code install npm:trusted-package
 
 MCP servers come from the global `mcp.json`. Put skills in
 `~/.pi/agent/skills/<name>/SKILL.md`. Pi package extensions can register
-tools and model providers; providers become visible to hosted model listing
-once loaded by a bot. Restart the daemon after changing global resources.
+tools and model providers. The daemon loads providers from global Pi resources
+at startup, so configured models appear in Buzz before any bot starts. Restart
+the daemon after changing global resources.
 
 These integrations run with the daemon's permissions, not the isolated bot
 user. Install only trusted MCP servers, packages and extensions. The built-in
@@ -908,6 +909,10 @@ You can also supply provider keys in the daemon's environment or `$YEWHOLT_HOME/
 Daemon model streams request `Accept-Encoding: identity` through Pi's request-header options for providers that support custom HTTP headers. This avoids raw gzip SSE responses and `Stream ended without finish_reason` errors with Node 26.0's native fetch and a dependency-installed Undici dispatcher. It does not change global fetch or dispatcher settings.
 
 None of these are required. A built-in provider is registered when its credential resolves from the environment, a saved Pi API key, or a saved OAuth login supported by that provider (except Anthropic). Usable environment credentials retain precedence over saved credentials. The set is `builtinProviders()` from `@earendil-works/pi-ai` 1.6.0.
+
+The `pi-claude-code` package is separate from the built-in `anthropic`
+provider. Its `claude-code/*` models use the `claude` CLI installed and logged in
+as the daemon user (`claude auth login`), not an Anthropic API key in Pi.
 
 | Provider | Env | Notes |
 |---|---|---|
