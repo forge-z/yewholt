@@ -1,178 +1,131 @@
 ---
 name: yewholt-install
-description: Install the yh coding CLI and Buzz bridge on a Mac, and connect native Mac or Linux daemons to an existing Buzz community.
+description: Install Yewholt on a new Linux VM (or a Mac) and join it to a Buzz community with a single invite, so the user can create Buzz agents that run there.
 ---
 
 # Install Yewholt
 
-Run this from a stable Yewholt checkout on the user's Mac. Confirm which
-machines to use (including whether the Mac should host agents), and reuse
-existing SSH aliases and daemon configuration. Prefer one Buzz invite for
-the community; ask for relay details only if the invite cannot supply them.
-Do not provision VMs, install a relay, or change existing installations
-without permission. Manage the existing relay separately from Yewholt.
+Yewholt is a wrapper around Pi: Pi is the engine, Yewholt adds durable agents
+and the connection to Buzz. You install it on the machine that will run the
+agents (usually a fresh Linux VM, running these steps on the VM itself) and
+join it to the user's Buzz community. The user's only input is one Buzz
+invite, plus a model login if the VM has none. Never ask for a relay URL,
+relay key, daemon key or pairing step: `yh join --daemon` finds them.
 
-## Mac: CLI and bridge
+Do not install or restart a Buzz relay, create system users, or change an
+existing Yewholt installation without asking.
 
-1. Check for Node.js ≥22.19. If missing, use the user's existing Node version
-   manager or ask before installing one. In a checkout kept at a stable path,
-   run `npm ci`, `npm run build`, and `npm link`. Verify `yh help` and
-   `yh code --version`. If the npm prefix or PATH is wrong, fix it with the
-   user's Node manager; don't use sudo for npm. If the global prefix isn't
-   writable, run `npm_config_prefix="$HOME/.local" npm link` and make sure
-   `$HOME/.local/bin` is on the login PATH.
-2. For Buzz, run `yh provider install`. In Buzz desktop, open
-   **Settings → Plugins → Manage plugins → Add → Browse**, select the printed
-   plugin folder, and let the user approve `yewholt-buzz-bridge`. If already
-   installed in Buzz, use **Update** for the plugin. For the coding CLI alone,
-   stop here after step 1.
+## 1. Check the machine
 
-Run `yh update` to update an existing CLI and daemon. Installations without Git
-download the latest `main` tarball from GitHub without authentication. Use
-`yh update --archive /path/to/yewholt.tar` to use a local `git archive` tarball
-instead.
+```sh
+uname -sm; node --version; command -v yh && yh status
+```
 
-## Manual daemon initialization (fallback)
+- If `yh status` shows an existing daemon, keep its home (`~/.yewholt`) and
+  Pi directory (`~/.pi/agent`). Run `yh update`, then go to step 3; it does
+  not spend the invite again for a daemon that is already a member.
+- Node.js must be 22.19 or newer. If it is missing or older, install a current
+  Node LTS as the user who will run the daemon (for example with nvm in that
+  user's HOME). Don't run npm with sudo.
 
-If no invite is available or the relay does not publish its NIP-11 signing key,
-`yh install --relay "$RELAY_URL" --relay-pubkey "$RELAY_PUBKEY"`
-needs the relay's WebSocket URL and public signing key (64 lowercase hex
-characters). Use the existing relay configuration or the relay's NIP-11
-`self` field where available; otherwise ask the relay admin. Never ask for
-the relay's private key.
+## 2. Install the CLI
 
-## Join from the Mac
+Download the source; no Git or GitHub login is needed:
 
-Use `yh join` on the Mac, adding `--local` if the user wants to initialize a
-fresh Mac daemon and `--ssh <alias>` for each new VM. Install the CLI on each VM
-first. The command checks SSH and the login PATH and initializes missing daemon
-homes from the invite before claiming it. The CLI remembers successful SSH
-targets on later joins. Have the user paste the invite at the prompt and
-review and accept any community policy themselves. Allow one invite use per
-new identity: the Mac provider plus each daemon, including the Mac daemon
-if selected or already installed. No manual key copy, pairing, or target creation is needed.
+```sh
+mkdir -p ~/yewholt
+curl -fsSL https://codeload.github.com/forge-z/yewholt/tar.gz/refs/heads/main | tar -xz -C ~/yewholt --strip-components=1
+cd ~/yewholt && npm ci && npm run build && npm link
+yh help >/dev/null && echo ok
+```
 
-`yh join` starts an explicitly selected daemon after admission and pairing.
-It can also restart a running daemon after admission or a relay change.
-Existing daemons included implicitly are not started when stopped. Use manual
-admission and pairing if a service supervisor manages the daemon's lifecycle.
-`yh join` checks each joined Mac or SSH daemon's model catalog at the end.
-The Mac's Pi login doesn't carry over to a VM. If a catalog is empty, have the
-user follow the printed host and OS account instructions, run `yh` and
-`/login` there, restart that daemon, and re-test from the Mac with the printed
-`yh targets doctor <id>` command. An offline daemon doesn't establish whether
-login is missing.
+If `npm link` fails because the global prefix is not writable, run
+`npm_config_prefix="$HOME/.local" npm link` and add `$HOME/.local/bin` to the
+login PATH (`~/.profile`). Later, `yh update` updates this install in place.
 
-If `join` cannot discover the relay key or no invite is available, use
-[manual daemon initialization](#manual-daemon-initialization-fallback) and the
-direct admission and pairing steps below.
+## 3. Get the invite and join
 
-## Optional Mac-local daemon (no Docker)
-
-Run `yh join --local` as the normal daemon login user. For shell and file tools, have
-the owner approve and run
-`sudo env PATH="$PATH" scripts/setup-bot-user-macos.sh`. For custom state,
-also pass `YEWHOLT_HOME="/absolute/state"` through `sudo env`.
-The script creates a hidden bot user, workspace group, sudo rule and mode-2770
-workspaces at `/Users/Shared/yewholt/workspaces`, restricts daemon HOME access,
-and updates its `.env`. It accepts `--daemon-user USER` and
-`--workspaces /absolute/path`; workspaces must be outside daemon HOME/state.
-Do not run the Linux setup script or use the unsafe shared-user bypass on Mac.
-macOS validation ignores only the implicit `everyone` and `localaccounts`
-groups; any other group besides `yewholt-ws` is rejected. Linux is unchanged.
-Keep code-bot executables outside the protected daemon HOME (Homebrew paths,
-not a private Node version-manager directory). Validate setup on the intended
-macOS version before claiming that native isolation works.
-Open a new login session for group membership before starting or restarting the daemon.
-`yh join` creates the local target as `mac`. If using direct admission
-instead, follow the [manual Mac-local target steps](../../README.md#mac-local-daemon-target-no-docker).
-Keep the Mac awake. Connect directly to the public WSS endpoint; don't copy a
-VM's `YEWHOLT_LOCAL_PORT` setting to the Mac.
-
-## Join from inside a VM
-
-If you run on the VM itself (for example through a remote executor) or the Mac
-can't reach the VM over SSH, ask the user for a Buzz community invite, never a
-relay URL or public key. Invites may be single-use: the user gives it to you
-once and you finish the setup; never ask them to paste it anywhere else.
-
-1. Install the CLI as above.
-2. Request the invite yourself through your harness's secure input: a secret or
-   masked field (for example a secret-request tool or an MCP elicitation form)
-   whose value stays out of the chat transcript and tool-call logs. Never ask
-   the user to paste it in chat. If your harness has no such field, say so and
-   stop instead of taking the invite in chat.
-3. Write the invite to a private file (`umask 077`, not in a command argument or
-   shell history), run `yh join --daemon < <file>` yourself, then delete the
-   file.
-4. If the command stops because the community policy needs consent, show the
-   user the policy it printed. Rerun with `--accept-policy` (and `--confirm-age`
-   when asked) only after they accept. Nothing is claimed before consent.
-5. Report the next step `yh join --daemon` printed:
-   - If it names the relay operator, the user doesn't run anything on the Mac.
-     In Buzz, they create a Yewholt agent and pick this VM as its target within
-     24 hours. That first agent pairs the Mac's provider.
-   - Otherwise the user runs `yh join` on the Mac with the same invite. When the
-     Mac's provider is already a member, it doesn't use the invite again.
-6. Keep the VM awake until it pairs. Rerunning `yh join --daemon` reopens an
-   expired offer without using the invite again. Run `yh` and `/login` on the
-   VM for its models.
-
-There is no key to copy and no `yh pair add`.
-
-## Each approved VM: daemon only
-
-1. Resolve the approved alias with `ssh -G <alias>`; its `identityfile` entries
-   and `ssh-add -l` show what SSH can use. Use the configured identities or
-   ssh-agent without reading, copying or printing private keys. Confirm the
-   host key through a trusted source if SSH has not seen it before. Check access
-   with `ssh -o BatchMode=yes <alias> 'uname -s; node --version'`. If access
-   fails, ask for the correct alias or identity; don't try unrelated hosts.
-2. Check for an existing Yewholt checkout, daemon and state directory. Keep their
-   identity, config, provider credentials, supervisor and workspaces intact.
-   Don't point a fresh install at an existing state directory with another
-   relay or mode. For a new VM, check out the same revision as the Mac in a
-   stable user-owned directory, then run `npm ci`, `npm run build`, and
-   `npm link`. If the VM can't read the repository, transfer a source archive
-   of that revision over the approved SSH connection; do not copy credentials
-   or forward the SSH agent. Use user-owned Node/npm paths.
-3. For an invite, use `yh join --ssh <alias>` from the Mac, or
-   [join from inside the VM](#join-from-inside-a-vm). For direct admission,
-   initialize the daemon manually and have the relay administrator admit the daemon and Mac provider
-   pubkeys printed by their installers. Neither is the relay signing key.
-   On the VM, authorize this Mac:
+1. Ask the user for a Buzz community invite (in Buzz: **Settings → Community
+   admin → Membership → Invite**). Request it through your harness's secure
+   input, a secret or masked field whose value stays out of the chat and tool
+   logs. Never ask for it in chat. If your harness has no such field, say so
+   and stop. Invites may be single-use: ask once and finish the setup with it.
+2. Write it to a private file and join, without putting it in a command
+   argument or shell history:
 
    ```sh
-   yh pair add "$PROVIDER_PUBKEY" --label "My Mac"
-   yh pair list
+   umask 077
+   # write the invite (one line) to ~/.yh-invite with your file-write tool
+   yh join --daemon < ~/.yh-invite; status=$?
+   rm -f ~/.yh-invite
    ```
 
-   Then register the VM target on the Mac (use a unique lowercase ID):
+   Keep the file only until the join has succeeded (you may need it for the
+   policy rerun below), then delete it.
+3. If it stops with "Explicit consent required", the community has a join
+   policy. Show the user the terms (and privacy) links it printed. Only after
+   they accept, rerun with `--accept-policy`, adding `--confirm-age` only if
+   the policy requires age confirmation and they confirm it. Nothing is claimed
+   before consent.
+4. On success it has created the daemon, joined it, started it, and opened a
+   pairing offer for 24 hours. Tell the user the next step it printed:
+   - **"in Buzz on the relay operator's Mac"**: nothing to run on the Mac. In
+     Buzz, they create an agent with **Harness → Remote → Yewholt**; this VM
+     appears in the target list by itself. The first agent created on it pairs
+     their Mac.
+   - **"on the Mac: run yh join"**: they run `yh join` on the Mac and paste the
+     same invite. A Mac that is already a community member doesn't use it again.
 
-   ```sh
-   yh targets add "$TARGET_ID" --relay "$RELAY_URL" --daemon "$DAEMON_PUBKEY" --label "$VM_LABEL"
-   ```
+   The Mac needs Yewholt's Buzz plugin either way (see
+   [Setup](../../README.md#setup) step 1). If they never set it up, point
+   them to it.
+5. Keep the VM awake until the pairing is done. If the 24 hours pass, rerun
+   step 2 with the same invite: it reopens the offer without using it again.
 
-4. Don't run `sudo scripts/setup-bot-user.sh` on InstaBox. Leave code execution
-   off wherever [workspace isolation](../../README.md#workspace) hasn't been
-   set up and approved. Configure [wake on message](../../README.md#sleeping-vms-wake-on-message)
-   only if the VM should sleep while idle.
+## 4. Models
 
-## Start and verify each target
+Agents use the models Pi sees on this VM as this user; the Mac's logins don't
+carry over. Check what is available with `yh code --list-models`. If it is empty, ask the user which provider to use:
 
-1. Have the user run `/login` inside `yh` on the daemon host, or set a supported
-   credential in the daemon's private `$YEWHOLT_HOME/.env`. Use the daemon's
-   Unix user, HOME and Pi agent directory; don't read or copy credentials.
-   See [Provider keys on the host](../../README.md#provider-keys-on-the-host).
-   Set `YEWHOLT_MODEL` only if using **Daemon default**.
-2. Run `yh status`. If the daemon is stopped, use `yh start` or the existing
-   approved supervisor. `yh start` is not boot supervision.
-   If credentials changed while the daemon was running, restart the daemon
-   through its existing launcher. Never restart the relay as part of setup.
-3. On the Mac, list targets with `yh targets list` and use `yh targets doctor`
-   to check relay connectivity. A running process or healthy relay doesn't
-   prove pairing. In the matching Buzz community, open **Harness → Remote →
-   Yewholt** and verify that each target returns a nonempty model catalog
-   before creating an agent. If empty, check the daemon user's credentials;
-   if unreachable, check that the daemon is awake, both identities are relay
-   members, and the provider is paired. Report anything still unverified.
+- **API key** (e.g. DeepSeek, OpenAI, OpenRouter): request the key through the
+  secure field, append `PROVIDER_API_KEY=<key>` to `~/.yewholt/.env` (mode
+  `0600`) with your file tool, never echoing it. [`.env.example`](../../.env.example)
+  lists the variable names.
+- **Account login** (e.g. ChatGPT/Codex): `/login` inside `yh`, or
+  `yh code auth login <provider> --no-browser`, needs an interactive terminal. Run it in a
+  terminal you can drive and relay the sign-in link, or have the user run it
+  on the VM.
+- **Claude Code:** `yh code install npm:pi-claude-code` (as this user) adds
+  `claude-code/*` models, which use the `claude` CLI logged in on the VM
+  (`claude auth login`), not an Anthropic key. The
+  built-in `anthropic` provider takes API keys only.
+
+Then restart the daemon so it rebuilds the catalog: `yh stop && yh start`.
+
+## 5. Verify and report
+
+```sh
+yh status
+```
+
+The daemon must be running. On Linux `yh start` is not boot supervision: if
+the VM reboots, run `yh start` again (or set up the host's service manager to
+run `yh daemon`). The setup is done when the user sees this VM in Buzz's
+Yewholt target list with a nonempty model list and their first agent answers.
+
+Report what you did, the next step for the user, and anything not yet
+verified. Leave code execution off: it needs a dedicated Unix account
+([Coding agents](../../README.md#coding-agents)) and only on request. If the
+VM pauses when idle, mention [Sleeping VMs](../../README.md#sleeping-vms) as
+an option; don't configure it unasked.
+
+## Other cases
+
+- **Mac as an agent host:** on the Mac, run `yh join --local` instead of
+  `--daemon`; it also joins the Mac's provider and creates the `mac` target.
+- **VMs reachable from the Mac over SSH:** install the CLI on each VM, then on
+  the Mac run `yh join --ssh <alias>`. Use the user's SSH config and agent;
+  never read, copy or print private keys. Each new identity uses one invite
+  use.
+- **No invite (admin admits keys directly):** see
+  [Manual setup without an invite](../../README.md#manual-setup-without-an-invite).
