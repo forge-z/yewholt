@@ -39,7 +39,7 @@ test("effective scope: Coder answers the fixture mention in the private channel 
     const message = humanMessageFrom(fixtureMessage);
     assert.ok(message);
     assert.equal(message.channelId, PRIVATE);
-    assert.equal(message.text, "@Coder apenas responda ok");
+    assert.equal(message.text, "@Coder please reply OK");
 
     // Without the relay's member list, the stored scope applies and the private channel is refused.
     await session.handleHuman(message);

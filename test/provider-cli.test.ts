@@ -120,7 +120,7 @@ test("targets store WebSocket URLs and reject bad relay addresses even in existi
   });
   const add = (relay: string) => run("targets", "add", "instabox", "--relay", relay, "--daemon", daemon.pubkey);
   for (const [input, expected] of [
-    ["https://3000-machine.instabox.tech", "wss://3000-machine.instabox.tech"],
+    ["https://3000-machine.example", "wss://3000-machine.example"],
     ["http://[::1]:3000/relay", "ws://[::1]:3000/relay"],
   ]) {
     assert.equal(add(input).status, 0);
@@ -129,7 +129,7 @@ test("targets store WebSocket URLs and reject bad relay addresses even in existi
   const filename = target("instabox");
   const original = readFileSync(filename, "utf8");
   const config = JSON.parse(original);
-  const malformed = "wss://https://3000-machine.instabox.tech";
+  const malformed = "wss://https://3000-machine.example";
   for (const url of [malformed, "wss:////relay.example", "ws://host..example",
     "wss://-host.example", "https://relay.example:65536", "https://relay.example/path?token=" + hidden]) {
     const result = add(url);
@@ -138,11 +138,11 @@ test("targets store WebSocket URLs and reject bad relay addresses even in existi
     assert.equal(readFileSync(filename, "utf8"), original);
   }
   const request = { op: "targets", details: true };
-  writeFileSync(filename, JSON.stringify({ ...config, relay: "https://3000-machine.instabox.tech" }));
+  writeFileSync(filename, JSON.stringify({ ...config, relay: "https://3000-machine.example" }));
   const loaded = bridge(request);
   assert.equal(loaded.status, 0);
   assert.deepEqual(JSON.parse(loaded.stdout), {
-    ok: true, targets: ["instabox"], relays: { instabox: "wss://3000-machine.instabox.tech" },
+    ok: true, targets: ["instabox"], relays: { instabox: "wss://3000-machine.example" },
   });
   writeFileSync(filename, JSON.stringify({ ...config, relay: malformed }));
   const hint = /Re-run yewholt targets add instabox --relay <url> --daemon <pubkey>/;

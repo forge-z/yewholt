@@ -10,7 +10,7 @@
 1. Give your coding agent [the installation skill](skills/install/SKILL.md).
    Tell it which machines should run agents: the Mac itself, Linux VMs it
    can already reach over SSH, or both. No Docker is needed.
-2. Use [`yh join`](#join-forge-z-or-another-shared-buzz-community) from the Mac
+2. Use [`yh join`](#join-a-buzz-community) from the Mac
    and paste the community invite when prompted. Use `--local` to set up
    a fresh Mac daemon or `--ssh <alias>` for each VM. The invite provides the
    relay details; `join` sets up, admits and pairs the daemons without copying keys.
@@ -51,7 +51,7 @@ plugins → Yewholt → Update** to reload the plugin; refreshing the bridge
 doesn't update the copy already loaded by Buzz. The CLI update stops at the
 first failed command with that command's exit code.
 
-On a VM without git/GitHub, such as Instabox, transfer a `git archive` tarball
+On a VM without access to the Git repository, transfer a `git archive` tarball
 and run `yh update --archive /path/to/yewholt.tar [--home dir]`. The tarball is
 extracted over the existing checkout before the same build and refresh steps.
 
@@ -129,7 +129,7 @@ npm run build
 npm link
 ```
 
-With a Buzz invite, run [`yh join --ssh <alias>`](#join-forge-z-or-another-shared-buzz-community)
+With a Buzz invite, run [`yh join --ssh <alias>`](#join-a-buzz-community)
 from the Mac to initialize the daemon. For manual setup instead, use the
 existing relay's WebSocket URL and public signing key (64 lowercase hex
 characters). This is the relay's key, not the administrator's or the daemon's.
@@ -144,7 +144,7 @@ yh install --relay "$RELAY_URL" --relay-pubkey "$RELAY_PUBKEY"
 - `secrets/owner.key`, mode `0600`, the daemon's identity
 - `.env`, mode `0600`, for host configuration and provider keys
 
-Admit and pair the daemon via [`yh join`](#join-forge-z-or-another-shared-buzz-community)
+Admit and pair the daemon via [`yh join`](#join-a-buzz-community)
 or [configure the target manually](#configure-buzz-desktop-targets).
 Then run `yh start` and `yh status`. The daemon creates
 `state/sessions.sqlite` on startup. `yh start` is not boot supervision; on a
@@ -154,8 +154,8 @@ VM that reboots, use its service manager to run `yh daemon` in the foreground.
 
 ### Container
 
-The native install is the normal setup. If you already run Buzz in Compose
-or Coolify, you can run an always-on watcher alongside it. The image publishes
+The native install is the normal setup. If you already run Buzz in Compose,
+you can run an always-on watcher alongside it. The image publishes
 Linux AMD64 and ARM64 builds; use `:sha-<commit>` to pin a build instead of
 following `:main`. It contains the Yewholt daemon, not the relay.
 
@@ -175,13 +175,13 @@ Have the job wait for the file and admit that key. The watcher itself needs
 no relay admin or model credentials. Leave `YEWHOLT_WAKE_URL` and
 `YEWHOLT_WAKE_PORT` unset on the watcher. See [Sleeping VMs](#sleeping-vms-wake-on-message).
 
-### Join Forge Z or another shared Buzz community
+### Join a Buzz community
 
-On the owner's Mac, ask the community owner/admin for a Buzz invite
+On your Mac, ask the community administrator for a Buzz invite
 (**Settings → Community admin → Membership → Invite**), then run:
 
 ```sh
-yh join --ssh my-vm --ssh owner@another-vm
+yh join --ssh vm-one --ssh vm-two
 ```
 
 Paste the invite when prompted; omit `--ssh` if you have no SSH targets to add.
@@ -400,7 +400,7 @@ moving either.
    `yewholt-buzz-bridge` process. The plugin is trusted app code. For an
    existing plugin, select **Update** after refreshing the bridge.
 3. With that community selected in Buzz, create an agent with **Harness →
-   Remote → Yewholt** and select the relay target (e.g. `instabox`). If
+   Remote → Yewholt** and select the relay target (e.g. `my-vm`). If
    the relay addresses differ, switch or join the target's community first;
    `yewholt targets list` shows its relay address. Choosing a target is not
    a way to move an agent listing to another Buzz community.
@@ -556,9 +556,9 @@ buzz-admin add-member --pubkey <provider-pubkey>
 
 Open the same relay community in Buzz, then select **Harness → Remote →
 Yewholt → My Mac**. Configure model credentials as the daemon login user and
-keep the Mac awake and daemon running. Do not copy `YEWHOLT_LOCAL_PORT` from
-an InstaBox host onto the Mac: use the public `wss://` URL directly, including
-an existing InstaBox relay, without a local relay or proxy.
+keep the Mac awake and daemon running. Do not copy a remote daemon's
+`YEWHOLT_LOCAL_PORT` setting to the Mac: use the relay's public `wss://` URL
+directly, without a local relay or proxy.
 
 Directory Services replaces Linux `getent` for native macOS isolation checks.
 On macOS only, the implicit `everyone` and `localaccounts` groups are ignored;
@@ -615,12 +615,13 @@ unavailable (including on Linux), the engine warns on stderr and uses
 provider configuration directory. The latter must contain just a JSON string
 and have mode `0600`. Never put these files or deploy input in version control.
 
-If the daemon and Buzz relay share an InstaBox VM but the VM cannot reach
+If the daemon and Buzz relay share a VM but the VM cannot reach
 its own public WebSocket endpoint, keep `relayUrl` in the daemon's
-`config.json` set to the public `wss://…instabox.tech` address used by Buzz
-and the Mac target. In the **daemon's** `$YEWHOLT_HOME/.env`, set `YEWHOLT_LOCAL_PORT` to the local WebSocket
-listener's port. Restart only the daemon to apply it. It opens the
-WebSocket to `ws://127.0.0.1:<port>` with the public `Host` header and
+`config.json` set to the public address used by Buzz and the Mac target
+(for example, `wss://relay.example`). In the **daemon's** `$YEWHOLT_HOME/.env`,
+set `YEWHOLT_LOCAL_PORT` to the local WebSocket listener's port. Restart only
+the daemon to apply it. The daemon opens the WebSocket to
+`ws://127.0.0.1:<port>` with the public `Host` header and
 signs NIP-42 AUTH for the original public URL. Use this only when both
 routes lead to the same relay. The override applies only to the primary
 relay set by `yh install`. Additional relays and the Mac provider are
@@ -872,7 +873,7 @@ Each model turn sums its SDK assistant-message token usage, and the bot is charg
 - NIP-OA signing test vector
 - key files mode `0600` and signed kind 9 events
 - approval words and leading-mention stripping
-- relay membership from a verbatim Buzz 0.3.0 capture (`test/fixtures/buzz-membership-20261121.json`): newest relay-signed 39002 per channel, removal, forged lists ignored
+- relay membership using synthetic Buzz events: newest relay-signed 39002 per channel, removal, forged lists ignored
 - the relay client against a loopback WebSocket stub: per-subscription event and `EOSE` routing, `unsubscribe`, `CLOSED` reasons; bot connections, re-subscription, and one-time handling of a message seen on two connections
 - control-channel encryption round-trip and rejection of mismatched AAD
 - Code-bot workspace isolation and command approval, including cancellation without replay after restart

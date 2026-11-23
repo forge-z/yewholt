@@ -10,8 +10,7 @@ machines to use (including whether the Mac should host agents), and reuse
 existing SSH aliases and daemon configuration. Prefer one Buzz invite for
 the community; ask for relay details only if the invite cannot supply them.
 Do not provision VMs, install a relay, or change existing installations
-without permission. An existing relay, including one on InstaBox, is managed
-separately from Yewholt.
+without permission. Manage the existing relay separately from Yewholt.
 
 ## Mac: CLI and bridge
 
@@ -49,8 +48,9 @@ if selected or already installed. No manual key copy, pairing, or target creatio
 `yh join` can stop and start a running daemon. If a daemon is managed by a
 service supervisor, coordinate with its operator before joining; use the manual
 admission and pairing steps below if it must be restarted by that supervisor.
-New and stopped daemons stay stopped. If joining an additional relay does
-not discover its key, or no invite is available, see [manual relay setup](../../README.md#join-forge-z-or-another-shared-buzz-community).
+New and stopped daemons stay stopped. If `join` cannot discover the relay key
+or no invite is available, use [manual daemon initialization](#manual-daemon-initialization-fallback)
+and the direct admission and pairing steps below.
 
 ## Optional Mac-local daemon (no Docker)
 
