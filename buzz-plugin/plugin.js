@@ -43,7 +43,7 @@ export function apply(ctx) {
       let result;
       try { if (!overflow) result = JSON.parse(output); } catch { /* Invalid bridge response. */ }
       if (code !== 0 || !result?.ok) {
-        throw new Error(result?.error ?? "The Yewholt bridge did not complete the operation.");
+        throw Object.assign(new Error(result?.error ?? "The Yewholt bridge did not complete the operation."), { code: result?.code });
       }
       return result;
     } finally {
@@ -61,6 +61,7 @@ export function apply(ctx) {
     const [retry, setRetry] = useState(0);
     useEffect(() => {
       const controller = new AbortController();
+      setError("");
       request({ op: "targets", details: true, ...(community && { community }) }, controller.signal).then(({ targets, relays }) => {
         if (!controller.signal.aborted) {
           setTargets(targets);
@@ -90,7 +91,13 @@ export function apply(ctx) {
       request({ op: "models", target: readyTarget, community }, controller.signal).then(({ models }) => {
         if (!controller.signal.aborted) setCatalog({ target: readyTarget, community, retry, models });
       }, (error) => {
-        if (!controller.signal.aborted) setCatalog({ target: readyTarget, community, retry, error: error.message });
+        if (controller.signal.aborted) return;
+        if (error.code === "target_missing") {
+          setTargets((current) => current?.filter((id) => id !== readyTarget));
+          setError(error.message);
+        } else {
+          setCatalog({ target: readyTarget, community, retry, error: error.message });
+        }
       });
       return () => controller.abort();
     }, [readyTarget, community, retry]);
@@ -100,7 +107,10 @@ export function apply(ctx) {
     return h("div", null, harnessControl,
       h("label", null, "Yewholt target ", h("select", {
         value: target, disabled: disabled || !targets?.length,
-        onChange: (event) => onChange({ target: event.target.value, code }),
+        onChange: (event) => {
+          setError("");
+          onChange({ target: event.target.value, code });
+        },
       }, h("option", { value: "" }, "Select a target"),
       ...(targets ?? []).map((id) => h("option", { key: id, value: id }, id)))),
       mismatch ? h("p", { role: "alert" },

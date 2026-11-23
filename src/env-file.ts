@@ -57,3 +57,19 @@ export function loadEnvFile(home: string, env: NodeJS.ProcessEnv = process.env):
     env[key] = value;
   }
 }
+
+export function liveEnvFile(home: string, env: NodeJS.ProcessEnv = process.env): () => void {
+  let previous: NodeJS.ProcessEnv = {};
+  return () => {
+    const next: NodeJS.ProcessEnv = Object.create(null);
+    const applied: NodeJS.ProcessEnv = Object.create(null);
+    loadEnvFile(home, next);
+    for (const key of new Set([...Object.keys(previous), ...Object.keys(next)])) {
+      if (env[key]?.trim() && env[key] !== previous[key]) continue;
+      const value = next[key];
+      if (value === undefined) delete env[key];
+      else env[key] = applied[key] = value;
+    }
+    previous = applied;
+  };
+}

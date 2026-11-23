@@ -58,6 +58,12 @@ Invite**). Node.js 22.19 or newer on every machine.
    it and a model. That first agent pairs your Mac with the VM. No second
    invite, no key to copy, no `yh pair add`.
 
+   Buzz hides targets no longer admitted to the community relay. It keeps
+   configured targets visible if the relay's member list is unavailable. To
+   remove a saved target, verify its daemon public key in `yh targets list`,
+   then run `yh targets remove <id> --daemon <pubkey>`. The public key check
+   prevents removing a replacement machine with the same hostname by mistake.
+
    If you are not the community operator, run `yh join` on the Mac with the
    same invite instead. A Mac provider that is already a member does not use
    the invite again; it finds the VM's offer and pairs with it.
@@ -81,9 +87,10 @@ Unix user. Logins on the Mac do not carry over to a VM.
   `claude` CLI login (`claude auth login`), not an Anthropic API key.
 
 The built-in `anthropic` provider accepts API keys only; Claude subscription
-OAuth tokens are refused there. Restart the daemon after changing logins, keys
-or packages (`yh stop && yh start`). `YEWHOLT_MODEL=provider/modelId` sets the
-**Daemon default** model.
+OAuth tokens are refused there. After logging in, updating an API key or
+installing a Pi package, reopen the model picker to refresh it; no daemon
+restart is needed. `YEWHOLT_MODEL=provider/modelId` sets the **Daemon default**
+model when the daemon starts.
 
 ## Updating
 

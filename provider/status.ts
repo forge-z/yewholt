@@ -104,7 +104,6 @@ export async function checkTargetModels(id: string, target: Target, secret: stri
   const start = performance.now();
   const host = target.ssh ? "target host (" + target.ssh + ")" : "target host";
   const login = `on the ${host}, run yh as the daemon user (same HOME and PI_CODING_AGENT_DIR), then enter /login`;
-  const restart = "restart the daemon (yh stop && yh start for a CLI-managed daemon)";
   const admit = "ask the relay administrator to run buzz-admin add-member --pubkey " + pubkeyOf(secret) + " for this relay";
   const relayFix = `restore the relay at ${safeText(target.relay)} or rerun yh targets add ${id} --relay <reachable-url> --daemon ${target.daemonPubkey} with any other relay, label and wake options`;
   let opened = false;
@@ -127,12 +126,12 @@ export async function checkTargetModels(id: string, target: Target, secret: stri
     const catalog = result.catalog;
     if (!result.ok || !record(catalog) || !Array.isArray(catalog.models) || !catalog.models.every(isModelReference) ||
         (catalog.next !== undefined && (!catalog.models.length || catalog.next !== catalog.models.length))) {
-      return fail(`Model catalog unavailable; run yh update on the ${host}, ${restart}, then rerun yh targets doctor ${id}.`);
+      return fail(`Model catalog unavailable; run yh update on the ${host}, then rerun yh targets doctor ${id}.`);
     }
     if (!catalog.models.length) {
       const message = result.piLoginMissing === true
-        ? `Pi login missing for the daemon user (model catalog empty); ${login}; ${restart}.`
-        : `Model catalog empty; ${login} and select a supported provider; ${restart}.`;
+        ? `Pi login missing for the daemon user (model catalog empty); ${login}.`
+        : `Model catalog empty; ${login} and select a supported provider.`;
       return { ...fail(message), needsLogin: true };
     }
     return { ok: true, message: `OK — Relay reachable, NIP-42 authenticated; connect + AUTH latency ${latency} ms; daemon online, provider paired, models available.` };

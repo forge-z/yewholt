@@ -307,7 +307,7 @@ test("local and remembered SSH machines reuse consent, pair, update targets, res
   assert.deepEqual(checked, ["my-mac", "my-vm"]);
   assert.deepEqual(log.slice(-2), [
     "My Mac daemon: Models available.",
-    `owner@vm: No models available. As OS user "vm-user" on owner@vm (ssh -t 'owner@vm'), run yh and enter /login using the daemon's HOME and Pi agent directory. Then restart the daemon (yh stop && yh start for a CLI-managed daemon). Re-test from the Mac: yh targets doctor my-vm.`,
+    `owner@vm: No models available. As OS user "vm-user" on owner@vm (ssh -t 'owner@vm'), run yh and enter /login using the daemon's HOME and Pi agent directory. Re-test from the Mac: yh targets doctor my-vm.`,
   ]);
 });
 

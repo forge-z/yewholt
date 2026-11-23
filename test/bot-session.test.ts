@@ -62,10 +62,12 @@ export default (pi) => {
   pi.registerProvider(native.provider);
 };
 `);
-  file(join(agentDir, "settings.json"), JSON.stringify({ packages: ["./packages/fixture"] }));
   const storage = new MemoryStorage();
   const session = await openSession(storage, home, agentDir);
   try {
+    assert.ok(!session.availableModelReferences().includes("fixture-provider/fixture-model"));
+    file(join(agentDir, "settings.json"), JSON.stringify({ packages: ["./packages/fixture"] }));
+    await session.refreshModels();
     assert.ok(session.availableModelReferences().includes("fixture-provider/fixture-model"));
     assert.ok(session.availableModelReferences().includes("fixture-native/fixture-model"));
     const packageModel = { provider: "fixture-native", modelId: "fixture-model", label: "fixture-native/fixture-model" };

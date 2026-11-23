@@ -20,9 +20,9 @@ export type HostedEffects = {
   updateName: (pubkey: string, name: string) => Promise<void>;
   reconcileRemoval: (pubkey: string) => Promise<void>;
   reconcileModel?: () => Promise<void>;
-  models?: () => string[];
+  models?: () => string[] | Promise<string[]>;
   piLoginMissing?: () => Promise<boolean | undefined>;
-  hasModel?: (choice: AgentProvisioning["model"]) => boolean;
+  hasModel?: (choice: AgentProvisioning["model"]) => boolean | Promise<boolean>;
   paired?: () => Promise<void>;
 };
 
@@ -116,7 +116,8 @@ export class HostedControl {
             (envelope.issuedAt === current.issuedAt && event.id > current.eventId))) return "stale hosted model update";
         if (current?.eventId !== event.id) {
           choice = parseModelLabel(body.model);
-          if (!effects.hasModel?.(choice)) return "selected model is not available on the daemon";
+          if (!await effects.hasModel?.(choice)) return "selected model is not available on the daemon";
+          if (!authorize()) return "provider not paired";
           // Preserve the provisioning file version: replacing it can restart a stopped agent.
           writePrivateJson(pathToState, { ...state, model: { choice, issuedAt: envelope.issuedAt, eventId: event.id } });
         }
@@ -142,9 +143,10 @@ export class HostedControl {
       if (state?.activated) {
         return lstatSync(path, { throwIfNoEntry: false }) ? undefined : "hosted provisioning is missing";
       }
-      if (record(body.agent) && body.agent.model !== undefined && !effects.hasModel?.(provisioning.model)) {
+      if (record(body.agent) && body.agent.model !== undefined && !await effects.hasModel?.(provisioning.model)) {
         return "selected model is not available on the daemon";
       }
+      if (!authorize()) return "provider not paired";
       agent = provisioning;
       if (!state) {
         state = { provider: event.pubkey, owner, community, removed: false, activated: false };

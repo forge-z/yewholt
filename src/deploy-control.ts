@@ -145,15 +145,14 @@ export class DeployControl {
                 (this.scope && (body.relay !== undefined || pairingRelay) &&
                   !(typeof body.relay === "string" && sameRelay(body.relay, relay)))) confirmation.error = "model catalog unavailable";
             else {
-              const models = effects.models();
-              confirmation.catalog = modelPage(models, body.offset);
-              if (body.doctor === true && body.offset === 0 && !models.length) {
-                const missing = await effects.piLoginMissing?.();
-                if (authorized()) confirmation.piLoginMissing = missing;
-                else {
-                  delete confirmation.catalog;
-                  confirmation.error = "provider not paired";
-                }
+              const models = await effects.models();
+              const missing = body.doctor === true && body.offset === 0 && !models.length
+                ? await effects.piLoginMissing?.() : undefined;
+              if (authorized()) {
+                confirmation.catalog = modelPage(models, body.offset);
+                if (missing !== undefined) confirmation.piLoginMissing = missing;
+              } else {
+                confirmation.error = "provider not paired";
               }
             }
           } else {

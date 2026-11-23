@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { MemoryStorage } from "@earendil-works/pi-durable";
-import { ensureEnvFile, loadEnvFile } from "../src/env-file.js";
+import { ensureEnvFile, liveEnvFile, loadEnvFile } from "../src/env-file.js";
 import { catalogHas, loadModels, parseModelLabel } from "../src/models.js";
 import { botModelRuntime } from "../src/bot-session.js";
 import { Yewholt } from "../src/session.js";
@@ -59,6 +59,46 @@ function oauthCredential(expires = Date.now() + 3_600_000) {
   const payload = Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" } })).toString("base64url");
   return { type: "oauth", access: `test.${payload}.signature`, refresh: "test-refresh", expires };
 }
+
+test("an open daemon session picks up a later Pi OAuth login, logout and API key file change", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "yewholt-live-models-"));
+  const prior = { ...process.env };
+  t.after(() => {
+    for (const key of ["PI_CODING_AGENT_DIR", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "OPENAI_CODEX_API_KEY"]) {
+      if (prior[key] === undefined) delete process.env[key];
+      else process.env[key] = prior[key];
+    }
+    rmSync(dir, { recursive: true, force: true });
+  });
+  process.env.PI_CODING_AGENT_DIR = dir;
+  delete process.env.DEEPSEEK_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_CODEX_API_KEY;
+  const reloadModelEnv = liveEnvFile(dir);
+  reloadModelEnv();
+  const session = await Yewholt.open(new MemoryStorage(), { home: dir, reloadModelEnv });
+  const hasCodex = () => session.availableModelReferences().some((model) => model.startsWith("openai-codex/"));
+  const hasDeepSeek = () => session.availableModelReferences().includes("deepseek/deepseek-flash");
+  try {
+    assert.equal(hasCodex(), false);
+    const authPath = join(dir, "auth.json");
+    writeFileSync(authPath, JSON.stringify({ "openai-codex": oauthCredential() }), { mode: 0o600 });
+    await Promise.all([session.refreshModels(), session.refreshModels()]);
+    assert.equal(hasCodex(), true);
+    assert.equal(hasDeepSeek(), false);
+    const envPath = ensureEnvFile(dir);
+    writeFileSync(envPath, "DEEPSEEK_API_KEY=live-test-key\n");
+    writeFileSync(authPath, "{}");
+    await session.refreshModels();
+    assert.equal(hasCodex(), false);
+    assert.equal(hasDeepSeek(), true);
+    rmSync(envPath);
+    await session.refreshModels();
+    assert.equal(hasDeepSeek(), false);
+  } finally {
+    await session.close();
+  }
+});
 
 test("saved OAuth logins list every supporting built-in provider except Anthropic in the daemon catalog", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "yewholt-oauth-catalog-"));

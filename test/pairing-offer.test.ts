@@ -4,8 +4,9 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { addOwnerOfferTargets, joinDaemon, joinExitCode, joinMachines, matchingOffers } from "../provider/join.js";
-import { loadTarget } from "../provider/target.js";
+import { bridge } from "../provider/bridge.js";
+import { addOwnerOfferTargets, joinDaemon, joinExitCode, joinMachines, matchingOffers, updateJoinTarget } from "../provider/join.js";
+import { loadTarget, removeTarget } from "../provider/target.js";
 import { loadConfig } from "../src/config.js";
 import { controlEvent, decryptControl, verifiedEnvelope } from "../src/control-protocol.js";
 import { DeployControl } from "../src/deploy-control.js";
@@ -206,6 +207,40 @@ test("the Mac lists VMs offering to the relay operator as targets", async (t) =>
   assert.deepEqual([loadTarget("build-vm", targetsHome).daemonPubkey, loadTarget("build-vm", targetsHome).relay], [vm.pubkey, invite.relayUrl]);
   assert.deepEqual(await addOwnerOfferTargets(invite.relayUrl, provider.secret, targetsHome, deps), []);
   assert.deepEqual(await addOwnerOfferTargets(invite.relayUrl, provider.secret, targetsHome, { ...deps, operator: async () => undefined }), []);
+});
+
+test("the selector hides former members without confusing daemons with the same hostname", async (t) => {
+  const { targetsHome } = homes(t);
+  const previousHome = process.env.YEWHOLT_PROVIDER_HOME, previousStorage = process.env.YEWHOLT_PROVIDER_FILE_STORAGE;
+  process.env.YEWHOLT_PROVIDER_HOME = targetsHome;
+  process.env.YEWHOLT_PROVIDER_FILE_STORAGE = "1";
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.YEWHOLT_PROVIDER_HOME;
+    else process.env.YEWHOLT_PROVIDER_HOME = previousHome;
+    if (previousStorage === undefined) delete process.env.YEWHOLT_PROVIDER_FILE_STORAGE;
+    else process.env.YEWHOLT_PROVIDER_FILE_STORAGE = previousStorage;
+  });
+  const old = generateKeyPair(), vm = generateKeyPair(), departed = generateKeyPair();
+  const community = invite.relayUrl;
+  const otherRelay = "wss://other.example";
+  const targets: Parameters<typeof updateJoinTarget>[1] = [];
+  updateJoinTarget(targetsHome, targets, old.pubkey, [community], "build-vm", "build-vm");
+  updateJoinTarget(targetsHome, targets, departed.pubkey, [otherRelay, community], "departed", "Departed");
+  const offer = { key: offerKey("x", community), relayUrl: community, label: "build-vm",
+    createdAt: Date.now(), expiresAt: Date.now() + 60_000, owner: operator.pubkey };
+  const members = async () => new Set([vm.pubkey]);
+  const deps = { operator: async () => operator.pubkey, members, profiles: async () => [
+    daemonProfileEvent(old.secret, old.pubkey, "build-vm"), daemonProfileEvent(vm.secret, vm.pubkey, undefined, offer),
+  ] };
+  const list = (overrides = deps) => bridge({ op: "targets", community: community + "/" }, undefined,
+    (relay, secret, report) => addOwnerOfferTargets(relay, secret, targetsHome, overrides, report), async () => {});
+  assert.deepEqual(await list(), { ok: true, targets: ["build-vm-2"] });
+  assert.equal(loadTarget("build-vm", targetsHome).daemonPubkey, old.pubkey);
+  assert.equal(loadTarget("build-vm-2", targetsHome).daemonPubkey, vm.pubkey);
+  assert.deepEqual(await list({ ...deps, members: async () => { throw Error("no roster"); } }),
+    { ok: true, targets: ["build-vm", "build-vm-2", "departed"] });
+  assert.deepEqual(removeTarget("build-vm", old.pubkey, targetsHome), { state: "removed" });
+  assert.deepEqual(await list(), { ok: true, targets: ["build-vm-2"] });
 });
 
 test("a Mac provider already in the community pairs with the VM without spending the invite", async (t) => {
