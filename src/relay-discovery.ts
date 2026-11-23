@@ -35,14 +35,14 @@ export async function discoverRelayPubkey(relay: string, secret: string, expecte
   }
 }
 
-export async function readRelayMembers(relay: string, secret: string, relayPubkey: string,
-  client: DiscoveryClient = new RelayClient(relay, secret, undefined, false), timeoutMs = 15_000): Promise<ReadonlySet<string>> {
+async function readRelayRoster(relay: string, secret: string, relayPubkey: string,
+  client: DiscoveryClient = new RelayClient(relay, secret, undefined, false), timeoutMs = 15_000): Promise<NostrEvent> {
   let timer: NodeJS.Timeout | undefined;
   try {
     return await Promise.race([
       (async () => {
         await client.connect(timeoutMs);
-        return await new Promise<ReadonlySet<string>>((resolve, reject) => {
+        return await new Promise<NostrEvent>((resolve, reject) => {
           let newest: NostrEvent | undefined;
           client.subscribe("join-members", [{ kinds: [13534], authors: [relayPubkey], limit: 1 }], (event) => {
             try {
@@ -54,7 +54,7 @@ export async function readRelayMembers(relay: string, secret: string, relayPubke
                 (event.created_at === newest.created_at && event.id < newest.id)) newest = event;
           }, (_id, reason) => reject(new Error(`Relay membership lookup rejected: ${reason}`)), () => {
             if (!newest) return reject(new Error(`No relay-signed community membership roster received from ${relay}`));
-            resolve(new Set(newest.tags.filter((tag) => tag[0] === "member" && isPubkey(tag[1])).map((tag) => tag[1])));
+            resolve(newest);
           });
         });
       })(),
@@ -67,4 +67,17 @@ export async function readRelayMembers(relay: string, secret: string, relayPubke
     client.unsubscribe("join-members");
     await client.close();
   }
+}
+
+export async function readRelayMembers(relay: string, secret: string, relayPubkey: string,
+  client?: DiscoveryClient, timeoutMs?: number): Promise<ReadonlySet<string>> {
+  const roster = await readRelayRoster(relay, secret, relayPubkey, client, timeoutMs);
+  return new Set(roster.tags.filter((tag) => tag[0] === "member" && isPubkey(tag[1])).map((tag) => tag[1]));
+}
+
+export async function readRelayOwner(relay: string, secret: string, relayPubkey: string): Promise<string | undefined> {
+  const roster = await readRelayRoster(relay, secret, relayPubkey);
+  const owners = new Set(roster.tags.filter((tag) => tag[0] === "member" && tag[2] === "owner").map((tag) => tag[1]));
+  const [owner] = owners;
+  return owners.size === 1 && isPubkey(owner) ? owner : undefined;
 }

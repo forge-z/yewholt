@@ -9,11 +9,13 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
+import { WebSocketServer } from "ws";
 import { loadTarget } from "../provider/target.js";
 import { saveConfig, loadConfig } from "../src/config.js";
 import { writeKey } from "../src/keys.js";
 import { generateKeyPair, pubkeyOf, signEvent, verifyEvent, type NostrEvent } from "../src/nostr.js";
 import { envFilePath, ownerKeyPath } from "../src/paths.js";
+import { relayOperator } from "../src/relay-join.js";
 
 const cli = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 const origin = "https://buzz.example";
@@ -27,6 +29,66 @@ const acceptPath = "/api/invites/accept-policy";
 const relayIdentity = generateKeyPair();
 const relayKey = relayIdentity.pubkey;
 const policy = { policy: { version: "v1", terms_markdown: "Test terms", age_attestation_required: true } };
+
+test("operator discovery prefers NIP-11 and trusts only the newest self-signed roster with a unique owner", async (t) => {
+  const member = generateKeyPair(), owner = generateKeyPair(), previous = generateKeyPair();
+  const roster = (tags: string[][], time: number) => signEvent(relayIdentity.secret, 13534, "", tags, time);
+  const old = roster([["member", previous.pubkey, "owner"]], 1);
+  const current = roster([["-"], ["member", member.pubkey, "admin"], ["member", owner.pubkey, "owner"]], 2);
+  const forged = signEvent(member.secret, 13534, "", [["member", member.pubkey, "owner"]], 3);
+  const wrongKind = signEvent(relayIdentity.secret, 39001, "", [["member", member.pubkey, "owner"]], 4);
+  const invalid = { ...roster([["member", member.pubkey, "owner"]], 5), sig: forged.sig };
+  let info: { pubkey?: string | null; self?: string } = { pubkey: owner.pubkey, self: relayKey };
+  let events = [current, old, forged, wrongKind, invalid];
+  let subscriptions = 0;
+  const server = createServer((req, res) => {
+    assert.equal(req.headers.accept, "application/nostr+json");
+    res.end(JSON.stringify(info));
+  });
+  const sockets = new WebSocketServer({ server });
+  t.after(() => {
+    for (const socket of sockets.clients) socket.terminate();
+    sockets.close();
+    server.close();
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const url = `http://127.0.0.1:${address.port}`;
+  sockets.on("connection", (socket) => {
+    let authenticated = false;
+    socket.send(JSON.stringify(["AUTH", "roster-challenge"]));
+    socket.on("message", (data) => {
+      const [type, id, filter] = JSON.parse(data.toString());
+      if (type === "AUTH") {
+        authenticated = verifyEvent(id) && id.kind === 22242 && id.pubkey === member.pubkey &&
+          id.tags.some((tag: string[]) => tag[0] === "challenge" && tag[1] === "roster-challenge");
+        socket.send(JSON.stringify(["OK", id.id, authenticated, ""]));
+      } else if (type === "REQ") {
+        assert.ok(authenticated);
+        assert.deepEqual(filter, { kinds: [13534], authors: [relayKey], limit: 1 });
+        subscriptions++;
+        for (const event of events) socket.send(JSON.stringify(["EVENT", id, event]));
+        socket.send(JSON.stringify(["EOSE", id]));
+      }
+    });
+  });
+
+  assert.equal(await relayOperator(url, member.secret), owner.pubkey);
+  info = { pubkey: null };
+  assert.equal(await relayOperator(url, member.secret), undefined);
+  assert.equal(subscriptions, 0);
+  info.self = relayKey;
+  assert.equal(await relayOperator(url, member.secret), owner.pubkey);
+  events = [forged, wrongKind, invalid];
+  assert.equal(await relayOperator(url, member.secret), undefined);
+  events = [roster([["member", member.pubkey, "admin"]], 3), old];
+  assert.equal(await relayOperator(url, member.secret), undefined);
+  events = [roster([["member", owner.pubkey, "owner"], ["member", previous.pubkey, "owner"]], 3), old];
+  assert.equal(await relayOperator(url, member.secret), undefined);
+  assert.equal(subscriptions, 4);
+});
 
 async function fixture(t: TestContext) {
   const home = mkdtempSync(join(tmpdir(), "yewholt-relay-join-"));

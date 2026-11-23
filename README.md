@@ -314,10 +314,12 @@ Rerunning it on an admitted daemon reopens the offer without using the invite
 again. No SSH, key copy or `yh pair add` is needed; the VM must stay awake until
 it pairs.
 
-When the relay publishes its operator's pubkey in NIP-11 and the operator's
-Mac is the one to pair, nothing else is needed on the Mac. When the operator
-opens the Yewholt create form in Buzz, the VM shows up as a target. The first
-agent created on it pairs that Mac's provider: the daemon accepts it only if
+Yewholt uses the NIP-11 operator pubkey when published. Otherwise it authenticates
+as a community member and uses the sole `owner` in Buzz's NIP-43 roster (kind
+13534), verified against the relay's NIP-11 `self` signing key. If that identifies
+the operator and their Mac is the one to pair, no `yh join` is needed on the Mac.
+When the operator opens the Yewholt create form in Buzz, the VM shows up as a
+target. The first agent created on it pairs that Mac's provider: the daemon accepts it only if
 the activation carries the operator's NIP-OA signature for an agent whose
 secret the provider holds.
 
