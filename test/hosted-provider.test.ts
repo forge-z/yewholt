@@ -41,7 +41,7 @@ test("two targets provision independent agents in the same Buzz community", asyn
     writePrivateJson(targetFile(id), { id, label: id, transport: "relay", relay: id === "instabox" ? primary : community,
       ...(id === "instabox" && { relays: [community] }), daemonPubkey: daemon.pubkey });
   }
-  assert.deepEqual(await bridge({ op: "targets", details: true }), {
+  assert.deepEqual(await bridge({ op: "targets", details: true }, undefined, async () => []), {
     ok: true, targets: ["instabox", "mac"], relays: { instabox: [primary, community], mac: community },
   });
   const agents = new Set<string>();
@@ -103,7 +103,7 @@ test("the hosted bridge provisions, edits model and profile in place, and tombst
     error: "Buzz is open to wss://elsewhere.example, but target instabox uses wss://instabox.example.test. Open the target relay as a Buzz community, then create the agent there.",
   });
   assert.equal((await bridge({ ...create, community: "ws://instabox.example.test" })).ok, false);
-  assert.deepEqual(await bridge({ op: "targets", details: true }), {
+  assert.deepEqual(await bridge({ op: "targets", details: true }, undefined, async () => []), {
     ok: true, targets: ["instabox"], relays: { instabox: community },
   });
   writePrivateJson(targetFile("instabox"), { ...target, relay: "wss://INSTABOX.example.test.:443/" });
@@ -255,4 +255,42 @@ test("the hosted bridge provisions, edits model and profile in place, and tombst
   assert.equal((await deliver(legacy)).error, "agent is managed by hosted control");
   assert.equal((await deliver(edit)).error, "hosted agent was removed");
   assert.equal(existsSync(file), false);
+});
+
+test("each target list looks for owner offers in the open community, or in the targets' relays when Buzz sends none", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "yewholt-offer-discovery-"));
+  const old = { ...process.env };
+  process.env.YEWHOLT_PROVIDER_HOME = join(root, "provider");
+  process.env.YEWHOLT_PROVIDER_FILE_STORAGE = "1";
+  t.after(() => {
+    for (const key of ["YEWHOLT_PROVIDER_HOME", "YEWHOLT_PROVIDER_FILE_STORAGE"]) {
+      if (old[key] === undefined) delete process.env[key];
+      else process.env[key] = old[key];
+    }
+    rmSync(root, { recursive: true, force: true });
+  });
+  const searched: string[][] = [];
+  const published: string[] = [];
+  const discover = async (community: string) => {
+    searched.at(-1)!.push(community);
+    if (community === "wss://forge.example") {
+      writePrivateJson(targetFile("vm"), { id: "vm", label: "vm", transport: "relay", relay: community,
+        daemonPubkey: generateKeyPair().pubkey });
+      return ["vm"];
+    }
+    return [];
+  };
+  const list = async (input: Record<string, unknown>) => {
+    searched.push([]);
+    return bridge({ op: "targets", ...input }, undefined, discover, async (relay) => { published.push(relay); });
+  };
+  assert.deepEqual(await list({}), { ok: true, targets: [] });
+  assert.deepEqual(searched.at(-1), []);
+  assert.deepEqual(await list({ community: "https://forge.example" }), { ok: true, targets: ["vm"] });
+  assert.deepEqual(searched.at(-1), ["wss://forge.example"]);
+  writePrivateJson(targetFile("mac"), { id: "mac", label: "mac", transport: "relay", relay: "wss://other.example",
+    relays: ["wss://forge.example/"], daemonPubkey: generateKeyPair().pubkey });
+  assert.deepEqual(await list({}), { ok: true, targets: ["mac", "vm"] });
+  assert.deepEqual(searched.at(-1)!.sort(), ["wss://forge.example/", "wss://other.example"]);
+  assert.deepEqual(published, ["wss://forge.example"]);
 });
