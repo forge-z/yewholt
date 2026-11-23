@@ -7,7 +7,7 @@ import { record, writePrivateJson } from "../src/control-files.js";
 import { controlEvent, isModelReference, isPubkey } from "../src/control-protocol.js";
 import { parseModelLabel } from "../src/models.js";
 import { generateKeyPair, verifyAuthSignature } from "../src/nostr.js";
-import { sameRelay } from "../src/relay-url.js";
+import { normalizeRelay, sameRelay } from "../src/relay-url.js";
 import { targetIds } from "./install.js";
 import { addOwnerOfferTargets } from "./join.js";
 import { sendControl, waitForConfirmation, type RelayWait } from "./relay.js";
@@ -107,21 +107,33 @@ async function modelCatalog(target: Extract<Target, { transport: "relay" }>, sec
   return fail("Could not load models from the daemon. Check that it is updated, online and paired, then retry.");
 }
 
-/** A VM its operator joined from the VM itself shows up as a target; discovery never blocks the list for long. */
-async function discoverOwnerTargets(community: string): Promise<void> {
+/** VMs their operator joined from the VM itself become targets; discovery never blocks the list for long. */
+async function discoverOwnerTargets(communities: string[], discover: OwnerDiscover): Promise<void> {
   let timer: NodeJS.Timeout | undefined;
   await Promise.race([
-    addOwnerOfferTargets(community, new ProviderSecrets().identity()).catch(() => []),
+    Promise.all(communities.map((community) => discover(community, new ProviderSecrets().identity()).catch(() => []))),
     new Promise((resolve) => { timer = setTimeout(resolve, 8_000); }),
   ]);
   clearTimeout(timer);
 }
 
-export async function bridge(input: unknown, wait: RelayWait = waitForConfirmation) {
+/** Relays of the configured targets, so a Buzz plugin that sends no community still finds owner offers. */
+function knownRelays(): string[] {
+  const relays = targetIds().flatMap((id) => {
+    const target = loadTarget(id);
+    return target.transport === "relay" ? targetRelays(target) : [];
+  });
+  return relays.filter((relay, index) => relays.findIndex((other) => sameRelay(other, relay)) === index);
+}
+
+type OwnerDiscover = (community: string, secret: string) => Promise<string[]>;
+
+export async function bridge(input: unknown, wait: RelayWait = waitForConfirmation, discover: OwnerDiscover = addOwnerOfferTargets) {
   try {
     if (!record(input)) return fail("Invalid Yewholt request");
     if (input.op === "targets") {
-      if (relayUrl(input.community)) await discoverOwnerTargets(input.community);
+      const community = normalizeRelay(input.community);
+      await discoverOwnerTargets(community ? [community] : knownRelays(), discover);
       const relays = Object.fromEntries(targetIds().flatMap((id) => {
         const target = loadTarget(id);
         return target.transport === "relay" ? [[id, target.relays ? targetRelays(target) : target.relay] as const] : [];
