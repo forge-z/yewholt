@@ -293,19 +293,26 @@ export async function joinMachines(invite: Invite, hosts: string[], options: Mac
   const localName = "My Mac daemon";
   const uses = 1 + Number(local) + sshHosts.length;
   // The provider key is created only once nothing earlier can fail; a Mac-only join needs it for the membership check.
-  let secret = !local && !sshHosts.length ? deps.identity() : "";
+  let secret = !sshHosts.length ? deps.identity() : "";
   let roster: Promise<ReadonlySet<string>> | undefined;
   const members = () => roster ??= deps.members(invite.relayUrl, secret).catch((error: unknown) => {
     roster = undefined;
     throw error;
   });
-  // Pairing an already-admitted Mac with a VM must not spend another use of a single-use invite.
-  const providerMember = !local && !sshHosts.length && await members().then((set) => set.has(pubkeyOf(secret)), () => false);
-  if (!providerMember) {
+  // Identities already admitted must not spend another use of a single-use invite.
+  const isMember = (pubkey: string) => members().then((set) => set.has(pubkey), () => false);
+  let localKey: string | undefined;
+  try {
+    if (installed) localKey = pubkeyOf(readKey(ownerKeyPath(deps.daemonHome)));
+  } catch { /* Preparation reports an unreadable daemon key. */ }
+  const providerMember = !sshHosts.length && await isMember(pubkeyOf(secret));
+  const localMember = providerMember && localKey !== undefined && await isMember(localKey);
+  const needsClaim = !providerMember || (local && !localMember);
+  if (needsClaim) {
     deps.log(`Allow up to ${uses} invite uses (one per identity not yet admitted, including this Mac's provider).`);
   }
   if (!local) deps.log("Local daemon not installed; skipping. Use yh join --local to initialize it.");
-  const consent = providerMember ? { acceptPolicy: false, confirmAge: false } : await deps.consent(invite, options, ask);
+  const consent = needsClaim ? await deps.consent(invite, options, ask) : { acceptPolicy: false, confirmAge: false };
   const summary: JoinSummary[] = [];
   const updatedTargets = new Set<string>();
   const onUpdated = ({ id }: StoredTarget) => { updatedTargets.add(id); };
@@ -375,7 +382,7 @@ export async function joinMachines(invite: Invite, hosts: string[], options: Mac
   if (local) await attempt(localName, async () => {
     const owner = localOwner!;
     const daemon = pubkeyOf(owner);
-    const status = await deps.claim(invite, consent, owner);
+    const status = localMember && daemon === localKey ? "already_member" : await deps.claim(invite, consent, owner);
     const added = await deps.configure(deps.daemonHome, invite.relayUrl, owner);
     const relays = configuredRelays(loadConfig(deps.daemonHome)).map(({ relayUrl }) => relayUrl);
     const label = targets.find(({ target }) => target.daemonPubkey === daemon)?.target.label ?? "My Mac";

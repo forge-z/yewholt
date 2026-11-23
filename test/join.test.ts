@@ -663,3 +663,25 @@ test("join discovers and updates a non-SSH target through authenticated NIP-43 W
   assert.deepEqual(loadTarget("instabox", homes.targetsHome).relays, [url]);
   assert.ok(log.includes(`Target instabox: updated for ${url}`));
 });
+
+test("a Mac whose provider and local daemon are members pairs a VM after the invite is exhausted elsewhere", async (t) => {
+  const homes = fixture(t);
+  install(homes.daemonHome);
+  saveConfig(homes.daemonHome, { relayUrl: invite.relayUrl, externalRelayPubkey: relay.pubkey });
+  const localKey = pubkeyOf(readKey(ownerKeyPath(homes.daemonHome))), vm = generateKeyPair();
+  let claims = 0, consents = 0;
+  const summary = await joinMachines(invite, [], {}, async () => "yes", {
+    ...homes, identity: () => provider.secret, log: () => {}, running: () => 1,
+    consent: async () => { consents++; return consent; },
+    claim: async () => { claims++; throw Error("Buzz invite claim failed (HTTP 403): invite_exhausted"); },
+    configure: async () => false, runner: async () => "",
+    members: async () => new Set([provider.pubkey, localKey, vm.pubkey]),
+    offers: async () => [{ daemon: vm.pubkey, label: "build-vm" }],
+    pair: async () => ({ result: "confirmed" }),
+    checkModels: async () => ({ ok: true, message: "Models available." }),
+  });
+  assert.deepEqual(summary.map(({ machine, status }) => [machine, status]),
+    [["Mac provider", "already_member"], ["My Mac daemon", "already_member"], ["build-vm", "joined"]]);
+  assert.deepEqual([claims, consents], [0, 0]);
+  assert.equal(loadTarget("build-vm", homes.targetsHome).daemonPubkey, vm.pubkey);
+});

@@ -301,7 +301,8 @@ configure the extra relay; the provider needs no join command.
 #### Join from the VM itself
 
 When the Mac can't reach a VM over SSH (or an agent sets it up from inside the
-VM), run this on the VM and paste the invite:
+VM), run this on the VM and paste the invite. An agent requests the invite
+through its harness's secure secret field, never in chat, and feeds it on stdin:
 
 ```sh
 yh join --daemon
