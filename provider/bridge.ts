@@ -87,16 +87,30 @@ function provision(input: Record<string, unknown>, community: string) {
   return { ...ok, pubkey, picture };
 }
 
-async function modelCatalog(target: Extract<Target, { transport: "relay" }>, secret: string, wait: RelayWait) {
+type WakeTarget = Parameters<typeof sendControl>[6]["wake"];
+
+function wakeWithSecrets(secrets: ProviderSecrets): WakeTarget {
+  return (config, requestId, timeout) => runWake(config, requestId, timeout, (account) => secrets.instabox(account));
+}
+
+async function modelCatalog(target: Extract<Target, { transport: "relay" }>, secret: string, wait: RelayWait, wake: WakeTarget) {
   const models: string[] = [];
-  const deadline = Date.now() + 15_000;
+  let deadline = Date.now() + 15_000;
   for (let pages = 0, offset = 0; pages < 12 && Date.now() < deadline; pages++) {
     const requestId = randomUUID();
-    const event = controlEvent(secret, target.daemonPubkey, "hosted-models",
-      { requestId, agentPubkey: target.daemonPubkey }, { offset, relay: target.relay });
+    const agentPubkey = target.daemonPubkey;
+    const body = { offset, relay: target.relay };
     let catalog: unknown;
-    const result = await wait(target, secret, event, requestId, target.daemonPubkey,
-      Math.max(1, deadline - Date.now()), (body) => { catalog = body.catalog; });
+    const onConfirmation = (confirmation: Record<string, unknown>) => { catalog = confirmation.catalog; };
+    let result;
+    if (pages === 0) {
+      ({ result } = await sendControl(target, secret, "hosted-models", requestId, agentPubkey, body,
+        { wait, wake, onConfirmation }, "read"));
+      deadline = Date.now() + 15_000;
+    } else {
+      const event = controlEvent(secret, target.daemonPubkey, "hosted-models", { requestId, agentPubkey }, body);
+      result = await wait(target, secret, event, requestId, agentPubkey, Math.max(1, deadline - Date.now()), onConfirmation);
+    }
     if (result !== "confirmed" || !record(catalog) || !Array.isArray(catalog.models) ||
         !catalog.models.every(isModelReference)) break;
     models.push(...catalog.models);
@@ -156,7 +170,8 @@ export async function bridge(input: unknown, wait: RelayWait = waitForConfirmati
       const relay = community === undefined ? target.relay : relayUrl(community) &&
         targetRelays(target).find((url) => sameRelay(url, community));
       if (!relay) return fail("The selected Yewholt target does not serve this Buzz community");
-      return await modelCatalog({ ...target, relay }, new ProviderSecrets().identity(), wait);
+      const secrets = new ProviderSecrets();
+      return await modelCatalog({ ...target, relay }, secrets.identity(), wait, wakeWithSecrets(secrets));
     }
     const { op, community, pubkey } = input;
     if (!relayUrl(community)) return fail("Invalid Buzz community");
@@ -199,8 +214,7 @@ export async function bridge(input: unknown, wait: RelayWait = waitForConfirmati
     const context = { community: binding.community, owner, authTag };
     const secrets = new ProviderSecrets();
     const secret = secrets.identity();
-    const wake = (config: Parameters<typeof runWake>[0], requestId: string, timeout: number) =>
-      runWake(config, requestId, timeout, (account) => secrets.instabox(account));
+    const wake = wakeWithSecrets(secrets);
     if (op === "model") {
       const model = input.model;
       if (model !== undefined && !isModelReference(model)) return fail("Invalid Yewholt model");
@@ -212,17 +226,16 @@ export async function bridge(input: unknown, wait: RelayWait = waitForConfirmati
         refusal = body.error;
       };
       if (model === undefined) {
-        const event = controlEvent(secret, target.daemonPubkey, "hosted-model", { requestId, agentPubkey: pubkey }, context);
-        const result = await wait(target, secret, event, requestId, pubkey, 15_000, confirm);
+        const { result } = await sendControl(target, secret, "hosted-model", requestId, pubkey, context,
+          { wait, wake, onConfirmation: confirm }, "read");
         if (result !== "confirmed" || (current !== null && !isModelReference(current))) {
           return fail("Could not read the agent's model. Check that the daemon is updated, online and paired, then retry.");
         }
-        const catalog = await modelCatalog(target, secret, wait);
+        const catalog = await modelCatalog(target, secret, wait, wake);
         return catalog.ok ? { ...catalog, model: current } : catalog;
       }
       const result = await sendControl(target, secret, "hosted-model", requestId, pubkey, { ...context, model }, {
-        wait: (target, secret, event, requestId, agent, ms) => wait(target, secret, event, requestId, agent, ms, confirm),
-        wake,
+        wait, wake, onConfirmation: confirm,
       });
       if (result.result === "confirmed" && isModelReference(current)) return { ...ok, model: current };
       if (refusal === "selected model is not available on the daemon") return fail("The selected model is no longer available on the daemon.");

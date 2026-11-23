@@ -93,6 +93,7 @@ test("the hosted bridge provisions, edits model and profile in place, and tombst
   const daemon = generateKeyPair(), owner = generateKeyPair();
   const provider = new ProviderSecrets().identity();
   const community = "wss://instabox.example.test";
+  const wakeUrl = "https://wake.example.test/";
   const defaults = { relayUrl: "ws://127.0.0.1:3000", model: { provider: "", modelId: "", label: "unset" } };
   const target = { id: "instabox", label: "Instabox", transport: "relay", relay: community, daemonPubkey: daemon.pubkey };
   writePrivateJson(targetFile("instabox"), target);
@@ -106,7 +107,7 @@ test("the hosted bridge provisions, edits model and profile in place, and tombst
   assert.deepEqual(await bridge({ op: "targets", details: true }, undefined, async () => []), {
     ok: true, targets: ["instabox"], relays: { instabox: community },
   });
-  writePrivateJson(targetFile("instabox"), { ...target, relay: "wss://INSTABOX.example.test.:443/" });
+  writePrivateJson(targetFile("instabox"), { ...target, relay: "wss://INSTABOX.example.test.:443/", wake: { kind: "url", url: wakeUrl } });
   const reserved = await bridge(create);
   assert.ok("pubkey" in reserved && typeof reserved.pubkey === "string");
   assert.deepEqual(await bridge(create), reserved);
@@ -150,11 +151,24 @@ test("the hosted bridge provisions, edits model and profile in place, and tombst
     return decryptControl(confirmed, secret, daemon.pubkey) as Confirmation;
   };
   let modelPages = 0;
-  const send = async (_target: unknown, secret: string, event: NostrEvent, _id: string, _agent: string, _ms: number,
+  let sleeping = false;
+  let wakeCalls = 0;
+  const pendingReads: { id: string; event: NostrEvent; timeout: number }[] = [];
+  t.mock.method(globalThis, "fetch", async (url: string) => {
+    assert.equal(url, wakeUrl);
+    assert.equal(sleeping, true);
+    wakeCalls++;
+    sleeping = false;
+    return new Response(null, { status: 204 });
+  });
+  const send = async (_target: unknown, secret: string, event: NostrEvent, id: string, _agent: string, timeout: number,
     onConfirmation?: (body: Record<string, unknown>) => void) => {
-    if (JSON.parse(event.content).type === "hosted-activate") activation ??= event;
-    else if (JSON.parse(event.content).type === "hosted-models") modelPages++;
-    else if (JSON.parse(event.content).type === "hosted-model") lastModelEvent = event;
+    const { type } = JSON.parse(event.content);
+    if (sleeping || pendingReads.length === 1) pendingReads.push({ id, event, timeout });
+    if (sleeping) return "timeout" as const;
+    if (type === "hosted-activate") activation ??= event;
+    else if (type === "hosted-models") modelPages++;
+    else if (type === "hosted-model") lastModelEvent = event;
     const confirmation = await deliver(event, secret);
     onConfirmation?.(confirmation);
     return confirmation.ok ? "confirmed" as const : "refused" as const;
@@ -163,9 +177,22 @@ test("the hosted bridge provisions, edits model and profile in place, and tombst
   const request = { pubkey, community, auth };
   assert.equal((await bridge({ ...request, op: "activate" }, send)).ok, false);
   assert.equal((await bridge({ op: "models", target: "instabox" }, send)).ok, false);
+  assert.equal(wakeCalls, 0, "no wake after a refusal");
   const providerPubkey = activation!.pubkey;
   addPairing(home, providerPubkey, "Mac", Date.now());
+  const assertWakeRetry = (type: string) => {
+    assert.equal(pendingReads.length, 2);
+    const [initial, retry] = pendingReads.splice(0);
+    assert.deepEqual([initial.timeout, retry.timeout], [5_000, 30_000]);
+    assert.notEqual(initial.id, retry.id);
+    assert.notEqual(initial.event.id, retry.event.id);
+    assert.equal(JSON.parse(initial.event.content).type, type);
+    assert.equal(JSON.parse(retry.event.content).type, type);
+  };
+  sleeping = true;
   assert.deepEqual(await bridge({ op: "models", target: "instabox" }, send), { ok: true, models: catalog });
+  assertWakeRetry("hosted-models");
+  assert.equal(wakeCalls, 1);
   assert.ok(modelPages >= 3, "catalog traverses multiple authenticated pages");
   assert.equal((await bridge({ ...request, op: "activate" }, send)).ok, false);
   assert.equal(existsSync(file), false);
@@ -198,7 +225,10 @@ test("the hosted bridge provisions, edits model and profile in place, and tombst
   const before = await bot();
   assert.ok(before.spentTokens > 0);
   const modelRequest = { pubkey, community, op: "model" };
+  sleeping = true;
   assert.deepEqual(await bridge(modelRequest, send), { ok: true, models: catalog, model: selectedModel });
+  assertWakeRetry("hosted-model");
+  assert.equal(wakeCalls, 2);
   assert.equal((await bridge({ ...modelRequest, community: "wss://elsewhere.example", model: updatedModel }, send)).ok, false);
   assert.deepEqual(await bridge({ ...modelRequest, model: "faux/not-in-catalog" }, send), {
     ok: false, error: "The selected model is no longer available on the daemon.",

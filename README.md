@@ -469,7 +469,8 @@ moving either.
    a way to move an agent listing to another Buzz community.
 4. Select a model from the daemon's catalog or keep **Daemon default**
    (`YEWHOLT_MODEL` on the daemon). Catalog discovery uses the paired
-   control channel and does not wake a stopped VM. If the list is empty,
+   control channel. If the daemon does not reply and the target has a wake
+   hook, Buzz requests a wake and retries once. If the list is empty,
    [configure a supported credential](#provider-keys-on-the-host) on the
    target as the daemon user, then restart only that daemon.
    Credentials on the Mac are not used for VM agents. For example, a DeepSeek
@@ -481,7 +482,8 @@ moving either.
    the agent's paired daemon and select **Save model**. This keeps the agent's
    identity, conversation history, workspace and permissions. The change
    applies to subsequent turns; it does not restart a stopped agent. Load the
-   tab from the Mac that manages the agent, with the daemon online.
+   tab from the Mac that manages the agent. Reading the agent's current model
+   also uses the target's wake hook if the daemon does not reply.
 6. Compare the agent pubkey with `yewholt agents list` on the daemon. Edit
    name and picture in Buzz, or delete the agent there before removing its
    target. Editing name or picture does not restart a stopped agent.
@@ -548,6 +550,8 @@ Store InstaBox credentials separately in Keychain or the private fallback
 file described below; don't pass them as CLI arguments. For disposable tests
 on macOS, `YEWHOLT_PROVIDER_FILE_STORAGE=1` opts out of the real Keychain; set
 `YEWHOLT_PROVIDER_HOME` to a disposable directory too.
+Use the wake URL for a daemon that disconnects from its relay while idle:
+starting a VM does not contact the daemon's HTTP wake endpoint.
 
 `targets list` reports the last recorded confirmation, deploy and failure,
 and counts distinct agent pubkeys successfully deployed **from this provider**.
