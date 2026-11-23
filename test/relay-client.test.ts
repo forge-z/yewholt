@@ -12,7 +12,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { controlEvent, decryptControl, verifiedEnvelope, type Confirmation } from "../src/control-protocol.js";
 import { RelayClient, relayDialTarget } from "../src/nostr-client.js";
 import { generateKeyPair, type NostrEvent } from "../src/nostr.js";
-import { botEvents, byKind, capture, PRIVATE } from "./helpers/fixture.js";
+import { botEvents, byKind, NOT_A_CHANNEL_MEMBER, PRIVATE } from "./helpers/fixture.js";
 
 /** A loopback NIP-42 relay stub. It only speaks the frames these tests need. */
 async function fakeRelay(immediateChallenge = false): Promise<{
@@ -283,7 +283,7 @@ test("RelayClient surfaces CLOSED to the subscription callback and logs it once 
     client.subscribe("channel", [{ kinds: [9], "#h": [PRIVATE] }], (event) => seen.push(event.id), (id, reason) => closed.push([id, reason]));
     client.subscribe("other", [{ kinds: [9] }], () => undefined);
     await relay.waitFor((frame) => frame[0] === "REQ" && frame[1] === "other");
-    const [, , reason] = capture().owner_req_private_channel_closed;
+    const reason = NOT_A_CHANNEL_MEMBER;
     relay.send(["CLOSED", "channel", reason]);
     relay.send(["CLOSED", "channel", reason]);
     await tick();

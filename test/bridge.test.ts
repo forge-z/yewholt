@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { BotLinks, humanMessageFrom, Inbox, publishAll, type ChatClient, type LinkBot } from "../src/bridge.js";
 import { generateKeyPair, signEvent, type NostrEvent } from "../src/nostr.js";
 import type { HumanMessage } from "../src/session.js";
-import { botEvents, byKind, capture, CODER, INSTALL, OWNER, PRIVATE, privateListWithoutCoder, RELAY } from "./helpers/fixture.js";
+import { botEvents, byKind, CODER, INSTALL, NOT_A_CHANNEL_MEMBER, OWNER, PRIVATE, privateListWithoutCoder, RELAY } from "./helpers/fixture.js";
 
 type Sub = { filters: readonly Record<string, unknown>[]; onEvent: (event: NostrEvent) => void; onClosed?: (id: string, reason: string) => void };
 
@@ -57,6 +57,7 @@ class FakeClient implements ChatClient {
 
 const reviewerBot: LinkBot = { pubkey: "0b".repeat(32), name: "Reviewer", scope: [INSTALL], status: "active" };
 const coderBot: LinkBot = { pubkey: CODER, name: "Coder", scope: [INSTALL], status: "active" };
+const since = 1_700_000_000;
 
 function harness(relayPubkey: string | null = RELAY) {
   const clients = new Map<string, FakeClient[]>();
@@ -65,7 +66,7 @@ function harness(relayPubkey: string | null = RELAY) {
   const inbox = new Inbox((message) => messages.push(message));
   const links = new BotLinks({
     relayPubkey,
-    since: () => 1_795_231_700,
+    since: () => since,
     open: async (bot) => {
       const client = new FakeClient(bot.pubkey);
       clients.set(bot.pubkey, [...(clients.get(bot.pubkey) ?? []), client]);
@@ -84,7 +85,7 @@ test("humanMessageFrom takes the channel from the h tag of the fixture kind 9", 
     channelId: PRIVATE,
     authorPubkey: event.pubkey,
     eventId: event.id,
-    text: "@Coder apenas responda ok",
+    text: "@Coder please reply OK",
     createdAt: event.created_at,
   });
   assert.equal(humanMessageFrom(byKind(9007)), null);
@@ -115,14 +116,14 @@ test("bot link: own 39002 #p subscription, kind 9 per effective channel, re-subs
   await h.links.sync([reviewerBot, coderBot]);
   const coder = h.latest(CODER);
   assert.deepEqual(coder.subs.get("members")?.filters, [{ kinds: [39002], "#p": [CODER] }]);
-  assert.deepEqual(coder.sub(`chat:${INSTALL}`)?.filters, [{ kinds: [9], "#h": [INSTALL], since: 1_795_231_700 }]);
+  assert.deepEqual(coder.sub(`chat:${INSTALL}`)?.filters, [{ kinds: [9], "#h": [INSTALL], since }]);
   assert.equal(coder.has(`chat:${PRIVATE}`), false);
   assert.equal(h.links.client(CODER), coder);
 
   // The relay replays the stored 39002s that list Coder.
   for (const event of botEvents()) coder.emit("members", event);
   assert.deepEqual(h.membership.get(CODER), [PRIVATE, INSTALL].sort());
-  assert.deepEqual(coder.sub(`chat:${PRIVATE}`)?.filters, [{ kinds: [9], "#h": [PRIVATE], since: 1_795_231_700 }]);
+  assert.deepEqual(coder.sub(`chat:${PRIVATE}`)?.filters, [{ kinds: [9], "#h": [PRIVATE], since }]);
   assert.deepEqual(h.links.channels(CODER), [INSTALL, PRIVATE]);
   // Removal detection: the newest list per member channel, whether or not it still names Coder.
   assert.deepEqual(coder.sub("members-d")?.filters, [{ kinds: [39002], "#d": [INSTALL, PRIVATE] }]);
@@ -209,10 +210,9 @@ test("bot link: a CLOSED channel is not retried until the relay lists the bot th
   const h = harness();
   await h.links.sync([{ ...coderBot, scope: [INSTALL, PRIVATE] }]);
   const coder = h.latest(CODER);
-  const [, , reason] = capture().owner_req_private_channel_closed;
   const privateId = coder.id(`chat:${PRIVATE}`);
   assert.ok(privateId);
-  coder.relayClosed(privateId, reason);
+  coder.relayClosed(privateId, NOT_A_CHANNEL_MEMBER);
   await h.links.sync([{ ...coderBot, scope: [INSTALL, PRIVATE] }]);
   assert.equal(coder.has(`chat:${PRIVATE}`), false);
   assert.ok(coder.has(`chat:${INSTALL}`));
@@ -327,7 +327,7 @@ test("a hosted agent discovers a DM stored after its initial members request wit
 
   client.emit("members", dm);
   assert.deepEqual(h.links.channels(CODER), [PRIVATE]);
-  assert.deepEqual(client.sub(`chat:${PRIVATE}`)?.filters, [{ kinds: [9], "#h": [PRIVATE], since: 1_795_231_700 }]);
+  assert.deepEqual(client.sub(`chat:${PRIVATE}`)?.filters, [{ kinds: [9], "#h": [PRIVATE], since }]);
   assert.deepEqual(client.sub("members-d")?.filters, [{ kinds: [39002], "#d": [PRIVATE] }]);
   client.emit(client.id(`chat:${PRIVATE}`)!, byKind(9));
   assert.equal(h.messages[0]?.channelId, PRIVATE);
