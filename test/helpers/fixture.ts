@@ -2,9 +2,10 @@ import { generateKeyPair, signEvent, type NostrEvent } from "../../src/nostr.js"
 
 const relay = generateKeyPair();
 const admin = generateKeyPair();
+const owner = generateKeyPair();
 export const RELAY = relay.pubkey;
 export const ADMIN = admin.pubkey;
-export const OWNER = generateKeyPair().pubkey;
+export const OWNER = owner.pubkey;
 export const CODER = generateKeyPair().pubkey;
 export const INSTALL = "66666666-6666-4666-8666-666666666666";
 export const PRIVATE = "55555555-5555-4555-8555-555555555555";
@@ -16,11 +17,11 @@ const events = [
     ["d", PRIVATE], ["t", "stream"], ["P", RELAY],
     ["p", ADMIN, "", "owner"], ["p", CODER, "", "member"],
   ], start + 10),
-  signEvent(relay.secret, 9000, "", [["h", PRIVATE], ["p", CODER], ["role", "member"]], start + 10),
-  signEvent(relay.secret, 9007, "", [
+  signEvent(admin.secret, 9000, "", [["h", PRIVATE], ["p", CODER], ["role", "member"]], start + 10),
+  signEvent(admin.secret, 9007, "", [
     ["h", PRIVATE], ["name", "Code"], ["visibility", "private"], ["channel_type", "stream"],
   ], start + 5),
-  signEvent(relay.secret, 9000, "", [["h", INSTALL], ["p", CODER], ["role", "bot"]], start),
+  signEvent(owner.secret, 9000, "", [["h", INSTALL], ["p", CODER], ["role", "bot"]], start),
   signEvent(relay.secret, 39002, "", [
     ["d", INSTALL], ["t", "stream"], ["P", RELAY],
     ["p", OWNER, "", "owner"], ["p", CODER, "", "bot"], ["p", ADMIN, "", "admin"],
