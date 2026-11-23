@@ -241,6 +241,14 @@ a relay is added. When `join` starts the local daemon on macOS, it uses the
 same LaunchAgent as `yh start`. If an external supervisor manages a daemon's
 lifecycle, use manual admission and pairing instead. `join` never creates system users or runs
 isolation setup scripts. Existing agents remain on their original relay.
+
+At the end, `join` checks the model catalog of each successfully joined local
+or SSH daemon on the joined relay. Your Mac's Pi login does not carry over to a
+VM. If a daemon has no models, follow the printed instructions to run `yh` and
+`/login` on that machine as its daemon user. Restart that daemon, then re-test
+from the Mac with the printed `yh targets doctor <id>` command. An offline
+daemon is reported separately; neither result undoes admission.
+
 In Buzz, open the joined community and select the desired target when creating
 an agent; the human must also be a community member. Install/update the Buzz
 provider plugin with `yh provider install` if not already done.

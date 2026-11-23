@@ -49,6 +49,13 @@ if selected or already installed. No manual key copy, pairing, or target creatio
 It can also restart a running daemon after admission or a relay change.
 Existing daemons included implicitly are not started when stopped. Use manual
 admission and pairing if a service supervisor manages the daemon's lifecycle.
+`yh join` checks each joined Mac or SSH daemon's model catalog at the end.
+The Mac's Pi login doesn't carry over to a VM. If a catalog is empty, have the
+user follow the printed host and OS account instructions, run `yh` and
+`/login` there, restart that daemon, and re-test from the Mac with the printed
+`yh targets doctor <id>` command. An offline daemon doesn't establish whether
+login is missing.
+
 If `join` cannot discover the relay key or no invite is available, use
 [manual daemon initialization](#manual-daemon-initialization-fallback) and the
 direct admission and pairing steps below.
