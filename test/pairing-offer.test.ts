@@ -222,3 +222,29 @@ test("a Mac provider already in the community pairs with the VM without spending
   assert.deepEqual(summary.map(({ machine, status }) => [machine, status]), [["Mac provider", "already_member"], ["build-vm", "joined"]]);
   assert.deepEqual([claims, consents], [0, 0]);
 });
+
+test("while the operator's offer is open, the provider can read the model catalog before the activation that pairs it", async (t) => {
+  const { daemonHome } = homes(t);
+  const daemon = generateKeyPair();
+  const control = new DeployControl(daemonHome, daemon.secret, { relayUrl: invite.relayUrl, model: { provider: "test", modelId: "offline", label: "test/offline" } });
+  const catalog = async () => {
+    const event = controlEvent(provider.secret, daemon.pubkey, "hosted-models", { requestId: randomUUID(), agentPubkey: daemon.pubkey }, { offset: 0 });
+    const answer = await control.handle(event, async () => false, { publishProfile: async () => {}, updateName: async () => {},
+      reconcileRemoval: async () => {}, models: () => ["test/offline"] });
+    assert.ok(answer);
+    const envelope = verifiedEnvelope(answer, provider.pubkey, "confirmation");
+    assert.ok(envelope);
+    return decryptControl(envelope, provider.secret, control.pubkey) as { ok: boolean; error?: string; catalog?: { models: string[] } };
+  };
+  assert.equal((await catalog()).error, "provider not paired");
+  writePairingOffer(daemonHome, invite.code, "wss://other.example", "vm", Date.now() - 1000, operator.pubkey);
+  assert.equal((await catalog()).error, "provider not paired");
+  writePairingOffer(daemonHome, invite.code, invite.relayUrl, "vm", Date.now() - 1000);
+  assert.equal((await catalog()).error, "provider not paired");
+  writePairingOffer(daemonHome, invite.code, invite.relayUrl, "vm", Date.now() - 1000, operator.pubkey);
+  assert.deepEqual((await catalog()).catalog?.models, ["test/offline"]);
+  assert.equal(listPairings(daemonHome).length, 0);
+  await reply(control, activation(daemon.pubkey, generateKeyPair()) as ReturnType<typeof pairRequest>);
+  assert.ok(readPairing(daemonHome, provider.pubkey));
+  assert.deepEqual((await catalog()).catalog?.models, ["test/offline"]);
+});

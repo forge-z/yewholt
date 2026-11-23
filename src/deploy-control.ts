@@ -122,8 +122,10 @@ export class DeployControl {
         await this.pairOwner(event, envelope, now, pairingRelay, effects);
       }
       const pairing = readPairing(this.home, event.pubkey, pairingRelay);
-      if (!pairing) confirmation.error = "provider not paired";
-      else if (envelope.issuedAt < pairing.pairedAt || envelope.issuedAt > now + 60_000) {
+      const offerSince = !pairing && envelope.type === "hosted-models" ? this.ownerOfferSince(now) : undefined;
+      const since = pairing?.pairedAt ?? offerSince;
+      if (since === undefined) confirmation.error = "provider not paired";
+      else if (envelope.issuedAt < since || envelope.issuedAt > now + 60_000) {
         confirmation.error = "deploy outside pairing window";
       } else {
         let body: unknown;
@@ -133,7 +135,8 @@ export class DeployControl {
           confirmation.error = "invalid ciphertext";
         }
         if (!confirmation.error) {
-          const authorized = () => readPairing(this.home, event.pubkey, pairingRelay)?.pairedAt === pairing.pairedAt;
+          const authorized = () => pairing ? readPairing(this.home, event.pubkey, pairingRelay)?.pairedAt === pairing.pairedAt
+            : this.ownerOfferSince(this.now()) === offerSince;
           if (envelope.type === "hosted-models") {
             if (!authorized()) confirmation.error = "provider not paired";
             else if (now - envelope.issuedAt > 60_000 || envelope.agentPubkey !== this.pubkey ||
@@ -173,6 +176,12 @@ export class DeployControl {
     }
     confirmation.ok = confirmation.error === undefined;
     return controlEvent(this.secret, event.pubkey, "confirmation", envelope, confirmation, this.now());
+  }
+
+  /** While an owner offer is open, any provider may read the model catalog so the owner can pick a model before the activation that pairs it. */
+  private ownerOfferSince(now: number): number | undefined {
+    const offer = readPairingOffer(this.home, now);
+    return offer?.owner && sameRelay(offer.relayUrl, this.defaults.relayUrl) ? offer.createdAt : undefined;
   }
 
   /** Pairs the first provider that activates an agent the offer's owner signed for, while the offer is open. */
