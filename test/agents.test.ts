@@ -378,3 +378,17 @@ test("stranger shutdown is ignored and logged once", async (t) => {
     assert.equal(JSON.stringify(log.mock.calls[0]?.arguments).includes(f.agent.secret), false);
   });
 });
+
+test("daemon profile names the daemon key in member lists", async () => {
+  const { daemonName, daemonProfile } = await import("../src/agents.js");
+  const { secret, pubkey } = generateKeyPair();
+  assert.equal(daemonName({ YEWHOLT_NAME: " Oracle watcher " }), "Oracle watcher");
+  assert.equal(daemonName({}), undefined);
+  assert.equal(daemonName({ YEWHOLT_NAME: "  " }), undefined);
+  const event = daemonProfile(secret, "Oracle watcher", 100);
+  assert.equal(event.kind, 0);
+  assert.equal(event.pubkey, pubkey);
+  assert.equal(event.created_at, 100);
+  assert.ok(verifyEvent(event));
+  assert.deepEqual(JSON.parse(event.content), { name: "Oracle watcher", display_name: "Oracle watcher", about: "Yewholt daemon" });
+});
