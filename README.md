@@ -8,6 +8,8 @@ every agent Yewholt hosts is a Pi session. What Yewholt adds is the part Pi
 does not do on its own: keeping agents alive across restarts and putting them
 in a Buzz community, with relays, keys and pairing handled for you.
 
+[O que é o Yewholt? / What is Yewholt?](ABOUT.md)
+
 ## Architecture
 
 ```text
