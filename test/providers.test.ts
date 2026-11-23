@@ -41,7 +41,8 @@ test("a saved Pi API key enables DeepSeek in the hosted catalog and authenticate
   writeFileSync(authPath, JSON.stringify({
     deepseek: { type: "api_key", key: "pi-test-key" },
   }), { mode: 0o600 });
-  const session = await Yewholt.open(new MemoryStorage(), { home: join(dir, "state"), piDir: dir });
+  process.env.PI_CODING_AGENT_DIR = dir;
+  const session = await Yewholt.open(new MemoryStorage(), { home: join(dir, "state") });
   try {
     assert.ok(session.availableModelReferences().includes("deepseek/deepseek-flash"));
   } finally {
@@ -70,7 +71,8 @@ test("saved OAuth logins list every supporting built-in provider except Anthropi
   for (const provider of providers) {
     assert.equal(models.getProvider(provider.id) !== undefined, provider.id !== "anthropic", provider.id);
   }
-  const session = await Yewholt.open(new MemoryStorage(), { home: join(dir, "state"), piDir: dir });
+  process.env.PI_CODING_AGENT_DIR = dir;
+  const session = await Yewholt.open(new MemoryStorage(), { home: join(dir, "state") });
   try {
     const references = session.availableModelReferences();
     assert.ok(references.some((model) => model.startsWith("openai-codex/")));

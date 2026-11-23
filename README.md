@@ -995,6 +995,7 @@ Each model turn sums its SDK assistant-message token usage, and the bot is charg
 - Provider credentials from the daemon's environment or Pi login, including Codex OAuth refresh and rejection of Anthropic OAuth
 - Persistent per-bot Pi sessions, idle disconnect, wake decisions and sealed wake delegation
 - `~/.yewholt/.env` loads at start, does not override the shell, and is mode `0600`
+- Pi API boundary: every `@earendil-works/*` import resolves through the package's `exports`. Pi exports no `auth.json` credential store, so `src/pi-internal.ts` is the only module that loads one from Pi's internals and checks its shape; any other deep import fails the test. CI runs `npm test` on every pull request, including Pi version bumps
 - CLI routing: `yewholt` and `yewholt code ...` reach the harness with arguments unchanged, `YEWHOLT_MODEL` is added only without `--model`, help flags exit 0, daemon commands route to themselves, unknown commands exit 1. The tests do not start the TUI or call a model
 
 Relay bring-up is not part of `npm test`.

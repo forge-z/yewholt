@@ -125,7 +125,8 @@ test("the hosted bridge provisions, edits model and profile in place, and tombst
   const models = createModels();
   models.setProvider(faux.provider);
   const isolation = new WorkspaceIsolation(home, { YEWHOLT_UNSAFE_SHARED_USER: "1", YEWHOLT_WORKSPACES: join(root, "workspaces") });
-  const session = await Yewholt.open(new MemoryStorage(), { home, models, isolation, piDir: join(home, "pi") });
+  process.env.PI_CODING_AGENT_DIR = join(home, "pi");
+  const session = await Yewholt.open(new MemoryStorage(), { home, models, isolation });
   t.after(() => session.close());
   const reconcile = () => {
     const scan = listAgents(home, defaults);

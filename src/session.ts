@@ -41,8 +41,6 @@ export type SessionOptions = {
   defaultLimit?: number;
   models?: Models;
   isolation?: WorkspaceIsolation;
-  /** Pi's global resources, credentials and sessions directory. */
-  piDir?: string;
   now?: () => number;
   /** Pubkeys besides the owner that may answer code-bot approvals (default `YEWHOLT_ADMINS`). */
   admins?: readonly string[];
@@ -79,7 +77,7 @@ export class Yewholt {
   ) {}
 
   static async open(storage: Storage, options: SessionOptions): Promise<Yewholt> {
-    const agentDir = options.piDir ?? piDir();
+    const agentDir = piDir();
     const runtime = await botModelRuntime(agentDir, options.models);
     const harness = await Harness.open(storage, { models: createModels(), registry: createRegistry() }, ctx);
     const self = new Yewholt(
