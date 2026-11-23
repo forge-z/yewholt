@@ -131,7 +131,7 @@ type Agent = { url: string; respondTo?: string; allowlist?: string[]; owner?: st
  */
 export class WakeWatch {
   private readonly agents = new Map<string, Agent>();
-  /** Every runtime-profile author: messages from agents never wake anyone, so bots cannot wake each other in a loop. */
+  /** Agent runtime-profile authors: messages from agents never wake anyone, so bots cannot wake each other in a loop. */
   private readonly profiled = new Set<string>();
   private readonly presence = new Map<string, { online: boolean; at: number }>();
   private readonly members = new Map<string, { at: number; id: string; pubkeys: Set<string> }>();
@@ -164,7 +164,6 @@ export class WakeWatch {
   private onProfile(event: NostrEvent): void {
     const known = this.agents.get(event.pubkey);
     if (known && known.profileAt > event.created_at) return;
-    this.profiled.add(event.pubkey);
     let content: Record<string, unknown>;
     try {
       const parsed: unknown = JSON.parse(event.content);
@@ -172,6 +171,8 @@ export class WakeWatch {
     } catch {
       content = {};
     }
+    if (content.daemon === true) return;
+    this.profiled.add(event.pubkey);
     if (!httpUrl(content.wake_url)) {
       this.agents.delete(event.pubkey);
       return;

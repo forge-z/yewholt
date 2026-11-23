@@ -129,6 +129,19 @@ test("WakeWatch follows the agent's respond_to and ignores other agents", () => 
   assert.deepEqual(bots.poked, []);
 });
 
+test("WakeWatch does not treat the daemon's wake advertisement as an agent", () => {
+  const { watch, poked } = watcher(() => 1_000_000);
+  watch.accept(profile({ daemon: true, wake_url: url }));
+  watch.accept(message());
+  assert.deepEqual(poked, []);
+
+  const sender = generateKeyPair();
+  watch.accept(signEvent(sender.secret, RUNTIME_PROFILE_KIND, JSON.stringify({ daemon: true, wake_url: url }), []));
+  watch.accept(profile({ wake_url: url, respond_to: "anyone" }));
+  watch.accept(message([["h", "room"]], sender));
+  assert.deepEqual(poked, [url]);
+});
+
 test("WakeWatch trusts only relay-signed member lists", () => {
   const forged = generateKeyPair();
   const poked: string[] = [];

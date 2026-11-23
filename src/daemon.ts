@@ -9,13 +9,13 @@ import { WorkspaceIsolation } from "./isolation.js";
 import { readKey } from "./keys.js";
 import { BotLinks, Inbox, publishAll } from "./bridge.js";
 import { accepted, RelayClient, type RelayLoopback } from "./nostr-client.js";
-import { ownerAuthTag, pubkeyOf, type NostrEvent } from "./nostr.js";
+import { ownerAuthTag, pubkeyOf, signEvent, type NostrEvent } from "./nostr.js";
 import { defaultModel } from "./models.js";
 import { ownerKeyPath, pidPath, sqlitePath, statusPath } from "./paths.js";
 import type { BotRecord } from "./registry.js";
 import { sameRelay } from "./relay-url.js";
 import { ensureOwnerKey, Yewholt } from "./session.js";
-import { ChannelFeed, Doze, requestWake, startWakeServer, WakeWatch, wakeSettings } from "./wake.js";
+import { ChannelFeed, Doze, requestWake, RUNTIME_PROFILE_KIND, startWakeServer, WakeWatch, wakeSettings } from "./wake.js";
 import { DelegatedReaders, delegationEvent } from "./wake-delegation.js";
 
 let stopping = false;
@@ -147,6 +147,13 @@ async function serve(
     if (name) void agentRelayDeadline(owner.publish(daemonProfile(ownerSecret, name))).then((result) => {
       if (!accepted(result)) console.error(`relay ${relayUrl}: daemon profile rejected`);
     }, () => console.error(`relay ${relayUrl}: daemon profile not acknowledged`));
+    if (doze.enabled) {
+      const runtime = signEvent(ownerSecret, RUNTIME_PROFILE_KIND,
+        JSON.stringify({ daemon: true, wake_url: doze.settings.url }), []);
+      void agentRelayDeadline(owner.publish(runtime)).then((result) => {
+        if (!accepted(result)) console.error(`relay ${relayUrl}: daemon runtime profile rejected`);
+      }, () => console.error(`relay ${relayUrl}: daemon runtime profile not acknowledged`));
+    }
     let highWater = cursor(await session.snapshot());
     const botLinks = new BotLinks<BotRecord>({
       relayPubkey: externalRelayPubkey,
