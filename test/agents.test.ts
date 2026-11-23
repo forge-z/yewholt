@@ -44,8 +44,9 @@ async function withAgent(fn: (f: ReturnType<typeof fixture>, session: Yewholt, t
   let now = start;
   const workspaces = mkdtempSync(join(tmpdir(), "yewholt-agent-workspaces-"));
   const isolation = new WorkspaceIsolation(f.home, { YEWHOLT_UNSAFE_SHARED_USER: "1", YEWHOLT_WORKSPACES: workspaces });
+  process.env.PI_CODING_AGENT_DIR = join(f.home, "pi");
   const session = await Yewholt.open(new MemoryStorage(), {
-    home: f.home, models: createModels(), now: () => now, isolation, piDir: join(f.home, "pi"),
+    home: f.home, models: createModels(), now: () => now, isolation,
   });
   try {
     await fn(f, session, (ms) => { now += ms; });

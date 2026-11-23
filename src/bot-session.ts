@@ -1,5 +1,5 @@
 import { mkdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Credential, CredentialStore, Models } from "@earendil-works/pi-ai";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
@@ -7,10 +7,11 @@ import {
   createAgentSession, createAgentSessionServices, createBashToolDefinition, createCodemodeExtension, createMcpExtension,
   createToolSearchExtension, DefaultResourceLoader, getAgentDir, ModelRuntime,
   SessionManager, SettingsManager,
-  type AgentSession, type ExtensionFactory, type LoadedMcpConfig, type ToolDefinition,
+  type AgentSession, type ExtensionFactory, type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { judgeCall, type ApprovalAsk } from "./coding.js";
 import { anthropicApiKeyOnly } from "./models.js";
+import { piAuthStorage, piReadOnlyAuthStorage } from "./pi-internal.js";
 import type { BotRecord } from "./registry.js";
 import { physicalPath, toolPath, within, workspaceCommand, workspaceId, type Roots } from "./workspace.js";
 import { runWorkspaceCommand } from "./workspace-process.js";
@@ -24,23 +25,15 @@ export type BotSessionHost = {
 };
 
 export async function piLoginMissing(agentDir: string): Promise<boolean | undefined> {
-  const { ReadOnlyAuthStorage } = await import(new URL("./core/auth-storage.js",
-    import.meta.resolve("@earendil-works/pi-coding-agent")).href) as {
-      ReadOnlyAuthStorage: new (path: string) => CredentialStore;
-    };
   try {
-    return !(await new ReadOnlyAuthStorage(join(agentDir, "auth.json")).list()).length;
+    return !(await (await piReadOnlyAuthStorage(join(agentDir, "auth.json"))).list()).length;
   } catch {
     return undefined;
   }
 }
 
 export async function botModelRuntime(agentDir: string, models?: Models): Promise<ModelRuntime> {
-  const { AuthStorage } = await import(new URL("./core/auth-storage.js",
-    import.meta.resolve("@earendil-works/pi-coding-agent")).href) as {
-      AuthStorage: { create(path: string): CredentialStore };
-    };
-  const stored = AuthStorage.create(join(agentDir, "auth.json"));
+  const stored = await piAuthStorage(join(agentDir, "auth.json"));
   const allowed = (id: string, credential: Credential | undefined): Credential | undefined =>
     id !== "anthropic" || (credential?.type === "api_key" && !credential.key?.includes("sk-ant-oat"))
       ? credential : undefined;
@@ -80,10 +73,9 @@ export async function createBotSession(
 ): Promise<AgentSession> {
   const code = bot.permissions.includes("code");
   const settings = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
-  const mcpModule = await import(new URL("./extensions/mcp/config.js",
-    import.meta.resolve("@earendil-works/pi-coding-agent")).href) as {
-      loadMcpConfig: (options: { cwd: string; agentDir: string; projectTrusted: boolean }) => LoadedMcpConfig;
-    };
+  if (resolve(agentDir) !== resolve(getAgentDir())) {
+    throw new Error(`Bot sessions must use Pi's agent directory ${getAgentDir()} (PI_CODING_AGENT_DIR), not ${agentDir}.`);
+  }
   let skillRoots: string[] = [];
   const gate: ExtensionFactory = (pi) => {
     pi.on("before_agent_start", (event) => ({ systemPrompt: event.systemPrompt + "\n\n" + instructions }));
@@ -127,10 +119,7 @@ export async function createBotSession(
     },
     extensionFactories: [
       createCodemodeExtension({ mode: "on" }), createToolSearchExtension(),
-      createMcpExtension({
-        loadConfig: () => mcpModule.loadMcpConfig({ cwd, agentDir, projectTrusted: false }),
-        logPath: join(agentDir, "mcp.log"),
-      }), gate,
+      createMcpExtension({ logPath: join(agentDir, "mcp.log") }), gate,
     ],
   });
   await loader.reload({ resolveProjectTrust: async () => false });

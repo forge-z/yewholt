@@ -77,7 +77,8 @@ export async function openSession(
   admins: readonly string[] = [HUMAN],
 ): Promise<Yewholt> {
   ensureOwnerKey(home);
-  const session = await Yewholt.open(storage, { home, models, piDir, isolation, turnTokens: 1000, defaultLimit: 10_000_000, admins });
+  process.env.PI_CODING_AGENT_DIR = piDir;
+  const session = await Yewholt.open(storage, { home, models, isolation, turnTokens: 1000, defaultLimit: 10_000_000, admins });
   homes.set(session, home);
   return session;
 }

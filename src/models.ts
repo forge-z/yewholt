@@ -1,6 +1,7 @@
 import { defaultProviderAuthContext, InMemoryCredentialStore, type ApiKeyCredential, type CredentialStore } from "@earendil-works/pi-ai";
 import { createModels, type Models, type Provider } from "@earendil-works/pi-ai/models";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+import { piAuthStorage } from "./pi-internal.js";
 
 export type ModelChoice = {
   provider: string;
@@ -95,14 +96,7 @@ async function hasCredential(provider: Provider, env: Env, credential?: ApiKeyCr
  * Use the same credentials for catalog admission and model requests.
  */
 export async function loadModels(env: Env = process.env, authPath?: string): Promise<Models> {
-  const stored = await (async (): Promise<CredentialStore> => {
-    if (!authPath) return new InMemoryCredentialStore();
-    const { AuthStorage } = await import(new URL("./core/auth-storage.js",
-      import.meta.resolve("@earendil-works/pi-coding-agent")).href) as {
-      AuthStorage: { create(path: string): CredentialStore };
-    };
-    return AuthStorage.create(authPath);
-  })();
+  const stored: CredentialStore = authPath ? await piAuthStorage(authPath) : new InMemoryCredentialStore();
   const ambient = new Set<string>();
   const credentials: CredentialStore = {
     read: (id, options) => ambient.has(id) ? Promise.resolve(undefined) : stored.read(id, options),
