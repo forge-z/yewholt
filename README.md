@@ -129,9 +129,9 @@ npm run build
 npm link
 ```
 
-With a Buzz invite, run [`yh join --ssh <alias>`](#join-forge-z-or-another-shared-buzz-community)
-from the Mac to initialize the daemon. For manual setup instead, use the
-existing relay's WebSocket URL and public signing key (64 lowercase hex
+With a Buzz invite, run `yh join --ssh <alias>` from the Mac to initialize
+the daemon. For manual setup instead, use the existing relay's WebSocket URL
+and public signing key (64 lowercase hex
 characters). This is the relay's key, not the administrator's or the daemon's.
 
 ```bash
@@ -224,14 +224,13 @@ nonzero exit status. This check does not admit, pair, configure or restart those
 other daemons; they must already serve the joined relay and be paired with the
 provider there for models to load.
 
-The local daemon home is `YEWHOLT_HOME` or `~/.yewholt`. The command never creates
-system users or runs isolation setup scripts. After a successful join, it stops
-and starts a running local or SSH daemon if it was newly admitted or its relay
-was newly added, so it reconnects with its new membership. An already-member daemon with an unchanged
-relay is not restarted. New and stopped daemons are not started; run `yh start`
-when ready. Existing agents remain on their original relay.
-If an external service supervisor manages the daemon, coordinate the restart
-with its operator or use manual admission and pairing.
+The local daemon home is `YEWHOLT_HOME` or `~/.yewholt`. After admission and
+pairing, `join` starts daemons explicitly selected with `--local` or `--ssh`
+if they are stopped. An existing daemon included implicitly stays stopped if it
+was already stopped. A running daemon restarts only when newly admitted or when
+a relay is added. If an external supervisor manages a daemon's lifecycle, use
+manual admission and pairing instead. `join` never creates system users or runs
+isolation setup scripts. Existing agents remain on their original relay.
 In Buzz, open the joined community and select the desired target when creating
 an agent; the human must also be a community member. Install/update the Buzz
 provider plugin with `yh provider install` if not already done.
@@ -515,14 +514,14 @@ yh provider install
 yh join --local
 ```
 
-The first join creates the `mac` target (label `My Mac`). If using direct
-admission instead, set up the daemon manually as in [Daemon install](#daemon-install).
-Start it with `yh start` when ready.
+The first join starts the daemon and creates the `mac` target (label `My Mac`).
+If using direct admission instead, set up and start the daemon manually as in
+[Daemon install](#daemon-install).
 
 For code execution only, have the owner approve and run
-`sudo env PATH="$PATH" scripts/setup-bot-user-macos.sh` from the checkout
-before starting the daemon. Open a new login session to pick up the workspace
-group. The script creates a hidden bot user
+`sudo env PATH="$PATH" scripts/setup-bot-user-macos.sh` from the checkout.
+Open a new login session to pick up the workspace group before starting or
+restarting the daemon. The script creates a hidden bot user
 `yewholt-bot`, group `yewholt-ws`, passwordless sudo only to that bot account,
 and mode-2770 workspaces at `/Users/Shared/yewholt/workspaces`. It restricts the
 daemon user's HOME permissions and writes `YEWHOLT_WORKSPACES` to its `.env`.
