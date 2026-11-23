@@ -41,7 +41,7 @@ yh daemon (VM or Mac) ────────────────┘
 ## Setup
 
 You need Buzz desktop on a Mac, membership in a Buzz community, and one
-community invite per new machine (**Settings → Community admin → Membership →
+community invite per new VM (**Settings → Community admin → Membership →
 Invite**). Node.js 22.19 or newer on every machine.
 
 1. **On the Mac**, install the CLI and the Buzz plugin:
@@ -53,19 +53,24 @@ Invite**). Node.js 22.19 or newer on every machine.
    ```
 
    In Buzz, open **Settings → Plugins → Manage plugins → Add → Browse**, pick
-   the printed plugin folder and approve `yewholt-buzz-bridge`. If the Mac's
-   Yewholt provider has never joined this community, run `yh join` once and
-   paste an invite (it also joins a Mac daemon with `--local`).
+   the printed plugin folder and approve `yewholt-buzz-bridge`. The Mac's
+   Yewholt provider must already be a member of the community. If this is
+   its first setup, have the relay admin admit the provider public key printed
+   by `yh provider install`. Don't use a VM's invite for the Mac.
 
 2. **On each VM**, give your coding agent [the install skill](skills/install/SKILL.md).
-   It installs the CLI, asks you for the invite through a secure secret field,
-   and runs `yh join --daemon`. That one invite is the only input: the command
-   reads the relay details from it, creates the daemon identity, joins the
-   community, starts the daemon and opens a pairing offer for 24 hours.
+   It installs the CLI and runs `yh join --daemon` using an invite from a
+   secure secret field. If your agent has no such field, follow the skill's
+   [manual steps](skills/install/SKILL.md#1-open-the-vm-and-check-prerequisites):
+   open a private VM terminal, install `yh` if needed, then run `yh join --daemon`
+   and paste the invite at the prompt, never in chat. The command joins and
+   starts the daemon and opens a pairing offer for 24 hours. If the VM has
+   no [models](#models), run `yh` and use Pi's `/login` on the VM before
+   continuing.
 
 3. **In Buzz**, as the community operator, create an agent with **Harness →
-   Remote → Yewholt**. The new VM shows up in the target list by itself; pick
-   it and a model. That first agent pairs your Mac with the VM. No second
+   Remote → Yewholt**. Buzz discovers the new VM by its daemon public key;
+   pick it and a model. That first agent pairs your Mac with the VM. No second
    invite, no key to copy, no `yh pair add`.
 
    Buzz hides targets no longer admitted to the community relay. It keeps
@@ -74,9 +79,11 @@ Invite**). Node.js 22.19 or newer on every machine.
    then run `yh targets remove <id> --daemon <pubkey>`. The public key check
    prevents removing a replacement machine with the same hostname by mistake.
 
-   If you are not the community operator, run `yh join` on the Mac with the
-   same invite instead. A Mac provider that is already a member does not use
-   the invite again; it finds the VM's offer and pairs with it.
+   If operator discovery is unavailable (for example, the VM prints
+   `on the Mac: run yh join`), use `yh pair add` and `yh targets add` from
+   [Manual setup without an invite](#manual-setup-without-an-invite) instead
+   of pasting the VM's invite on the Mac. The VM is already joined, so skip
+   `yh install`; use `yh admin keys` only to read its public key.
 
 To use only the coding CLI, step 1 up to `npm link` is enough; run `yh`.
 
