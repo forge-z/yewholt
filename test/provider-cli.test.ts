@@ -260,7 +260,7 @@ test("targets doctor checks the live relay, daemon, pairing and model catalog wi
           ws.send(JSON.stringify(["OK", item.id, allow, hidden + agent.secret]));
         } else if (type === "REQ") {
           if (filter.kinds?.includes(CONTROL_KIND)) subscriptions.set(item, pubkey);
-          if (filter.kinds?.includes(RUNTIME_PROFILE_KIND) && item === "doctor-runtime-profile") {
+          if (filter.kinds?.includes(RUNTIME_PROFILE_KIND) && item === "daemon-runtime-profile") {
             assert.deepEqual(filter.authors, [owner]);
             ws.send(JSON.stringify(["EVENT", item, profile]));
           }
