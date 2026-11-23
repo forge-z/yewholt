@@ -1,9 +1,11 @@
 # O que é o Yewholt? (pt-BR)
 
 O Yewholt é uma camada fina sobre o [Pi](https://pi.dev). O Pi é o motor:
-cada agente roda como uma sessão do Pi. O Yewholt preserva o estado e o
-histórico dessas sessões entre reinícios e conecta os agentes à sua comunidade
-no [Buzz](https://github.com/block/buzz) pelo relay Nostr que ela já usa.
+cada agente roda como uma sessão do Pi. O
+[pi-durable](https://www.npmjs.com/package/@earendil-works/pi-durable) guarda o
+**estado durável de cada agente** entre reinícios, e o Pi guarda o histórico
+da sessão. O Yewholt conecta os agentes à sua comunidade no
+[Buzz](https://github.com/block/buzz) pelo relay Nostr que ela já usa.
 
 ## Que problema ele resolve?
 
@@ -24,8 +26,10 @@ nas próprias máquinas. Para começar, veja a [configuração](README.md#setup)
 # What is Yewholt? (en)
 
 Yewholt is a thin wrapper around [Pi](https://pi.dev). Pi is the engine:
-each agent runs as a Pi session. Yewholt preserves session state and history
-across restarts and connects agents to your [Buzz](https://github.com/block/buzz)
+each agent runs as a Pi session.
+[pi-durable](https://www.npmjs.com/package/@earendil-works/pi-durable) stores
+**each agent's durable state** across restarts, and Pi keeps the session
+history. Yewholt connects agents to your [Buzz](https://github.com/block/buzz)
 community through the Nostr relay it already uses.
 
 ## What problem does it solve?
