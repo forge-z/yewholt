@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { userInfo } from "node:os";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { configuredRelays, loadConfig } from "../src/config.js";
@@ -16,6 +17,7 @@ import { claimInvite, consentToPolicy, inviteRelayPubkey, withInviteInput, type 
 import { normalizeRelay, sameRelay } from "../src/relay-url.js";
 import { targetIds } from "./install.js";
 import { ProviderSecrets } from "./secrets.js";
+import { checkTargetModels } from "./status.js";
 import { loadTarget, providerHome, targetFile, targetRelays, validateTarget, validSshHost, type Target } from "./target.js";
 
 export type Runner = (file: string, args: string[], stdin?: string) => Promise<string>;
@@ -108,6 +110,7 @@ type Dependencies = {
   relayKey: typeof inviteRelayPubkey;
   running: typeof readPid; log: (line: string) => void;
   members: (relay: string, secret: string) => Promise<ReadonlySet<string>>;
+  checkModels: typeof checkTargetModels;
 };
 
 type MachineOptions = JoinOptions & { local?: boolean };
@@ -139,13 +142,37 @@ async function activateDaemon(startStopped: boolean, reconnect: boolean, running
   await run("start");
 }
 
+async function modelCheckMessage({ id, target }: StoredTarget, relay: string, secret: string,
+  deps: Dependencies, host?: string): Promise<string> {
+  const retest = `Re-test from the Mac: yh targets doctor ${id}.`;
+  try {
+    const result = await deps.checkModels(id, { ...target, relay, ssh: host }, secret);
+    if (result.ok) return "Models available.";
+    if (!result.needsLogin) return `${result.message} ${retest}`;
+  } catch {
+    return `Could not check the daemon's model catalog. ${retest}`;
+  }
+  let account = "the daemon's OS user";
+  try {
+    const username = host
+      ? (await remoteShell(host, "id -un", "", deps.runner)).trim().split("\n").at(-1)
+      : userInfo().username;
+    if (username && /^[^\s\x00-\x1f\x7f-\x9f]+$/.test(username)) account = `OS user "${username}"`;
+  } catch {
+    // Still give the login steps if the account lookup fails.
+  }
+  const location = host ? `on ${host} (ssh -t ${quote(host)})` : "on this Mac";
+  return `No models available. As ${account} ${location}, run yh and enter /login using the daemon's HOME and Pi agent directory. ` +
+    `Then restart the daemon (yh stop && yh start for a CLI-managed daemon). ${retest}`;
+}
+
 export async function joinMachines(invite: Invite, hosts: string[], options: MachineOptions,
   ask: (question: string) => Promise<string>, overrides: Partial<Dependencies> = {}): Promise<JoinSummary[]> {
   const deps: Dependencies = {
     daemonHome: yewholtHome(), targetsHome: providerHome(), identity: () => new ProviderSecrets().identity(),
     runner: runCommand, consent: consentToPolicy, claim: claimInvite, configure: configureJoinedRelay, relayKey: inviteRelayPubkey,
     members: async (relay, secret) => readRelayMembers(relay, secret, await discoverRelayPubkey(relay, secret)),
-    running: readPid, log: console.log, ...overrides,
+    running: readPid, log: console.log, checkModels: checkTargetModels, ...overrides,
   };
   const targets = targetIds(deps.targetsHome).map((id) => ({ id, target: loadTarget(id, deps.targetsHome) }));
   const selectedHosts = new Set(hosts);
@@ -162,6 +189,7 @@ export async function joinMachines(invite: Invite, hosts: string[], options: Mac
   const updatedTargets = new Set<string>();
   const onUpdated = ({ id }: StoredTarget) => { updatedTargets.add(id); };
   const handled = new Set<string>();
+  const modelChecks: { machine: string; target: StoredTarget; host?: string }[] = [];
   const reasonOf = (error: unknown) => (error instanceof Error ? error.message : "Join failed")
     .replaceAll(invite.code, "[redacted]").replace(/[\x00-\x1f\x7f-\x9f]/g, " ").slice(0, 400);
   const failed = new Map<string, string>();
@@ -236,7 +264,8 @@ export async function joinMachines(invite: Invite, hosts: string[], options: Mac
     await activateDaemon(options.local === true, status !== "already_member" || added,
       () => Boolean(deps.running(deps.daemonHome)),
       (command) => deps.runner(process.execPath, [cli, command, "--home", deps.daemonHome]));
-    updateJoinTarget(deps.targetsHome, targets, daemon, [...relays, invite.relayUrl], "mac", label, undefined, onUpdated);
+    const target = updateJoinTarget(deps.targetsHome, targets, daemon, [...relays, invite.relayUrl], "mac", label, undefined, onUpdated);
+    modelChecks.push({ machine: localName, target });
     handled.add(daemon);
     return status;
   });
@@ -251,7 +280,8 @@ export async function joinMachines(invite: Invite, hosts: string[], options: Mac
     await remote(["pair", "add", provider, "--label", label, "--relay", invite.relayUrl]);
     await activateDaemon(selectedHosts.has(host), status !== "already_member" || added,
       async () => /^daemon: running\b/m.test(await remote(["status"])), (command) => remote([command]));
-    updateJoinTarget(deps.targetsHome, targets, daemon, [...relays, invite.relayUrl], hostId(host), label, host, onUpdated);
+    const target = updateJoinTarget(deps.targetsHome, targets, daemon, [...relays, invite.relayUrl], hostId(host), label, host, onUpdated);
+    modelChecks.push({ machine: host, target, host });
     handled.add(daemon);
     return status;
   });
@@ -269,7 +299,11 @@ export async function joinMachines(invite: Invite, hosts: string[], options: Mac
       summary.push({ machine: "Registered target membership check", status: "failed", reason: reasonOf(error) });
     }
   }
-  return report();
+  report();
+  const modelMessages = await Promise.all(modelChecks.map(async ({ machine, target, host }) =>
+    `${machine}: ${await modelCheckMessage(target, invite.relayUrl, secret, deps, host)}`));
+  for (const message of modelMessages) deps.log(message);
+  return summary;
 }
 
 export function joinExitCode(summary: JoinSummary[]): 0 | 1 {

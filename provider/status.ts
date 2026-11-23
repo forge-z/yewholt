@@ -96,7 +96,8 @@ export function listTargets(): void {
 
 const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
 
-async function probe(id: string, target: Target, secret: string | undefined): Promise<{ ok: boolean; message: string }> {
+export async function checkTargetModels(id: string, target: Target, secret: string | undefined):
+  Promise<{ ok: boolean; message: string; needsLogin?: boolean }> {
   const fail = (message: string) => ({ ok: false, message });
   if (!secret) return fail("Provider identity missing; run yh provider install on this machine.");
   const client = new RelayClient(target.relay, secret, undefined, false);
@@ -124,8 +125,10 @@ async function probe(id: string, target: Target, secret: string | undefined): Pr
       return fail(`Model catalog unavailable; run yh update on the ${host}, ${restart}, then rerun yh targets doctor ${id}.`);
     }
     if (!catalog.models.length) {
-      if (result.piLoginMissing === true) return fail(`Pi login missing for the daemon user (model catalog empty); ${login}; ${restart}.`);
-      return fail(`Model catalog empty; ${login} and select a supported provider; ${restart}.`);
+      const message = result.piLoginMissing === true
+        ? `Pi login missing for the daemon user (model catalog empty); ${login}; ${restart}.`
+        : `Model catalog empty; ${login} and select a supported provider; ${restart}.`;
+      return { ...fail(message), needsLogin: true };
     }
     return { ok: true, message: `OK — Relay reachable, NIP-42 authenticated; connect + AUTH latency ${latency} ms; daemon online, provider paired, models available.` };
   } catch {
@@ -160,7 +163,7 @@ export async function doctorTargets(id?: string): Promise<void> {
     }
     const relays = targetRelays(target);
     return Promise.all(relays.map(async (relay) => {
-      const { ok, message } = await probe(id, { ...target, relay }, identity);
+      const { ok, message } = await checkTargetModels(id, { ...target, relay }, identity);
       return { ok, configError: false, message: id + (relays.length === 1 ? ": " : " (" + safeText(relay) + "): ") + message };
     }));
   }));

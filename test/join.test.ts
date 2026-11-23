@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { WebSocketServer } from "ws";
@@ -27,7 +27,7 @@ function fixture(t: TestContext) {
   const home = mkdtempSync(join(tmpdir(), "yewholt-join-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const daemonHome = join(home, "daemon"), targetsHome = join(home, "provider");
-  return { daemonHome, targetsHome };
+  return { daemonHome, targetsHome, checkModels: async () => ({ ok: true, message: "Models available." }) };
 }
 
 function install(home: string) {
@@ -256,6 +256,7 @@ test("local and remembered SSH machines reuse consent, pair, update targets, res
   let policyCalls = 0;
   const claims: string[] = [];
   const log: string[] = [];
+  const checked: string[] = [];
   const runner: Runner = async (_file, args, stdin) => {
     commands.push({ args, stdin });
     const command = args.at(-1)!;
@@ -264,6 +265,7 @@ test("local and remembered SSH machines reuse consent, pair, update targets, res
     if (command.includes("list")) return JSON.stringify([{ relayUrl: primary }]);
     if (command.includes("status")) return "daemon: running (42)\n";
     if (command.includes("join")) return "Already a member of wss://buzz.example";
+    if (command.includes("id -un")) return "vm-user\n";
     return "";
   };
   const summary = await joinMachines(invite, ["owner@vm"], {}, async () => { throw Error("must not ask twice"); }, {
@@ -271,6 +273,15 @@ test("local and remembered SSH machines reuse consent, pair, update targets, res
     consent: async () => { policyCalls++; return consent; },
     claim: async (_invite, approval, secret) => { assert.equal(approval, consent); claims.push(secret); return "joined"; },
     configure: (home, url, secret) => configureJoinedRelay(home, url, secret, undefined, async () => relay.pubkey),
+    checkModels: async (id, target, secret) => {
+      assert.equal(target.relay, invite.relayUrl);
+      assert.equal(secret, provider.secret);
+      assert.ok(commands.some(({ args }) => args.at(-1)!.includes("start") && args.includes("owner@vm")));
+      assert.equal(loadTarget(id, homes.targetsHome).daemonPubkey, target.daemonPubkey);
+      checked.push(id);
+      return id === "my-mac" ? { ok: true, message: "Models available." }
+        : { ok: false, message: "No models", needsLogin: true };
+    },
   });
   assert.equal(policyCalls, 1);
   assert.deepEqual(claims, [provider.secret, owner.secret]);
@@ -292,6 +303,11 @@ test("local and remembered SSH machines reuse consent, pair, update targets, res
   assert.ok(!remoteJoin.args.join(" ").includes(invite.code));
   assert.match(remoteJoin.args.at(-1)!, /--accept-policy/);
   assert.match(remoteJoin.args.at(-1)!, /--confirm-age/);
+  assert.deepEqual(checked, ["my-mac", "my-vm"]);
+  assert.deepEqual(log.slice(-2), [
+    "My Mac daemon: Models available.",
+    `owner@vm: No models available. As OS user "vm-user" on owner@vm (ssh -t 'owner@vm'), run yh and enter /login using the daemon's HOME and Pi agent directory. Then restart the daemon (yh stop && yh start for a CLI-managed daemon). Re-test from the Mac: yh targets doctor my-vm.`,
+  ]);
 });
 
 test("successful local and SSH joins update every alias of the daemon without changing target metadata", async (t) => {
@@ -416,15 +432,19 @@ test("existing local relays do not restart a running daemon and already-member i
   const homes = fixture(t);
   install(homes.daemonHome);
   saveConfig(homes.daemonHome, { relayUrl: invite.relayUrl, externalRelayPubkey: relay.pubkey });
+  const log: string[] = [];
   const summary = await joinMachines(invite, [], {}, async () => "yes", {
-    ...homes, identity: () => provider.secret, log: () => {}, consent: async () => consent,
+    ...homes, identity: () => provider.secret, log: (s) => log.push(s), consent: async () => consent,
     claim: async () => "already_member", running: () => 42,
     configure: (home, url, secret) => configureJoinedRelay(home, url, secret, undefined, async () => relay.pubkey),
     runner: async () => { throw Error("must not restart"); },
+    checkModels: async () => ({ ok: false, message: "No models", needsLogin: true }),
   });
   assert.deepEqual(summary.map(({ status }) => status), ["already_member", "already_member"]);
   assert.equal(joinExitCode(summary), 0);
   assert.equal(loadTarget("mac", homes.targetsHome).relay, invite.relayUrl);
+  assert.ok(log.at(-1)!.includes(`As OS user "${userInfo().username}" on this Mac, run yh and enter /login`));
+  assert.match(log.at(-1)!, /yh targets doctor mac\.$/);
 });
 
 test("implicitly included daemons only restart if running with new admission or an added relay", async (t) => {
@@ -436,9 +456,9 @@ test("implicitly included daemons only restart if running with new admission or 
           install(homes.daemonHome);
           if (!added) saveConfig(homes.daemonHome, { relayUrl: invite.relayUrl, externalRelayPubkey: relay.pubkey });
           updateJoinTarget(homes.targetsHome, [], remoteOwner.pubkey, [primary], "vm", "VM", "vm");
-          const localCommands: string[] = [], remoteCommands: string[] = [];
+          const localCommands: string[] = [], remoteCommands: string[] = [], log: string[] = [];
           const summary = await joinMachines(invite, [], {}, async () => "yes", {
-            ...homes, identity: () => provider.secret, log: () => {}, consent: async () => consent,
+            ...homes, identity: () => provider.secret, log: (s) => log.push(s), consent: async () => consent,
             claim: async () => status, running: () => running ? 42 : null,
             configure: (home, url, secret) => configureJoinedRelay(home, url, secret, undefined, async () => relay.pubkey),
             runner: async (file, args) => {
@@ -455,12 +475,18 @@ test("implicitly included daemons only restart if running with new admission or 
               if (command.includes("status")) return running ? "daemon: running (42)\n" : "daemon: stopped\n";
               return "";
             },
+            checkModels: async () => running ? { ok: true, message: "Models available." }
+              : { ok: false, message: "Daemon offline or not responding." },
           });
           assert.deepEqual(summary.map((result) => result.status), [status, status, status]);
           const restart = running && (status === "joined" || added);
           assert.deepEqual(localCommands, restart ? ["stop", "start"] : []);
           assert.deepEqual(remoteCommands.filter((command) => command.includes("stop") || command.includes("start"))
             .map((command) => command.includes("stop") ? "stop" : "start"), restart ? ["stop", "start"] : []);
+          if (!running) {
+            assert.equal(log.at(-1), "vm: Daemon offline or not responding. Re-test from the Mac: yh targets doctor vm.");
+            assert.ok(log.every((line) => !line.includes("/login")));
+          }
         });
       }
     }
