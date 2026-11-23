@@ -1,10 +1,11 @@
 import { lstatSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writeAtomic, writePrivateJson } from "../src/control-files.js";
 import { sameRelay } from "../src/relay-url.js";
 import { loadTarget, providerHome, targetFile, targetRelays, validId } from "./target.js";
+import { runtimeBridge, runtimeHome } from "./runtime-paths.js";
 
 const marker = "#!/bin/sh\n# Managed by yewholt\n";
 const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
@@ -90,8 +91,12 @@ export function removeLegacyEntries(): void {
 export function installProvider(): string {
   removeLegacyEntries();
   const bridge = fileURLToPath(new URL("./bridge.js", import.meta.url));
+  const cached = dirname(join(runtimeHome(), "current", runtimeBridge));
   install(join(providerBin(), "yewholt-buzz-bridge"), [
     "export YEWHOLT_PROVIDER_HOME=" + quote(resolve(providerHome())),
+    'if cached=$(CDPATH= cd -P ' + quote(cached) + ' 2>/dev/null && pwd) && [ -f "$cached/bridge.js" ]; then',
+    '  exec ' + quote(process.execPath) + ' "$cached/bridge.js" "$@"',
+    'fi',
     "exec " + [process.execPath, bridge].map(quote).join(" ") + ' "$@"',
   ]);
   const plugin = join(resolve(providerHome()), "buzz-plugin");

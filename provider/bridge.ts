@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash, randomUUID } from "node:crypto";
-import { linkSync, unlinkSync } from "node:fs";
+import { linkSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { record, writePrivateJson } from "../src/control-files.js";
@@ -15,6 +15,7 @@ import { ProviderSecrets } from "./secrets.js";
 import { recordOutcome } from "./status.js";
 import { InvalidTargetRelay, findTarget, loadTarget, privateJson, providerHome, relayUrl, targetRelays, validId, type Target } from "./target.js";
 import { runWake } from "./wake.js";
+import { refreshRuntime } from "./runtime-update.js";
 
 type Binding = {
   target: string; relay: string; daemon: string; community: string;
@@ -185,6 +186,18 @@ export async function bridge(input: unknown, wait: RelayWait = waitForConfirmati
   publishProfile = publishProviderProfile) {
   try {
     if (!record(input)) return fail("Invalid Yewholt request");
+    if (input.op === "plugin-ui-v1") {
+      const source = readFileSync(new URL("../../provider/plugin-ui.mjs", import.meta.url), "utf8");
+      if (!source || JSON.stringify(source).length > 262_000) return fail("Invalid Yewholt UI module");
+      return { ...ok, source };
+    }
+    if (input.op === "plugin-update-v1") {
+      try {
+        return { ...ok, updated: await refreshRuntime() };
+      } catch (error) {
+        return fail(error instanceof Error ? error.message : "Yewholt runtime update failed.");
+      }
+    }
     if (input.op === "targets") {
       const community = normalizeRelay(input.community);
       const roster = await discoverOwnerTargets(community, discover, publishProfile);

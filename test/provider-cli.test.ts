@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -71,6 +71,28 @@ test("provider install, target add, pair and remove end to end; install deletes 
   assert.equal(existsSync(target("vm")), true);
   assert.equal(run("targets", "remove", "vm", "--daemon", daemon.pubkey).status, 0);
   assert.equal(existsSync(target("vm")), false);
+});
+
+test("the installed launcher serves updated Buzz UI without modifying the installed plugin source", (t) => {
+  const { bin, config, env, run } = fixture(t);
+  assert.equal(run("provider", "install").status, 0);
+  const shim = join(config, "buzz-plugin", "plugin.js");
+  const shipped = readFileSync(shim, "utf8");
+  const launch = () => {
+    const child = spawnSync(join(bin, "yewholt-buzz-bridge"), {
+      env, input: JSON.stringify({ op: "plugin-ui-v1" }), encoding: "utf8", timeout: 5_000,
+    });
+    assert.equal(child.status, 0, child.stderr + child.stdout);
+    return JSON.parse(child.stdout).source;
+  };
+  assert.equal(launch(), readFileSync(new URL("../../provider/plugin-ui.mjs", import.meta.url), "utf8"));
+  const runtime = join(config, "buzz-runtime");
+  const release = join(runtime, "release-abcdef", "dist", "provider");
+  mkdirSync(release, { recursive: true });
+  writeFileSync(join(release, "bridge.js"), 'console.log(JSON.stringify({ok: true, source: "next UI"}));');
+  symlinkSync("release-abcdef", join(runtime, "current"));
+  assert.equal(launch(), "next UI");
+  assert.equal(readFileSync(shim, "utf8"), shipped);
 });
 
 test("targets validate IDs, relay, daemon and wake; commands never echo malformed arguments", (t) => {

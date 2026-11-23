@@ -130,10 +130,21 @@ yh update
 Run it on the Mac and on each daemon host. It updates the checkout of the
 running CLI: `git pull --ff-only` in a Git checkout, otherwise it downloads the
 latest `main` tarball from GitHub (no Git or GitHub login needed). It then
-rebuilds, refreshes the Buzz bridge if installed, and restarts a running
-daemon. `yh update --archive <file.tar>` uses a local tarball instead. After
-updating the Mac, click **Update** on the Yewholt plugin in Buzz (**Settings →
-Plugins → Manage plugins**) so Buzz reloads it.
+rebuilds, refreshes the Buzz bridge launcher if installed, and restarts a
+running daemon. `yh update --archive <file.tar>` uses a local tarball instead.
+
+The enabled Buzz plugin checks Yewholt's GitHub `main` at startup and about
+once an hour. It builds updates in a separate runtime cache and switches the
+bridge only after a successful build and startup check. If offline or an update
+fails, it keeps using the working runtime. This does not update the CLI checkout,
+restart the daemon, or change targets, pairings or keys. Buzz loads updated UI
+the next time it starts, without a plugin **Update** click. Keep the plugin's
+existing process approval: the bridge and UI run code from Yewholt's `main`.
+
+Existing Buzz installs need to move to the stable plugin once: run `yh update`
+on the Mac, then use **Settings → Plugins → Manage plugins → Yewholt → Update**.
+After this one-time migration, subsequent bridge and UI updates do not require
+`yh provider install` or the **Update** button.
 
 ## Harness
 
