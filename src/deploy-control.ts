@@ -133,7 +133,7 @@ export class DeployControl {
             if (!authorized()) confirmation.error = "provider not paired";
             else if (envelope.type === "deploy") confirmation.error = this.hosted.manages(envelope.agentPubkey)
               ? "agent is managed by hosted control" : this.apply(event, envelope, body, isReserved, now);
-            else if (envelope.type !== "confirmation" && effects) {
+            else if (envelope.type !== "confirmation" && envelope.type !== "wake-delegation" && effects) {
               if (this.scope && !(record(body) && typeof body.community === "string" && sameRelay(body.community, relay))) {
                 confirmation.error = "hosted operation belongs to another relay";
               } else {

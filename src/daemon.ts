@@ -15,7 +15,8 @@ import { ownerKeyPath, pidPath, sqlitePath, statusPath } from "./paths.js";
 import type { BotRecord } from "./registry.js";
 import { sameRelay } from "./relay-url.js";
 import { ensureOwnerKey, Yewholt } from "./session.js";
-import { Doze, requestWake, startWakeServer, WakeWatch, wakeSettings } from "./wake.js";
+import { ChannelFeed, Doze, requestWake, startWakeServer, WakeWatch, wakeSettings } from "./wake.js";
+import { DelegatedReaders, delegationEvent } from "./wake-delegation.js";
 
 let stopping = false;
 
@@ -135,6 +136,8 @@ async function serve(
   let serving = true;
   let idle = false;
   let local = new Set<string>();
+  let feed: ChannelFeed | undefined;
+  let readers: DelegatedReaders | undefined;
   const drain = (phase: OutboxPhase) => publishOutbox(session, ownerSecret, owner, links, connectBot, phase, onRelay, primary);
   const cursor = (state: Awaited<ReturnType<Yewholt["snapshot"]>>) =>
     primary ? state.highWater : state.highWaterByRelay?.[relayUrl];
@@ -199,10 +202,36 @@ async function serve(
     };
     wake.add(notify);
     if (externalRelayPubkey) {
-      const watch = new WakeWatch(externalRelayPubkey, () => local, (url) => {
+      const relayPubkey = externalRelayPubkey;
+      const watch = new WakeWatch(relayPubkey, () => local, (url) => {
+        console.log(`wake: requesting ${url}`);
         void requestWake(url).then((ok) => { if (!ok) console.error("wake: no answer from an agent's wake URL"); });
       });
-      owner.subscribe("wake-watch", watch.filters(Math.floor(Date.now() / 1000)), (event) => watch.accept(event));
+      const accept = (event: NostrEvent) => watch.accept(event);
+      const stale = () => {
+        console.error(`relay ${relayUrl}: wake feed stopped answering, reconnecting`);
+        void owner.close();
+      };
+      owner.subscribe("wake-watch", watch.filters(Math.floor(Date.now() / 1000)), accept);
+      feed = new ChannelFeed(owner, accept, relayPubkey, undefined, stale);
+      feed.start();
+      // Only an always-on daemon reads for sleeping agents; a dozing one would drop them when it sleeps.
+      if (!doze.enabled) {
+        const delegated = new DelegatedReaders(ownerSecret, async (agent, secret, authTag) => {
+          const client = new RelayClient(relayUrl, secret, authTag, false, loopback);
+          try {
+            await agentRelayDeadline(client.connect());
+          } catch (error) {
+            await client.close();
+            throw error;
+          }
+          const agentFeed = new ChannelFeed(client, accept, relayPubkey, agent, stale);
+          agentFeed.start();
+          return { close: async () => { agentFeed.stop(); await client.close(); } };
+        });
+        readers = delegated;
+        owner.subscribe("wake-delegation", delegated.filters(), (event) => delegated.accept(event));
+      }
     }
     owner.subscribe("deploy-control", [{ kinds: [CONTROL_KIND], "#p": [control.pubkey] }], (event) => {
       if (!serving || stopping) return;
@@ -265,15 +294,36 @@ async function serve(
         await session.offlineAgents(links.connectedAgents());
         await drain("offline");
       }
+      if (idle && doze.settings.watcher && owner.isOpen()) {
+        await delegateToWatcher(session, ownerSecret, owner, doze.settings.watcher, relayUrl,
+          (await session.snapshot()).bots.filter(onRelay));
+      }
       if (idle) {
         doze.sleep();
         console.log(`relay ${relayUrl}: idle, connections closed until the wake URL is requested`);
       }
     } finally {
       linksByRelay.delete(relayUrl);
+      feed?.stop();
+      await readers?.closeAll();
       await links?.closeAll();
       await owner.close();
       await refreshStatus();
+    }
+  }
+}
+
+/** Hands each agent's key, sealed, to the watcher so it can read the agent's DMs while this VM sleeps. */
+async function delegateToWatcher(session: Yewholt, ownerSecret: string, owner: RelayClient, watcher: string,
+  relayUrl: string, bots: BotRecord[]): Promise<void> {
+  for (const bot of bots) {
+    try {
+      const authTag = bot.authTag ?? ownerAuthTag(ownerSecret, bot.pubkey, "");
+      const result = await agentRelayDeadline(owner.publish(
+        delegationEvent(ownerSecret, watcher, bot.pubkey, session.botSecret(bot), authTag)));
+      if (!accepted(result)) console.error(`relay ${relayUrl}: wake delegation for ${bot.name} rejected`);
+    } catch {
+      console.error(`relay ${relayUrl}: wake delegation for ${bot.name} not sent`);
     }
   }
 }
