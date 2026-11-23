@@ -10,7 +10,8 @@ import { ProviderSecrets } from "../provider/secrets.js";
 import { loadTarget } from "../provider/target.js";
 import { runWake } from "../provider/wake.js";
 import { controlEvent, decryptControl, verifiedEnvelope } from "../src/control-protocol.js";
-import { generateKeyPair, pubkeyOf, type NostrEvent } from "../src/nostr.js";
+import { generateKeyPair, pubkeyOf, signEvent, type NostrEvent } from "../src/nostr.js";
+import { RUNTIME_PROFILE_KIND } from "../src/wake.js";
 
 const root = mkdtempSync(join(homedir(), "yewholt-provider-test-"));
 after(() => rmSync(root, { force: true, recursive: true }));
@@ -95,6 +96,77 @@ test("control requests wait two 120s windows, wake only on timeout, and reuse th
   mode = "refused";
   assert.deepEqual(await send(), { result: "refused", wakeFailed: false });
   assert.deepEqual(attempts, ["wait"]);
+});
+
+test("relay control wakes an idle daemon using its signed announcement, with or without a configured hook", async (t) => {
+  const provider = generateKeyPair();
+  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  t.after(async () => {
+    for (const ws of server.clients) ws.terminate();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const addr = server.address();
+  assert.ok(addr && typeof addr === "object");
+  const target = { ...relay, relay: "ws://127.0.0.1:" + addr.port };
+  const wakeUrl = "https://wake.example.test/";
+  const untrusted = JSON.stringify({ daemon: true, wake_url: "https://untrusted.example.test/" });
+  const profile = signEvent(daemon.secret, RUNTIME_PROFILE_KIND, JSON.stringify({ daemon: true, wake_url: wakeUrl }), []);
+  let advertise = true;
+  let asleep = true;
+  server.on("connection", (ws) => {
+    ws.send(JSON.stringify(["AUTH", "challenge"]));
+    ws.on("message", (data) => {
+      const [type, item, filter] = JSON.parse(data.toString());
+      if (type === "AUTH" || type === "EVENT") ws.send(JSON.stringify(["OK", item.id, true, ""]));
+      if (type === "REQ" && filter.kinds.includes(RUNTIME_PROFILE_KIND)) {
+        assert.deepEqual(filter.authors, [daemon.pubkey]);
+        ws.send(JSON.stringify(["EVENT", item, signEvent(owner.secret, RUNTIME_PROFILE_KIND, untrusted, [])]));
+        ws.send(JSON.stringify(["EVENT", item, { ...profile, content: untrusted }]));
+        if (advertise) ws.send(JSON.stringify(["EVENT", item, profile]));
+        ws.send(JSON.stringify(["EOSE", item]));
+      }
+      if (type === "EVENT" && !asleep) {
+        const context = JSON.parse(item.content);
+        const reply = controlEvent(daemon.secret, provider.pubkey, "confirmation", context,
+          { job: context.requestId, agentPubkey: context.agentPubkey, ok: true });
+        ws.send(JSON.stringify(["EVENT", "deploy-confirmation", reply]));
+      }
+    });
+  });
+  const calls: string[] = [];
+  const fetchWake: typeof fetch = async (resource, init) => {
+    const url = String(resource);
+    calls.push(init?.method + " " + url);
+    if (url === "https://api.instabox.sh/v1/machines/m_fixture") return Response.json({ state: "running" });
+    assert.equal(url, wakeUrl);
+    asleep = false;
+    return new Response(null, { status: 204 });
+  };
+  for (const mode of ["read", "write"] as const) {
+    asleep = true;
+    const wake = mode === "write" ? { kind: "instabox" as const, accountId: "acc_test", machineId: "m_fixture" } : undefined;
+    const ids: string[] = [];
+    const result = await sendControl({ ...target, wake }, provider.secret, mode === "read" ? "hosted-models" : "deploy",
+      requestId, daemon.pubkey, {}, {
+        wait: (target, secret, event, id, agent) => {
+          ids.push(id);
+          return waitForConfirmation(target, secret, event, id, agent, ids.length === 1 ? 250 : 5_000);
+        },
+        wake: (config, id, timeout) => runWake(config, id, timeout, () => "fixture-token", fetchWake),
+      }, mode);
+    assert.deepEqual(result, { result: "confirmed", wakeFailed: false });
+    assert.equal(ids.length, 2);
+    assert.equal(ids[0] === ids[1], mode === "write");
+    assert.deepEqual(calls.splice(0), mode === "write" ?
+      ["GET https://api.instabox.sh/v1/machines/m_fixture", "GET " + wakeUrl] : ["GET " + wakeUrl]);
+  }
+  advertise = false;
+  const result = await sendControl(target, provider.secret, "hosted-models", requestId, daemon.pubkey, {}, {
+    wait: async () => "timeout",
+    wake: () => assert.fail("untrusted profiles cannot trigger wake"),
+  }, "read");
+  assert.deepEqual(result, { result: "timeout", wakeFailed: false });
 });
 
 test("relay OK alone is insufficient; confirmation must be signed by the paired daemon and match both ids", async () => {

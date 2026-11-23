@@ -232,9 +232,16 @@ YEWHOLT_WAKE_PORT=8787
 ```
 
 After `YEWHOLT_IDLE_MINUTES` (default 10) without work, the daemon goes
-offline and disconnects so the VM can pause. Another always-on Yewholt daemon
-in the same community (a "watcher") sees new messages for offline agents and
-calls the wake URL. A watcher can run as a container:
+offline and disconnects so the VM can pause. The daemon announces its wake URL
+on the relay. If a Buzz request such as listing models or deploying an agent
+times out, the bridge looks up the daemon's signed announcement, calls the URL,
+and retries. This works for targets added through join or discovery, without
+manually setting a wake hook. If the target has a separate hook, the bridge
+also runs it: starting a VM alone does not wake an already-running idle daemon.
+
+Another always-on Yewholt daemon in the same community (a "watcher") sees new
+messages for offline agents and calls the wake URL. A watcher can run as a
+container:
 
 ```sh
 docker run -d --name yewholt-watcher --restart unless-stopped \

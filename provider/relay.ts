@@ -3,10 +3,11 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { record } from "../src/control-files.js";
 import { CONTROL_KIND, controlEvent, decryptControl, verifiedEnvelope, type ControlType } from "../src/control-protocol.js";
 import { RelayClient, accepted } from "../src/nostr-client.js";
-import { pubkeyOf, type NostrEvent } from "../src/nostr.js";
+import { pubkeyOf, verifyEvent, type NostrEvent } from "../src/nostr.js";
 import { readRelayMembers } from "../src/relay-discovery.js";
 import { relaySigningPubkey } from "../src/relay-join.js";
 import { publishServiceProfile, readLatestProfiles, serviceProfileEvent, serviceProfileName } from "../src/service-profile.js";
+import { httpUrl, RUNTIME_PROFILE_KIND } from "../src/wake.js";
 import type { Target, Wake } from "./target.js";
 
 const WINDOW_MS = 120_000;
@@ -142,7 +143,47 @@ export const waitForConfirmation: RelayWait = async (target, secret, event, requ
   return "timeout";
 };
 
-/** Wakes once on timeout. Writes retry the same event; reads start fresh after waking. */
+export async function readDaemonWakeUrl(client: RelayClient, daemon: string): Promise<string | undefined> {
+  const id = "daemon-runtime-profile";
+  let timer: NodeJS.Timeout | undefined;
+  let newest: NostrEvent | undefined;
+  try {
+    const profile = await new Promise<NostrEvent | undefined>((resolve) => {
+      timer = setTimeout(() => resolve(undefined), 1_000);
+      client.subscribe(id, [{ kinds: [RUNTIME_PROFILE_KIND], authors: [daemon], limit: 1 }], (event) => {
+        try {
+          if (event.kind !== RUNTIME_PROFILE_KIND || event.pubkey !== daemon ||
+              !Number.isSafeInteger(event.created_at) || !verifyEvent(event)) return;
+          if (!newest || event.created_at > newest.created_at ||
+              (event.created_at === newest.created_at && event.id < newest.id)) newest = event;
+        } catch {
+          // Ignore malformed events.
+        }
+      }, () => resolve(undefined), () => resolve(newest));
+    });
+    const content: unknown = JSON.parse(profile?.content ?? "null");
+    if (record(content) && content.daemon === true && httpUrl(content.wake_url)) return content.wake_url;
+  } catch {
+    // A missing or unreadable profile does not prevent a configured wake or retry.
+  } finally {
+    clearTimeout(timer);
+    client.unsubscribe(id);
+  }
+}
+
+async function lookupDaemonWakeUrl(target: Target, secret: string): Promise<string | undefined> {
+  const client = new RelayClient(target.relay, secret, undefined, false);
+  try {
+    await client.connect(1_000);
+    return await readDaemonWakeUrl(client, target.daemonPubkey);
+  } catch {
+    return undefined;
+  } finally {
+    await client.close();
+  }
+}
+
+/** Wakes on timeout. Writes retry the same event; reads start fresh after waking. */
 export async function sendControl(target: Extract<Target, { transport: "relay" }>, secret: string,
   op: Exclude<ControlType, "confirmation">, requestId: string, agentPubkey: string, body: unknown,
   services: { wait: RelayWait; wake: (config: Wake, requestId: string, timeoutMs: number) => Promise<void>;
@@ -153,14 +194,15 @@ export async function sendControl(target: Extract<Target, { transport: "relay" }
   const firstWindow = mode === "write" ? WINDOW_MS : (target.wake ? BEFORE_WAKE_MS : READ_WINDOW_MS);
   let result = await wait(firstWindow);
   let wakeFailed = false;
-  if (result === "timeout" && (target.wake || mode === "write")) {
-    if (target.wake) {
-      try {
-        await services.wake(target.wake, requestId, WINDOW_MS);
-      } catch {
-        wakeFailed = true;
-      }
+  if (result === "timeout") {
+    const url = await lookupDaemonWakeUrl(target, secret);
+    const hooks = target.wake ? [target.wake] : [];
+    if (url && !(target.wake?.kind === "url" && new URL(target.wake.url).href === new URL(url).href)) {
+      hooks.push({ kind: "url", url });
     }
+    if (mode === "read" && !hooks.length) return { result, wakeFailed };
+    const wakes = await Promise.allSettled(hooks.map(async (hook) => services.wake(hook, requestId, WINDOW_MS)));
+    wakeFailed = wakes.some((wake) => wake.status === "rejected");
     if (mode === "read") {
       requestId = randomUUID();
       event = makeEvent(requestId);
