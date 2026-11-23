@@ -1,22 +1,23 @@
 # Yewholt
 
-**Yewholt: a pi coding harness, and durable agents on Buzz.**
+**Yewholt: a Pi coding harness and durable agents on Buzz.**
 
-Yewholt has two roles:
-
-1. **Coding harness.** Type `yh` in any directory and it opens an interactive [pi](https://pi.dev) coding-agent session there. It is the same harness as the `pi` CLI and loads the same pi packages (extensions, skills, prompt templates, themes). `yewholt` is an alias. See [Harness](#harness).
-2. **Durable agents on Buzz.** The headless daemon runs on a Linux VM or natively on the Mac and connects to an existing [Buzz](https://github.com/block/buzz) relay. The Mac runs the Buzz app with the Yewholt plugin and bridge; a Mac-local daemon needs no Docker or local relay.
-
-MCP servers, skills and trusted Pi extensions are shared with the coding CLI. Calendar, email and other integrations can be supplied by those extensions or MCP servers.
+- **At your terminal:** `yh` opens [Pi](https://pi.dev) in the current directory. `yewholt` is an alias. See [Harness](#harness).
+- **In Buzz:** Create an agent and choose which machine runs it. The daemon runs natively on Linux or macOS and connects to an existing [Buzz](https://github.com/block/buzz) relay. Each bot keeps its own [Pi conversation history](#pi-resources-and-bot-sessions) across restarts.
 
 ## Agent-first setup
 
-Give your coding agent [the installation skill](skills/install/SKILL.md) and
-the SSH aliases and Buzz relay for the VMs you want to use. The agent sets up
-`yh`, the Mac bridge, and a daemon on each VM. The relay administrator must
-admit the daemon and provider identities; approve the plugin in Buzz when
-prompted. Then use **Harness → Remote → Yewholt** to create an agent and choose
-a model.
+1. Give your coding agent [the installation skill](skills/install/SKILL.md).
+   Tell it which machines should run agents: the Mac itself, Linux VMs it
+   can already reach over SSH, or both. No Docker is needed.
+2. Use [`yh join`](#join-forge-z-or-another-shared-buzz-community) from the Mac
+   and paste the community invite when prompted. It admits and pairs
+   initialized daemons and creates their Buzz targets without copying keys.
+   A fresh daemon still needs the relay's public signing key during setup.
+   If the community doesn't use invites, the skill covers direct admission.
+3. In Buzz, add and approve the [Yewholt plugin](#buzz-106-yewholt-remote-agents).
+   In the matching community, open **Harness → Remote → Yewholt**, select a
+   machine, and check that its model list loads before creating an agent.
 
 For the Mac coding CLI alone, build a checkout with Node.js 22.19+:
 
@@ -30,8 +31,9 @@ yh
 Every `npm run build` preserves the CLI's Node shebang and marks the output
 executable, so rebuilding keeps the linked `yh` and `yewholt` commands runnable.
 
-The first run opens pi in the current directory. Use pi's `/login` and
-`/model` for the local harness; VM credentials are configured separately.
+The first run opens Pi in the current directory. Use Pi's `/login` and
+`/model` for the local harness. For Buzz, set up at least one
+[model login on each daemon host](#provider-keys-on-the-host), as the daemon user.
 
 ## Updating
 
@@ -44,8 +46,10 @@ running CLI (not the current directory) with `git pull --ff-only`, removes old
 `dist` output, runs `npm ci` and `npm run build`, and refreshes the Buzz bridge
 if installed. A running daemon for `--home` (default `$YEWHOLT_HOME` or
 `~/.yewholt`) is restarted with the new build; a stopped daemon stays stopped.
-The relay is never touched. The update stops at the first failed command with
-that command's exit code.
+The relay is never touched. In Buzz, use **Settings → Plugins → Manage
+plugins → Yewholt → Update** to reload the plugin; refreshing the bridge
+doesn't update the copy already loaded by Buzz. The CLI update stops at the
+first failed command with that command's exit code.
 
 On a VM without git/GitHub, such as Instabox, transfer a `git archive` tarball
 and run `yh update --archive /path/to/yewholt.tar [--home dir]`. The tarball is
@@ -85,7 +89,7 @@ yewholt daemon ──NIP-42 client─────────┘
 
 - **Relay.** An existing, unmodified Buzz relay run by its administrator. Yewholt does not install, start, or stop it; `yh install` records its URL and public key.
 - **Daemon.** A Node process. It keeps the registry, outbox, processed ids and budgets in a pi-durable SQLite store. On restart it cancels unfinished turns and pending approvals rather than replaying tool side effects.
-- **Bot.** One lazily created Pi coding-agent SDK `AgentSession` (instructions, model, transcript and global resources) plus its own Nostr key. Prompts to each bot are serialized; stopping, deleting or changing its permissions disposes the cached session.
+- **Bot.** One lazily created Pi coding-agent SDK `AgentSession` plus its own Nostr key. Prompts are serialized per bot. The Pi transcript is stored separately from SQLite and is [resumable by name](#pi-resources-and-bot-sessions).
 - **Bridge.** The daemon authenticates to the relay with NIP-42, like any other client. It reads kind 9 channel messages and publishes kind 9 replies, kind 0 profiles, and the membership events below. It does not embed the relay.
 - **Buzz agent provisioning.** `src/agents.ts` reads and validates provider-written files for agents created in the Buzz desktop app. The daemon reconciles those files with the durable bot registry and publishes the agents' runtime profile and presence.
 
@@ -99,31 +103,33 @@ yewholt daemon ──NIP-42 client─────────┘
 | kind 9000 | Add the bot to the channel with `role=bot`, matching `build_add_members`. |
 | kind 0 | Profile (`display_name`) with one NIP-OA `auth` tag `kind=0`, which is how Buzz treats the pubkey as an agent. |
 | kind 9 | Channel chat. Replies carry an `h` tag and a NIP-OA `auth` tag `kind=9`. |
+| kind 1059 | Encrypted provider control messages and wake delegations. |
+| kinds 10100 / 20001 | Agent runtime profile (including an optional `wake_url`) / presence. |
 | kind 30175 | Owner-signed persona (`d` slug, `display_name`, `runtime=yewholt`, model, provider). |
 | kind 30177 | Owner-signed managed agent (`d` = agent pubkey, `persona_id`, `name`, `respond_to`). |
 | kind 39002 | Read only. Relay-signed channel member list (`d` = channel id, `["p", pubkey, "", role]`). Each bot follows the lists that name it; see [Channels and scope](#channels-and-scope). |
 
-Kind 10100 is named `KIND_AGENT_PROFILE` in `buzz-core` but no NIP in the repo documents its content, so Yewholt does not emit it.
-
-The information-flow broker in `docs/practical-information-flow-for-buzz-agents.md` is a draft. The relay does not implement it. Yewholt holds each bot key on disk and signs as that bot, which is what a normal client does today.
+Yewholt holds each bot key on disk and signs as that bot. It does not depend
+on a relay-side information-flow broker.
 
 ## Requirements
 
-- Node.js 22.19 or newer (pi-durable's engine).
-- An existing Buzz relay that admits the daemon's pubkey. Tests do not need one.
-- No API key is required. Keys are optional and are read from the environment only when a session calls a model.
+- Node.js 22.19 or newer.
+- For Buzz agents: Buzz desktop, an existing relay that admits the provider
+  and daemon, and a supported model credential on the daemon host.
+- Building and running the test suite does not require a relay or model login.
 
 ## Daemon install
 
-On the Linux VM, with the relay URL and the relay's public key (the key it signs kind 39002 member lists with):
+For a new Linux daemon, set `RELAY_URL` to the existing relay's WebSocket URL
+and `RELAY_PUBKEY` to its public signing key (64 lowercase hex characters).
+This is the relay's key, not the administrator's or the daemon's.
 
 ```bash
 npm ci
 npm run build
 npm link
-yh install --relay wss://relay.example --relay-pubkey <relay pubkey>
-yh start
-yh status
+yh install --relay "$RELAY_URL" --relay-pubkey "$RELAY_PUBKEY"
 ```
 
 `install` writes `~/.yewholt` (override with `--home` or `YEWHOLT_HOME`) and prints the daemon pubkey for the relay administrator to admit:
@@ -131,18 +137,37 @@ yh status
 - `config.json` with the relay URL and public key
 - `secrets/owner.key`, mode `0600`, the daemon's identity
 - `.env`, mode `0600`, for host configuration and provider keys
-- `state/sessions.sqlite`, the pi-durable store
+
+Admit and pair the daemon via [`yh join`](#join-forge-z-or-another-shared-buzz-community)
+or [configure the target manually](#configure-buzz-desktop-targets).
+Then run `yh start` and `yh status`. The daemon creates
+`state/sessions.sqlite` on startup. `yh start` is not boot supervision; on a
+VM that reboots, use its service manager to run `yh daemon` in the foreground.
 
 `start`, `stop`, and `status` manage only the daemon; the relay is run and upgraded by whoever administers it. Running `install` again on the same home with the same relay is a no-op.
 
 ### Container
 
-`ghcr.io/forge-z/yewholt:main` (amd64 and arm64, published from `main` by `.github/workflows/image.yml`) runs the daemon in the foreground with its home in `/data`. On first start it installs against `YEWHOLT_RELAY_URL`, reading the relay key from the relay's NIP-11 `self` field (or `YEWHOLT_RELAY_PUBKEY`). With `YEWHOLT_PUBKEY_FILE` set it writes the daemon pubkey there for an admin step such as `buzz-admin add-member`; until admitted, the daemon retries every 2 seconds. Without `YEWHOLT_WAKE_*` it never dozes, so it can be the always-on watcher next to a relay. With `YEWHOLT_NAME` set, the daemon publishes a kind 0 profile with that name for its own key on each connect, so Buzz member lists show it by name instead of a bare pubkey; without it the daemon publishes nothing until an agent is provisioned.
+The native install is the normal setup. If you already run Buzz in Compose
+or Coolify, you can run an always-on watcher alongside it. The image publishes
+Linux AMD64 and ARM64 builds; use `:sha-<commit>` to pin a build instead of
+following `:main`. It contains the Yewholt daemon, not the relay.
 
 ```sh
-docker run -d --restart unless-stopped -v yewholt-data:/data \
-  -e YEWHOLT_RELAY_URL=wss://relay.example ghcr.io/forge-z/yewholt:main
+docker run -d --name yewholt-watcher --restart unless-stopped \
+  -v yewholt-data:/data -e YEWHOLT_RELAY_URL=wss://relay.example \
+  -e YEWHOLT_NAME="Yewholt watcher" ghcr.io/forge-z/yewholt:main
 ```
+
+The first boot reads the signing key from the relay's NIP-11 `self` field
+unless `YEWHOLT_RELAY_PUBKEY` is set. Keep `/data` persistent for the
+watcher's identity. On a membership-restricted relay, have the admin admit
+the public key printed by `docker exec yewholt-watcher yh admin keys`.
+In Compose, set `YEWHOLT_PUBKEY_FILE=/handoff/daemon.pubkey` and mount
+`/handoff` writable on the watcher and read-only on the relay-admin job.
+Have the job wait for the file and admit that key. The watcher itself needs
+no relay admin or model credentials. Leave `YEWHOLT_WAKE_URL` and
+`YEWHOLT_WAKE_PORT` unset on the watcher. See [Sleeping VMs](#sleeping-vms-wake-on-message).
 
 ### Join Forge Z or another shared Buzz community
 
@@ -150,22 +175,21 @@ On the owner's Mac, ask the community owner/admin for a Buzz invite
 (**Settings → Community admin → Membership → Invite**), then run:
 
 ```sh
-yh join
-# Paste the invite when prompted; for first-time SSH VMs:
 yh join --ssh my-vm --ssh owner@another-vm
 ```
 
-One command admits the Mac provider, its installed local daemon, and each SSH
-VM daemon, pairs the provider, and updates the Buzz targets. Consent is asked
-once. No public keys need to be copied: after admission, the daemon authenticates
-to the relay and discovers its signing key from relay-signed group events.
-Discovery fails clearly if no such event arrives within 15 seconds.
+Paste the invite when prompted; omit `--ssh` if you have no SSH targets to add.
+The command admits the Mac provider and the daemons, pairs the provider, and
+updates Buzz targets. It skips an uninitialized local daemon; each SSH daemon
+must already have a working `yh install`. After admission it checks the
+signing key against relay-signed group events, discovering the key for
+any newly added relay. This check times out after 15 seconds.
 
-The command prints the invite uses needed before claiming: **one for the Mac
-provider plus one per daemon machine** (for example, Mac plus two VMs needs
-four uses). Already-member identities succeed. A failure, including exhausted
-invite uses, is reported per machine without stopping the others; any failure
-gives a nonzero exit status. Get an invite with sufficient uses for all machines.
+Allow **one invite use per new identity**: the Mac provider, the Mac daemon
+if installed, and each SSH daemon. For example, a Mac provider and two VMs
+without a Mac daemon need three uses. Already-admitted identities don't use
+another. A failure is reported per machine without stopping the others, and
+any failure gives a nonzero exit status.
 
 SSH uses the system `ssh` with `BatchMode=yes` and login `bash` to find `yh` on
 PATH. Install/update `yh` on the VMs first and configure non-interactive SSH
@@ -195,6 +219,8 @@ setup scripts. After a successful join, `join` stops and starts a running local
 or SSH daemon if it was newly admitted or its relay was newly added, so it
 reconnects with its new membership. An already-member daemon with an unchanged
 relay is not restarted. Stopped daemons stay stopped. Existing agents remain on their original relay.
+If an external service supervisor manages the daemon, coordinate the restart
+with its operator or use manual admission and pairing.
 In Buzz, open the joined community and select the desired target when creating
 an agent; the human must also be a community member. Install/update the Buzz
 provider plugin with `yh provider install` if not already done.
@@ -347,8 +373,7 @@ The signed content is a JSON envelope:
 
 ### Buzz 1.0.6: Yewholt remote agents
 
-The
-Yewholt plugin registers a remote harness through the app's agent API. Update
+The Yewholt plugin registers a remote harness through the app's agent API. Update
 the paired daemon to this version first. On the Mac, use Node ≥22.19.0 to
 run `yh update` to build and refresh an installed bridge. For the first install,
 build the checkout and run `yewholt provider install`. No Docker or daemon is needed on the Mac.
@@ -361,7 +386,8 @@ moving either.
 2. In Buzz, open **Settings → Plugins → Manage plugins → Add → Browse**.
    Pick the directory printed as `Buzz plugin folder:` (by default
    `~/.config/yewholt/buzz-plugin`). Review and approve the declared
-   `yewholt-buzz-bridge` process. The plugin is trusted app code.
+   `yewholt-buzz-bridge` process. The plugin is trusted app code. For an
+   existing plugin, select **Update** after refreshing the bridge.
 3. With that community selected in Buzz, create an agent with **Harness →
    Remote → Yewholt** and select the relay target (e.g. `instabox`). If
    the relay addresses differ, switch or join the target's community first;
@@ -370,11 +396,12 @@ moving either.
 4. Select a model from the daemon's catalog or keep **Daemon default**
    (`YEWHOLT_MODEL` on the daemon). Catalog discovery uses the paired
    control channel and does not wake a stopped VM. If the list is empty,
-   run `/login` with an API key on the VM as the daemon user, or configure a
-   supported credential in the daemon's `.env`; then restart only that daemon.
+   [configure a supported credential](#provider-keys-on-the-host) on the
+   target as the daemon user, then restart only that daemon.
    Credentials on the Mac are not used for VM agents. For example, a DeepSeek
    API-key login or `DEEPSEEK_API_KEY` enables the built-in `deepseek/*` models.
-   Code execution is opt-in and still requires Linux isolation and approvals.
+   Code execution is opt-in and requires [workspace isolation](#workspace)
+   and [approvals](#approvals).
    Direct replies are limited to the attested owner by default.
 5. Open the hosted agent in Buzz and select **Model**. Choose a model from
    the agent's paired daemon and select **Save model**. This keeps the agent's
@@ -465,20 +492,21 @@ does not stop agents. Keep the original target until their removal is confirmed.
 ### Mac-local daemon target (no Docker)
 
 A local target is an ordinary relay target whose daemon runs natively on this
-Mac. Use Node.js ≥22.19 (including Node 26), the existing external Buzz relay,
-and its public signing key:
+Mac. Use Node.js 22.19+ and the existing external Buzz relay. Set `RELAY_URL`
+and `RELAY_PUBKEY` as in [Daemon install](#daemon-install):
 
 ```sh
-yh install --home "$HOME/.yewholt" --relay wss://relay.example --relay-pubkey <relay-public-key>
-sudo env PATH="$PATH" scripts/setup-bot-user-macos.sh
-# Open a new login session so workspace group membership applies.
-yh start
+yh install --relay "$RELAY_URL" --relay-pubkey "$RELAY_PUBKEY"
 yh provider install
-yh join
-yh targets doctor mac
 ```
 
-Have the owner approve the privileged setup first. It creates a hidden bot user
+Join with `yh join` on its own, then start the daemon with `yh start`.
+The first join creates the `mac` target (label `My Mac`).
+
+For code execution only, have the owner approve and run
+`sudo env PATH="$PATH" scripts/setup-bot-user-macos.sh` from the checkout
+before starting the daemon. Open a new login session to pick up the workspace
+group. The script creates a hidden bot user
 `yewholt-bot`, group `yewholt-ws`, passwordless sudo only to that bot account,
 and mode-2770 workspaces at `/Users/Shared/yewholt/workspaces`. It restricts the
 daemon user's HOME permissions and writes `YEWHOLT_WORKSPACES` to its `.env`.
@@ -501,7 +529,8 @@ no daemon restart is needed. It does not install or start the daemon.
 requires `--local`. A missing installation produces an install command hint.
 
 Pairing is not relay admission. If the administrator admits the keys directly
-instead of sharing invites, skip the join commands above. On a self-hosted
+instead of sharing invites, skip `yh join`; on the Mac register and pair the
+target with `yh targets add mac --local --label "My Mac"`. On a self-hosted
 relay the admin can use:
 
 ```sh
@@ -510,7 +539,7 @@ buzz-admin add-member --pubkey <provider-pubkey>
 ```
 
 Open the same relay community in Buzz, then select **Harness → Remote →
-Yewholt → my-mac**. Configure model credentials as the daemon login user and
+Yewholt → My Mac**. Configure model credentials as the daemon login user and
 keep the Mac awake and daemon running. Do not copy `YEWHOLT_LOCAL_PORT` from
 an InstaBox host onto the Mac: use the public `wss://` URL directly, including
 an existing InstaBox relay, without a local relay or proxy.
@@ -585,54 +614,59 @@ unchanged. With the variable unset, the daemon connects directly as before.
 
 ### Sleeping VMs: wake on message
 
-VMs that pause when idle (InstaBox, Freestyle) resume when traffic reaches
-their public URL. A daemon on such a VM can let it sleep and still answer:
+Skip this section if your daemon stays online. On a VM that resumes on HTTP
+traffic after an idle pause (such as InstaBox or Freestyle), waking on a Buzz
+message takes two daemons on the same community relay:
 
-1. Publish a port of the VM (InstaBox: a public port; Freestyle: the VM's
-   domain) to a local port the daemon listens on, and set in the daemon env
-   file:
+1. **Sleeping VM:** Map a public HTTP(S) URL to a local port and set both
+   variables in the VM daemon's `.env`:
 
    ```text
    YEWHOLT_WAKE_URL=https://my-vm.example/
    YEWHOLT_WAKE_PORT=8787
    ```
 
-2. Restart the daemon. Its agents now announce `wake_url` (and the agent
-   owner's pubkey) in their kind `10100` runtime profile.
+   Restart the daemon and verify the URL returns `204` from outside the VM.
+   It serves no data; a request wakes the daemon and reconnects its relay
+   sockets.
+2. **Always-on watcher:** Run another Yewholt daemon admitted to the same
+   relay, with no wake URL or port. This can be a native daemon or the
+   [optional watcher container](#container).
+   If all daemons disconnect, no one sees the message to wake the VM.
 
-With both set, the daemon closes its relay connections after
-`YEWHOLT_IDLE_MINUTES` (default 10) with no message for its agents and no
-turn or approval running, after publishing `offline` presence. With no open
-connection and no presence traffic the provider's own idle timeout can pause
-the VM. Any request to the wake port reopens the connections; the relay
-replays what arrived meanwhile from the stored cursor.
+The VM's agents announce their wake URL in their runtime profiles. After
+`YEWHOLT_IDLE_MINUTES` (default 10) without work or a pending approval, the
+daemon announces offline presence and disconnects, letting the VM provider
+pause it. On reconnect it reads messages from its stored cursor.
 
-Every daemon also watches its relays, while it is connected, for chat
-messages to an agent that announces a wake URL. Buzz delivers a channel's
-live messages only to subscriptions naming it in `#h`, so the daemon reads
-the member lists it can see every minute and subscribes to their channels by
-`#h`; a list read with no answer in 30 s reconnects the relay (dead socket). When the agent has no
-`online` presence from the last 150 s, would answer the author
-(`respond_to`), and is hosted elsewhere, the daemon GETs that URL, at most
-once a minute per URL. Messages from agents never wake anyone. Someone has to
-be awake: if every daemon in the community is asleep (Mac closed included),
-nothing wakes the others. DMs and private channels are readable only by their members. To wake on
-them, give the VM daemon the always-on daemon's pubkey (the watcher's
-`/handoff/daemon.pubkey` in the Oracle compose):
+The watcher follows only channels whose member lists it can see. It subscribes
+to their live messages by `#h` (the channel ID), then sends a GET to an offline
+agent's wake URL if the sender is human and allowed by the agent's
+`respond_to` policy. No recent `online` presence (last 150 seconds) counts as
+offline; wake requests are limited to one per URL per minute.
+
+#### DMs and private channels
+
+The watcher cannot normally see an agent's DMs or channels it doesn't belong
+to. To wake on those messages, set the **watcher's public key** on the
+**sleeping VM daemon** and restart the VM daemon:
 
 ```text
 YEWHOLT_WATCHER_PUBKEY=<64-hex pubkey of the always-on daemon>
 ```
 
-Before it dozes, the VM daemon then sends each agent's key to that pubkey
-only, sealed (kind 1059, ECDH + AES-GCM, the deploy-control envelope). The
-always-on daemon (one without `YEWHOLT_WAKE_*`) opens a read-only connection
-as each agent and follows the agent's channels, DMs included, the same way.
-The agent key then also lives on the watcher's machine; leave the variable
-unset to keep it on the VM. Manually stopped InstaBox machines do not resume on
-traffic; use `--wake instabox` on the provider target for those. The URL
-answers `204` to any request and carries no data. Tested with unit tests and
-mocked HTTP, not against live InstaBox or Freestyle VMs.
+Get the hex key from `yh admin keys` on the watcher's host (the `owner` line)
+or the watcher container's handoff file. Before sleeping, the VM daemon seals
+each agent's signing key to that watcher. The watcher uses it to read as the
+agent. **The watcher's process receives the full signing key**, not a
+read-only credential; only delegate to a watcher you trust. Leave this unset
+to keep the keys on the VM.
+
+To verify, let the VM go idle, then send a message from an allowed account
+and confirm the agent replies without visiting the wake URL or using the
+Buzz target controls. Test a DM separately if you configured delegation.
+This mechanism does not boot a manually stopped InstaBox VM; the separate
+provider [wake hook](#relay-target-files) can start it for provider operations.
 
 ### Coding bots (`code`)
 
@@ -714,7 +748,9 @@ context files) are never loaded or trusted: a bot can write its workspace.
 
 Each bot's history is a persistent Pi JSONL session under
 `<agentDir>/sessions/yewholt-<workspaceId>/`. It continues the most recent
-session after restart, but interrupted work is not replayed. Sessions carry
+session after restart, but interrupted work and approvals are not replayed.
+Preserve the daemon user's Pi session directory as well as
+`$YEWHOLT_HOME` when moving or backing up a daemon. Sessions carry
 the bot's display name and follow renames. As the same daemon user, run
 `yh` and use `/resume`, switch to all projects, then search for the bot's
 name; `yh code --resume` also opens the session picker. Do not run concurrent
@@ -795,13 +831,17 @@ None of these are required. A built-in provider is registered when its credentia
 | `YEWHOLT_TURN_TOKENS` | Tokens charged for one interpreter turn (default 1000) |
 | `YEWHOLT_BUDGET_TOKENS` | Per-session cap (default 100000) |
 | `YEWHOLT_HOME` | State directory. Host configuration and optional provider variables are in `$YEWHOLT_HOME/.env` |
+| `YEWHOLT_NAME` | Optional name for the daemon's own Buzz profile (kind 0). Set it on either a native daemon or a watcher container to identify it in the member list |
+| `YEWHOLT_WAKE_URL`, `YEWHOLT_WAKE_PORT` | Public HTTP(S) wake URL and the local port it maps to. Set both to allow idle disconnection |
+| `YEWHOLT_IDLE_MINUTES` | Idle time before the daemon disconnects (default 10 minutes), not the VM provider's pause timeout |
+| `YEWHOLT_WATCHER_PUBKEY` | Optional public key of a trusted always-on daemon for DM/private-channel wake |
 | `YEWHOLT_BOT_USER` | Unprivileged Unix account for code-bot commands (default `yewholt-bot`) |
 | `YEWHOLT_BOT_GROUP` | Workspace group shared by the bot account and the daemon (default `yewholt-ws`) |
 | `YEWHOLT_WORKSPACES` | Workspace root, outside `$YEWHOLT_HOME` (default `/srv/yewholt/workspaces`) |
 | `YEWHOLT_UNSAFE_SHARED_USER` | Development-only escape hatch. Set to `1` to run commands as the daemon user |
 | `YEWHOLT_ADMINS` | Optional hex pubkeys (64 characters, separated by commas or spaces) that may answer code-bot approvals besides the owner. Other entries are skipped with a log line |
 
-The full commented list is in `.env.example`. No dependency was added for this; the file parser is a few lines in `src/env-file.ts`.
+See [`.env.example`](.env.example) for a starter configuration.
 
 Each model turn sums its SDK assistant-message token usage, and the bot is charged the larger of that total and one configured turn. Approval and rejection do not spend the budget. A session over its cap refuses new work.
 
@@ -813,14 +853,15 @@ Each model turn sums its SDK assistant-message token usage, and the bot is charg
 
 `npm test` builds and runs:
 
-- NIP-OA test vector from `docs/nips/NIP-OA.md`
+- NIP-OA signing test vector
 - key files mode `0600` and signed kind 9 events
 - approval words and leading-mention stripping
 - relay membership from a verbatim Buzz 0.3.0 capture (`test/fixtures/buzz-membership-20261121.json`): newest relay-signed 39002 per channel, removal, forged lists ignored
 - the relay client against a loopback WebSocket stub: per-subscription event and `EOSE` routing, `unsubscribe`, `CLOSED` reasons; bot connections, re-subscription, and one-time handling of a message seen on two connections
 - control-channel encryption round-trip and rejection of mismatched AAD
-- code bots: the approval classifier (every dangerous form, combined flags, quoting, `cd x && rm -rf y`, safe look-alikes); the workspace folder and its minimal env; a bash call cannot see a variable set in the daemon's `process.env`; `$YEWHOLT_HOME` reads refused, also through symlinks; tools only with `code`, and grant/revoke on the next turn; the approval flow end to end on pi-ai's faux provider (park, request message, `aprovo` runs once, `rejeito` refuses, ambiguity asks, reply targets one request, a non-owner's `aprovo` runs nothing and leaves the request queued, an admin from `YEWHOLT_ADMINS` and the install owner can answer); a model error on the faux provider reaches the chat with its reason and provider text, with a fake key masked, for plain and code bots; a kill -9 while parked, then `aprovo` after reopen runs the command exactly once; the Pi package loader with a fixture `pi.durable` package and a broken one that is skipped
-- pi-ai built-in providers register from environment credentials or saved Pi API keys; Claude/Codex subscription tokens do not register
+- Code-bot workspace isolation and command approval, including cancellation without replay after restart
+- Provider credentials from the daemon's environment or Pi login, including Codex OAuth refresh and rejection of Anthropic OAuth
+- Persistent per-bot Pi sessions, idle disconnect, wake decisions and sealed wake delegation
 - `~/.yewholt/.env` loads at start, does not override the shell, and is mode `0600`
 - CLI routing: `yewholt` and `yewholt code ...` reach the harness with arguments unchanged, `YEWHOLT_MODEL` is added only without `--model`, help flags exit 0, daemon commands route to themselves, unknown commands exit 1. The tests do not start the TUI or call a model
 
