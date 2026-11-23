@@ -10,6 +10,7 @@ import { configuredRelays, loadConfig, saveConfig } from "./config.js";
 import { isPubkey } from "./control-protocol.js";
 import { loadEnvFile } from "./env-file.js";
 import { readPid, runDaemon } from "./daemon.js";
+import { launchAgent } from "./launch-agent.js";
 import { pubkeyOf } from "./nostr.js";
 import { addPairing, listPairings, removePairing } from "./pairing.js";
 import { readKey } from "./keys.js";
@@ -178,18 +179,25 @@ async function install(rest: string[]): Promise<void> {
 
 async function start(home: string): Promise<void> {
   const config = loadConfig(home);
-  if (readPid(home)) throw new Error("daemon already running");
-  const log = openSync(logPath(home), "a");
-  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), "daemon", "--home", home], {
-    detached: true,
-    stdio: ["ignore", log, log],
-    env: process.env,
-  });
-  child.unref();
+  const agent = launchAgent(home);
+  const cli = fileURLToPath(import.meta.url);
+  if (readPid(home) && !agent?.installed()) throw new Error("daemon already running");
+  if (agent) {
+    agent.start(cli);
+  } else {
+    const log = openSync(logPath(home), "a");
+    const child = spawn(process.execPath, [cli, "daemon", "--home", home], {
+      detached: true,
+      stdio: ["ignore", log, log],
+      env: process.env,
+    });
+    child.unref();
+  }
   const started = Date.now();
   while (Date.now() - started < 20_000) {
-    if (readPid(home)) {
-      console.log(`Yewholt daemon ${readPid(home)} on ${configuredRelays(config).map((entry) => entry.relayUrl).join(", ")}`);
+    const pid = readPid(home);
+    if (pid) {
+      console.log(`Yewholt daemon ${pid} on ${configuredRelays(config).map((entry) => entry.relayUrl).join(", ")}`);
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 200));
@@ -198,8 +206,16 @@ async function start(home: string): Promise<void> {
 }
 
 async function stop(home: string): Promise<void> {
+  const agent = launchAgent(home);
   const pid = readPid(home);
-  if (pid) {
+  if (agent?.installed()) {
+    agent.stop();
+    const started = Date.now();
+    while (Date.now() - started < 20_000 && readPid(home)) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    if (readPid(home)) throw new Error(`daemon did not stop; see ${logPath(home)}`);
+  } else if (pid) {
     process.kill(pid, "SIGTERM");
     const started = Date.now();
     while (Date.now() - started < 10_000 && readPid(home)) {

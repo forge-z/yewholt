@@ -45,7 +45,9 @@ Run `yh update` on the Mac and each daemon VM. It updates the checkout of the
 running CLI (not the current directory) with `git pull --ff-only`, removes old
 `dist` output, runs `npm ci` and `npm run build`, and refreshes the Buzz bridge
 if installed. A running daemon for `--home` (default `$YEWHOLT_HOME` or
-`~/.yewholt`) is restarted with the new build; a stopped daemon stays stopped.
+`~/.yewholt`) is restarted with the new build. On macOS, an installed daemon
+LaunchAgent is restarted even if its process is temporarily down. A daemon
+you deliberately stopped with `yh stop` stays stopped.
 The relay is never touched. In Buzz, use **Settings → Plugins → Manage
 plugins → Yewholt → Update** to reload the plugin; refreshing the bridge
 doesn't update the copy already loaded by Buzz. The CLI update stops at the
@@ -147,8 +149,15 @@ yh install --relay "$RELAY_URL" --relay-pubkey "$RELAY_PUBKEY"
 Admit and pair the daemon via [`yh join`](#join-a-buzz-community)
 or [configure the target manually](#configure-buzz-desktop-targets).
 Then run `yh start` and `yh status`. The daemon creates
-`state/sessions.sqlite` on startup. `yh start` is not boot supervision; on a
-VM that reboots, use its service manager to run `yh daemon` in the foreground.
+`state/sessions.sqlite` on startup. On macOS, `yh start` installs a per-user
+LaunchAgent without sudo; it starts the daemon at login and restarts it if it
+exits. `yh stop` unloads and removes that LaunchAgent, including for future
+logins. The daemon cannot respond while the Mac is asleep or before you log in
+after a reboot. It reconnects to the relay when the Mac wakes and the network
+returns. Put daemon-specific settings and credentials in its `.env` or use
+Pi login; a LaunchAgent does not inherit temporary shell exports.
+On Linux, `yh start` still detaches the daemon; use the host's service manager
+to run `yh daemon` in the foreground if it should start at boot.
 
 `start`, `stop`, and `status` manage only the daemon; the relay is run and upgraded by whoever administers it. Running `install` again on the same home with the same relay is a no-op.
 
@@ -228,8 +237,9 @@ The local daemon home is `YEWHOLT_HOME` or `~/.yewholt`. After admission and
 pairing, `join` starts daemons explicitly selected with `--local` or `--ssh`
 if they are stopped. An existing daemon included implicitly stays stopped if it
 was already stopped. A running daemon restarts only when newly admitted or when
-a relay is added. If an external supervisor manages a daemon's lifecycle, use
-manual admission and pairing instead. `join` never creates system users or runs
+a relay is added. When `join` starts the local daemon on macOS, it uses the
+same LaunchAgent as `yh start`. If an external supervisor manages a daemon's
+lifecycle, use manual admission and pairing instead. `join` never creates system users or runs
 isolation setup scripts. Existing agents remain on their original relay.
 In Buzz, open the joined community and select the desired target when creating
 an agent; the human must also be a community member. Install/update the Buzz

@@ -46,6 +46,27 @@ for (const archive of [false, true]) {
   }
 }
 
+test("update restarts a supervised daemon with no running PID", (t) => {
+  const checkout = mkdtempSync(join(tmpdir(), "yh-update-"));
+  t.after(() => rmSync(checkout, { recursive: true, force: true }));
+  const home = join(checkout, "daemon");
+  const calls: string[][] = [];
+  const messages: string[] = [];
+  update({ checkout, home, archive: "source.tar" }, {
+    bridgePath: join(checkout, "bridge"),
+    readPid: () => null,
+    supervised: (value) => value === home,
+    log: (message) => messages.push(message),
+    run: (command, args) => { calls.push([command, ...args]); return 0; },
+  });
+  const cli = join(checkout, "dist", "src", "cli.js");
+  assert.deepEqual(calls.slice(-2), [
+    [process.execPath, cli, "stop", "--home", home],
+    [process.execPath, cli, "start", "--home", home],
+  ]);
+  assert.match(messages[0], /daemon restarted/);
+});
+
 test("a checkout without git requires an archive and runs nothing", (t) => {
   const checkout = mkdtempSync(join(tmpdir(), "yh-update-"));
   t.after(() => rmSync(checkout, { recursive: true, force: true }));
