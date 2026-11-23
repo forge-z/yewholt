@@ -1,3 +1,11 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/yewholt-arvore-b-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/yewholt-arvore-b-light.svg">
+    <img src="docs/assets/yewholt-arvore-b-light.svg" alt="Yewholt" width="360">
+  </picture>
+</p>
+
 # Yewholt
 
 **Pi is the engine. Yewholt is a wrapper around [Pi](https://pi.dev) that adds
