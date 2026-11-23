@@ -430,8 +430,8 @@ moving either.
    target as the daemon user, then restart only that daemon.
    Credentials on the Mac are not used for VM agents. For example, a DeepSeek
    API-key login or `DEEPSEEK_API_KEY` enables the built-in `deepseek/*` models.
-   Code execution is opt-in and requires [workspace isolation](#workspace)
-   and [approvals](#approvals).
+   Chat does not require sudo. Code execution is opt-in and requires
+   [workspace isolation](#workspace) and [approvals](#approvals).
    Direct replies are limited to the attested owner by default.
 5. Open the hosted agent in Buzz and select **Model**. Choose a model from
    the agent's paired daemon and select **Save model**. This keeps the agent's
@@ -706,7 +706,7 @@ provider [wake hook](#relay-target-files) can start it for provider operations.
 
 ### Coding bots (`code`)
 
-A bot whose stored permissions include `code` is a coding agent. It reads, writes, edits, and runs shell commands in its own workspace, and asks in the chat before anything on the approval list below. A bot without `code` can use MCP and extension tools and read installed skill files, but has no shell, write or edit tools.
+A bot whose stored permissions include `code` is a coding agent. With isolation configured, it reads, writes, edits, and runs shell commands in its own workspace, and asks in the chat before anything on the approval list below. A bot without `code` can use MCP and extension tools and read installed skill files, but has no shell, write or edit tools. Both can answer ordinary chat messages without isolation setup.
 
 `code` is granted or revoked in the agent provisioning file. A permission change disposes the cached SDK session before the next turn. Code bots get Pi’s built-in read/write/edit and an isolated bash tool, plus tool search, MCP and trusted extension tools. Yewholt’s inline `tool_call` approval gate runs before built-in filesystem and shell calls.
 
@@ -718,7 +718,9 @@ The bot's instructions say it has a workspace, which tools it has, and what need
 
 Each code bot gets `$YEWHOLT_WORKSPACES/<id>`. The root defaults to `/srv/yewholt/workspaces` and must be outside `$YEWHOLT_HOME`. The id is the first 16 hex digits of `sha256("yewholt-workspace:" + pubkey)`, so existing bots keep their ids. The root and each bot directory are owned by `yewholt-bot:yewholt-ws` with mode `2770` (setgid). The daemon belongs to `yewholt-ws`. Both the daemon and the bot shell use umask `007` so ordinary new files and directories are group-writable.
 
-1. Install Yewholt, then run `sudo scripts/setup-bot-user.sh` from the daemon account. On a VM with persistent storage at `/data`, pass `--workspaces /data/yewholt/workspaces` to keep bot files there.
+Run these steps only on a host where you want the built-in coding tools. You can skip them for chat-only hosts and wake watchers.
+
+1. On Linux, run `sudo scripts/setup-bot-user.sh` from the checkout as the daemon account. On macOS, run `sudo env PATH="$PATH" scripts/setup-bot-user-macos.sh` instead. On a Linux VM with persistent storage at `/data`, pass `--workspaces /data/yewholt/workspaces` to keep bot files there.
 2. Start the daemon from a fresh login session so it picks up the group. Check `yewholt status` for `isolation: ok`.
 3. Create an agent with the `code` permission in Buzz. The daemon creates its workspace automatically.
 
@@ -753,7 +755,7 @@ The decision resolves that call's in-memory promise once. A second `aprovo` find
 
 Code-bot commands run as the dedicated, unprivileged bot account through `sudo -n -u`. The bot has only the workspace group and cannot access the daemon's login HOME. Commands start in the workspace with a clean environment containing `PATH`, `HOME` (the workspace), `LANG=C.UTF-8`, `LC_ALL=C.UTF-8`, `TERM=dumb`, and `TMPDIR` (the workspace's `.tmp` directory). Pi's session environment variables are not exposed to bash. MCP and extension tools are trusted daemon code and do not inherit these restrictions.
 
-Yewholt checks isolation at startup and before code-bot tool calls, and caches a successful check for at most 60 seconds. If the account, sudo access, group membership, workspace root, or daemon HOME fails validation, the tools return a refusal with the failed check and the setup command. The daemon logs the first failure and exposes the check result in `status.json` and `yewholt status`. For local development only, `YEWHOLT_UNSAFE_SHARED_USER=1` runs shell commands as the daemon user, with workspaces still outside the state directory. Every daemon start in this mode logs a warning.
+Yewholt checks isolation at startup and before code-bot tool calls, and caches a successful check for at most 60 seconds. If the account, sudo access, group membership, workspace root, or daemon HOME fails validation, chat continues to work, but the built-in coding tools refuse to run. When a tool is refused for this reason, the chat reply includes the failed check and the setup command. The daemon logs the first failure without prompting for setup and exposes the check result in `status.json` and `yewholt status`. For local development only, `YEWHOLT_UNSAFE_SHARED_USER=1` runs shell commands as the daemon user, with workspaces still outside the state directory. Every daemon start in this mode logs a warning.
 
 `read`, `write`, and `edit` run in the daemon with group access. They refuse paths into `$YEWHOLT_HOME`, other bots' workspaces, and Pi's `auth.json`, including through symlinks. Reads elsewhere use the daemon's permissions, including in its login HOME. Writes or edits outside the workspace need approval. The path check and the filesystem operation are separate, so concurrent symlink changes can race the check.
 

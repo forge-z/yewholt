@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { MemoryStorage } from "@earendil-works/pi-durable";
 import { createModels } from "@earendil-works/pi-ai/models";
-import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { ensureOwnerKey, failureReason, instructionsFor, parseAdmins, type Yewholt } from "../src/session.js";
 import { workspaceDir } from "../src/workspace.js";
 import { WorkspaceIsolation, type IsolationProbe } from "../src/isolation.js";
@@ -411,8 +411,8 @@ test("isolation: provisioning a code agent creates the setgid workspace immediat
   }, secureFixture);
 });
 
-test("isolation: each failed check blocks bash, read, write and edit with the status reason", async () => {
-  const ready: IsolationProbe = {
+function readyIsolationProbe(): IsolationProbe {
+  return {
     account: () => ({ uid: 2000, gid: 3000, groups: ["yewholt-ws"] }),
     groupId: () => 3000,
     daemon: () => ({ uid: 1000, gid: 1000, groups: [1000, 3000] }),
@@ -422,6 +422,50 @@ test("isolation: each failed check blocks bash, read, write and edit with the st
     botCanAccessHome: () => false,
     mkdirAsBot: () => assert.fail("a failed check must prevent provisioning"),
   };
+}
+
+test("isolation: missing bot user permits chat and shares setup only after a refused code tool", async () => {
+  const faux = fauxProvider({ provider: "faux", models: [{ id: "faux-1" }] });
+  faux.setResponses([
+    fauxAssistantMessage("Plain chat works."),
+    fauxAssistantMessage("Coder chat works."),
+    fauxAssistantMessage(fauxToolCall("bash", { command: "touch side-effect" }), { stopReason: "toolUse" }),
+    fauxAssistantMessage("I could not run that."),
+    fauxAssistantMessage("Coder chat still works."),
+  ]);
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const logs: string[] = [];
+  await withCoding(async (session, home) => {
+    const plain = await createBot(session, "Plain", "post,read");
+    const coder = await createBot(session, "Coder", "post,read,code");
+    await session.handleHuman(human("plain-chat", "@Plain hello"));
+    assert.equal(await lastReply(session, plain), "Plain chat works.");
+    await session.handleHuman(human("coder-chat", "@Coder hello"));
+    assert.equal(await lastReply(session, coder), "Coder chat works.");
+
+    const status = session.isolationStatus();
+    const setup = process.platform === "darwin" ? 'sudo env PATH="$PATH" scripts/setup-bot-user-macos.sh' : "sudo scripts/setup-bot-user.sh";
+    assert.equal(status, `Bot user yewholt-bot does not exist. Run ${setup}`);
+    await session.handleHuman(human("coder-tool", "@Coder create a file"));
+    assert.equal(await lastReply(session, coder), `I could not run that.\n\nCode tools unavailable. ${status}`);
+    await session.handleHuman(human("coder-chat-again", "@Coder thanks"));
+    assert.equal(await lastReply(session, coder), "Coder chat still works.");
+
+    assert.equal(existsSync(testWorkspaces(home)), false);
+    assert.deepEqual(await approvals(session), []);
+    assert.deepEqual(logs, ["Code tools unavailable; chat is unaffected. Bot user yewholt-bot does not exist."]);
+  }, (home) => {
+    const probe = { ...readyIsolationProbe(), account: () => undefined, sudoWorks: () => assert.fail("missing user must not trigger sudo") };
+    const isolation = new WorkspaceIsolation(home, { YEWHOLT_WORKSPACES: testWorkspaces(home) }, probe, undefined, (message) => logs.push(message));
+    const previous = process.umask();
+    try { isolation.start(); } finally { process.umask(previous); }
+    return isolation;
+  }, { models });
+});
+
+test("isolation: each failed check blocks bash, read, write and edit with the status reason", async () => {
+  const ready = readyIsolationProbe();
   const cases = [
     [{ account: () => undefined }, /bot user.*does not exist/i],
     [{ account: () => ({ uid: 1000, gid: 3000, groups: ["yewholt-ws"] }) }, /unprivileged/i],

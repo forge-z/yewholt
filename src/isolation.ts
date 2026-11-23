@@ -7,7 +7,9 @@ import { physicalPath, within, workspaceDir } from "./workspace.js";
 const WORKSPACE_MODE = 0o2770;
 const CACHE_MS = 60_000;
 const UNSAFE = "UNSAFE: YEWHOLT_UNSAFE_SHARED_USER=1 runs code bots as the daemon user";
-const SETUP = `Run sudo scripts/setup-bot-user${process.platform === "darwin" ? "-macos" : ""}.sh.`;
+const SETUP = process.platform === "darwin"
+  ? 'Run sudo env PATH="$PATH" scripts/setup-bot-user-macos.sh'
+  : "Run sudo scripts/setup-bot-user.sh";
 
 type DirectoryInfo = { uid: number; gid: number; mode: number; isDirectory(): boolean };
 type BotAccount = { uid: number; gid: number; groups: string[] };
@@ -92,7 +94,7 @@ export class WorkspaceIsolation {
     env: NodeJS.ProcessEnv = process.env,
     private readonly probe: IsolationProbe = systemProbe,
     private readonly now: () => number = () => performance.now(),
-    private readonly log: (message: string) => void = console.error,
+    private readonly log: (message: string) => void = console.warn,
   ) {
     this.workspaces = resolve(env.YEWHOLT_WORKSPACES || (process.platform === "darwin" ? "/Users/Shared/yewholt/workspaces" : "/srv/yewholt/workspaces"));
     this.user = env.YEWHOLT_BOT_USER || "yewholt-bot";
@@ -155,7 +157,7 @@ export class WorkspaceIsolation {
     const message = `${reason}. ${SETUP}`;
     if (!this.warned) {
       this.warned = true;
-      this.log(`Code bot isolation failed. ${message}`);
+      this.log(`Code tools unavailable; chat is unaffected. ${reason}.`);
     }
     return message;
   }
