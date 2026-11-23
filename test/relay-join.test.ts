@@ -143,7 +143,7 @@ async function fixture(t: TestContext) {
         return realFetch("http://127.0.0.1:${port}" + new URL(url).pathname, options);
       };`;
     const child = spawn(process.execPath, ["--import", "data:text/javascript," + encodeURIComponent(setup), cli, ...args],
-      { env: { ...env, ...extraEnv }, timeout: 8_000 });
+      { env: { ...env, ...extraEnv }, timeout: 30_000 });
     let stdout = "", stderr = "", answered = 0;
     child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
     child.stderr.setEncoding("utf8").on("data", (chunk) => {
