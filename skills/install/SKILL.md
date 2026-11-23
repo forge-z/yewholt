@@ -27,6 +27,11 @@ without permission. Manage the existing relay separately from Yewholt.
    installed in Buzz, use **Update** for the plugin. For the coding CLI alone,
    stop here after step 1.
 
+Run `yh update` to update an existing CLI and daemon. Installations without Git
+download the latest `main` tarball from GitHub without authentication. Use
+`yh update --archive /path/to/yewholt.tar` to use a local `git archive` tarball
+instead.
+
 ## Manual daemon initialization (fallback)
 
 If no invite is available or the relay does not publish its NIP-11 signing key,
