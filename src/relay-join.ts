@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { gunzipSync } from "node:zlib";
+import { isPubkey } from "./control-protocol.js";
 import { pubkeyOf, signEvent } from "./nostr.js";
 import { normalizeRelay } from "./relay-url.js";
 
@@ -39,12 +40,12 @@ export function parseInvite(input: string): Invite {
   return { relayUrl: `wss://${host}`, origin: `https://${host}`, code };
 }
 
-async function request(origin: string, path: string, body?: string, auth?: string): Promise<Response> {
+async function request(origin: string, path: string, body?: string, auth?: string, accept = "application/json"): Promise<Response> {
   try {
     return await fetch(origin + path, {
       method: body === undefined ? "GET" : "POST",
       headers: {
-        Accept: "application/json",
+        Accept: accept,
         "Accept-Encoding": "identity",
         ...(body === undefined ? {} : { "Content-Type": "application/json" }),
         ...(auth === undefined ? {} : { Authorization: auth }),
@@ -86,6 +87,13 @@ async function responseObject(
   }
   if (!object) throw new Error(`${action} (${status}): expected a JSON object`);
   return object;
+}
+
+export async function inviteRelayPubkey(invite: Invite): Promise<string> {
+  const response = await request(invite.origin, "/", undefined, undefined, "application/nostr+json");
+  const { self } = await responseObject(response, "Could not read relay information (NIP-11)", [invite.code]);
+  if (!isPubkey(self)) throw new Error("Relay did not publish its signing key in NIP-11; ask the relay admin for the public key and use yh install");
+  return self;
 }
 
 export type Consent = { receipt?: string; acceptPolicy: boolean; confirmAge: boolean };

@@ -11,9 +11,9 @@
    Tell it which machines should run agents: the Mac itself, Linux VMs it
    can already reach over SSH, or both. No Docker is needed.
 2. Use [`yh join`](#join-forge-z-or-another-shared-buzz-community) from the Mac
-   and paste the community invite when prompted. It admits and pairs
-   initialized daemons and creates their Buzz targets without copying keys.
-   A fresh daemon still needs the relay's public signing key during setup.
+   and paste the community invite when prompted. Use `--local` to set up
+   a fresh Mac daemon or `--ssh <alias>` for each VM. The invite provides the
+   relay details; `join` sets up, admits and pairs the daemons without copying keys.
    If the community doesn't use invites, the skill covers direct admission.
 3. In Buzz, add and approve the [Yewholt plugin](#buzz-106-yewholt-remote-agents).
    In the matching community, open **Harness → Remote → Yewholt**, select a
@@ -121,14 +121,20 @@ on a relay-side information-flow broker.
 
 ## Daemon install
 
-For a new Linux daemon, set `RELAY_URL` to the existing relay's WebSocket URL
-and `RELAY_PUBKEY` to its public signing key (64 lowercase hex characters).
-This is the relay's key, not the administrator's or the daemon's.
+On a new Linux host, install the CLI first:
 
 ```bash
 npm ci
 npm run build
 npm link
+```
+
+With a Buzz invite, run [`yh join --ssh <alias>`](#join-forge-z-or-another-shared-buzz-community)
+from the Mac to initialize the daemon. For manual setup instead, use the
+existing relay's WebSocket URL and public signing key (64 lowercase hex
+characters). This is the relay's key, not the administrator's or the daemon's.
+
+```bash
 yh install --relay "$RELAY_URL" --relay-pubkey "$RELAY_PUBKEY"
 ```
 
@@ -179,17 +185,22 @@ yh join --ssh my-vm --ssh owner@another-vm
 ```
 
 Paste the invite when prompted; omit `--ssh` if you have no SSH targets to add.
-The command admits the Mac provider and the daemons, pairs the provider, and
-updates Buzz targets. It skips an uninitialized local daemon; each SSH daemon
-must already have a working `yh install`. After admission it checks the
-signing key against relay-signed group events, discovering the key for
-any newly added relay. This check times out after 15 seconds.
+Add `--local` to initialize a fresh Mac daemon; an existing Mac daemon is
+included without it. On new daemons, `join` reads the invited relay's public
+signing key from NIP-11 (`self`) and creates the daemon home, identity and
+private `.env` before claiming the invite. If the relay does not publish that
+key, ask its admin for the public key and run `yh install` first.
+
+The command admits the Mac provider and daemons, pairs them, and updates Buzz
+targets. After admission it checks the signing key against signed group events,
+discovering the key for any additional relay. This check times out after 15 seconds.
 
 Allow **one invite use per new identity**: the Mac provider, the Mac daemon
-if installed, and each SSH daemon. For example, a Mac provider and two VMs
+if selected or already installed, and each SSH daemon. A Mac provider and two VMs
 without a Mac daemon need three uses. Already-admitted identities don't use
-another. A failure is reported per machine without stopping the others, and
-any failure gives a nonzero exit status.
+another. A failure is reported per machine without stopping the others, and any
+failure gives a nonzero exit status. If none of the requested daemons can be
+prepared, the command claims no invite uses.
 
 SSH uses the system `ssh` with `BatchMode=yes` and login `bash` to find `yh` on
 PATH. Install/update `yh` on the VMs first and configure non-interactive SSH
@@ -213,12 +224,12 @@ nonzero exit status. This check does not admit, pair, configure or restart those
 other daemons; they must already serve the joined relay and be paired with the
 provider there for models to load.
 
-The local daemon home is `YEWHOLT_HOME` or `~/.yewholt`. If not installed it is
-skipped with an install hint; `join` never creates system users or runs isolation
-setup scripts. After a successful join, `join` stops and starts a running local
-or SSH daemon if it was newly admitted or its relay was newly added, so it
-reconnects with its new membership. An already-member daemon with an unchanged
-relay is not restarted. Stopped daemons stay stopped. Existing agents remain on their original relay.
+The local daemon home is `YEWHOLT_HOME` or `~/.yewholt`. The command never creates
+system users or runs isolation setup scripts. After a successful join, it stops
+and starts a running local or SSH daemon if it was newly admitted or its relay
+was newly added, so it reconnects with its new membership. An already-member daemon with an unchanged
+relay is not restarted. New and stopped daemons are not started; run `yh start`
+when ready. Existing agents remain on their original relay.
 If an external service supervisor manages the daemon, coordinate the restart
 with its operator or use manual admission and pairing.
 In Buzz, open the joined community and select the desired target when creating
@@ -497,16 +508,16 @@ does not stop agents. Keep the original target until their removal is confirmed.
 ### Mac-local daemon target (no Docker)
 
 A local target is an ordinary relay target whose daemon runs natively on this
-Mac. Use Node.js 22.19+ and the existing external Buzz relay. Set `RELAY_URL`
-and `RELAY_PUBKEY` as in [Daemon install](#daemon-install):
+Mac. With the CLI already installed, use a Buzz invite to set it up:
 
 ```sh
-yh install --relay "$RELAY_URL" --relay-pubkey "$RELAY_PUBKEY"
 yh provider install
+yh join --local
 ```
 
-Join with `yh join` on its own, then start the daemon with `yh start`.
-The first join creates the `mac` target (label `My Mac`).
+The first join creates the `mac` target (label `My Mac`). If using direct
+admission instead, set up the daemon manually as in [Daemon install](#daemon-install).
+Start it with `yh start` when ready.
 
 For code execution only, have the owner approve and run
 `sudo env PATH="$PATH" scripts/setup-bot-user-macos.sh` from the checkout

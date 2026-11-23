@@ -1,21 +1,21 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { WebSocketServer } from "ws";
 import { joinExitCode, joinMachines, remoteYh, updateJoinTarget, type Runner } from "../provider/join.js";
 import { loadTarget, targetFile, validateTarget, type Target } from "../provider/target.js";
-import { saveConfig } from "../src/config.js";
-import { configureJoinedRelay } from "../src/daemon-join.js";
+import { loadConfig, saveConfig } from "../src/config.js";
+import { configureJoinedRelay, initializeDaemon } from "../src/daemon-join.js";
 import { writePrivateJson } from "../src/control-files.js";
-import { writeKey } from "../src/keys.js";
-import { generateKeyPair, signEvent, verifyEvent, type NostrEvent } from "../src/nostr.js";
+import { readKey, writeKey } from "../src/keys.js";
+import { generateKeyPair, pubkeyOf, signEvent, verifyEvent, type NostrEvent } from "../src/nostr.js";
 import { readPairing } from "../src/pairing.js";
-import { ownerKeyPath } from "../src/paths.js";
+import { configPath, envFilePath, ownerKeyPath } from "../src/paths.js";
 import { discoverRelayPubkey, readRelayMembers } from "../src/relay-discovery.js";
-import { claimInvite, consentToPolicy, parseInvite, type Consent } from "../src/relay-join.js";
+import { claimInvite, consentToPolicy, inviteRelayPubkey, parseInvite, type Consent } from "../src/relay-join.js";
 import { route, usageText } from "../src/route.js";
 
 const invite = parseInvite("https://buzz.example/invite/test-token");
@@ -37,7 +37,7 @@ function install(home: string) {
 
 test("join routes as a provider-side command and documents all flags", () => {
   assert.deepEqual(route(["join", "--ssh", "vm"]), { kind: "command", command: "join", args: ["--ssh", "vm"] });
-  assert.match(usageText(), /join \[<invite-url>\] \[--ssh <host> \.\.\.\] \[--accept-policy\] \[--confirm-age\]/);
+  assert.match(usageText(), /join \[<invite-url>\] \[--local\] \[--ssh <host> \.\.\.\] \[--accept-policy\] \[--confirm-age\]/);
 });
 
 test("SSH helper quotes remote yh arguments, uses login bash, and sends invite only on stdin", async () => {
@@ -101,6 +101,132 @@ test("policy consent is asked once and its receipt is reused for multiple HTTP c
   for (const request of requests.slice(2)) assert.equal(JSON.parse(request.body!).policy_receipt, "receipt");
 });
 
+test("NIP-11 reads the relay signing key, not the operator key, without sending the invite code", async (t) => {
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; });
+  let document: object = { self: relay.pubkey, pubkey: owner.pubkey };
+  globalThis.fetch = async (input, init) => {
+    assert.equal(input, invite.origin + "/");
+    assert.equal(init?.method, "GET");
+    assert.equal(new Headers(init?.headers).get("Accept"), "application/nostr+json");
+    assert.equal(init?.body, undefined);
+    assert.equal(init?.redirect, "error");
+    return Response.json(document);
+  };
+  assert.equal(await inviteRelayPubkey(invite), relay.pubkey);
+  for (const self of [undefined, "invalid"]) {
+    document = { self, pubkey: owner.pubkey };
+    await assert.rejects(inviteRelayPubkey(invite), /did not publish its signing key/);
+  }
+});
+
+test("join prepares fresh local and SSH daemons before claiming and reuses their identities on retry", async (t) => {
+  const homes = fixture(t);
+  const log: string[] = [], claims: string[] = [];
+  const config = { relayUrl: invite.relayUrl, externalRelayPubkey: relay.pubkey };
+  const remoteHome = join(homes.daemonHome, "..", "vm");
+  let lookups = 0, remoteInstalls = 0, claimStatus: "joined" | "already_member" = "joined";
+  const joinBoth = () => joinMachines(invite, ["vm"], { local: true }, async () => "yes", {
+    ...homes, identity: () => provider.secret, consent: async () => consent,
+    log: (line) => log.push(line), running: () => null,
+    relayKey: async () => { lookups++; return relay.pubkey; },
+    claim: async (_invite, _consent, secret) => {
+      for (const home of [homes.daemonHome, remoteHome]) {
+        assert.deepEqual(loadConfig(home), { ...config, relays: undefined });
+        assert.ok(existsSync(ownerKeyPath(home)));
+        assert.ok(existsSync(envFilePath(home)));
+      }
+      claims.push(pubkeyOf(secret));
+      return claimStatus;
+    },
+    configure: (home, url, secret) => configureJoinedRelay(home, url, secret, undefined, async () => relay.pubkey),
+    runner: async (file, args, stdin) => {
+      assert.equal(file, "ssh");
+      const command = args.at(-1)!;
+      assert.ok(!command.includes(invite.code));
+      if (command.includes("yewholt:installed")) {
+        assert.match(command, /command -v yh/);
+        assert.match(command, /command -v node/);
+        return existsSync(configPath(remoteHome)) ? "yewholt:installed" : "yewholt:fresh";
+      }
+      if (command.includes("--relay-pubkey")) {
+        assert.equal(stdin, "");
+        assert.match(command, /install/);
+        assert.ok(command.includes(invite.relayUrl) && command.includes(relay.pubkey));
+        initializeDaemon(remoteHome, config);
+        remoteInstalls++;
+        return "";
+      }
+      if (command.includes("list")) return JSON.stringify([loadConfig(remoteHome)]);
+      if (command.includes("admin")) return `owner ${pubkeyOf(readKey(ownerKeyPath(remoteHome)))}`;
+      if (command.includes("join")) {
+        assert.equal(stdin, `${invite.origin}/invite/${invite.code}\n`);
+        return claimStatus === "joined" ? "Joined" : "Already a member of";
+      }
+      if (command.includes("pair")) return "";
+      if (command.includes("status")) return "daemon: stopped";
+      throw new Error("Unexpected command");
+    },
+  });
+  assert.deepEqual((await joinBoth()).map(({ status }) => status), ["joined", "joined", "joined"]);
+  const localKey = pubkeyOf(readKey(ownerKeyPath(homes.daemonHome)));
+  const remoteKey = pubkeyOf(readKey(ownerKeyPath(remoteHome)));
+  assert.deepEqual(claims, [provider.pubkey, localKey]);
+  assert.equal(loadTarget("mac", homes.targetsHome).daemonPubkey, localKey);
+  assert.equal(loadTarget("vm", homes.targetsHome).daemonPubkey, remoteKey);
+  assert.ok(readPairing(homes.daemonHome, provider.pubkey));
+  for (const home of [homes.daemonHome, remoteHome]) {
+    assert.equal(statSync(home).mode & 0o777, 0o700);
+    for (const path of [ownerKeyPath(home), envFilePath(home), configPath(home)]) {
+      assert.equal(statSync(path).mode & 0o777, 0o600);
+    }
+  }
+  assert.match(log[0], /up to 3 invite uses/);
+  claimStatus = "already_member";
+  assert.deepEqual((await joinBoth()).map(({ status }) => status), ["already_member", "already_member", "already_member"]);
+  assert.deepEqual(claims, [provider.pubkey, localKey, provider.pubkey, localKey]);
+  assert.equal(lookups, 1);
+  assert.equal(remoteInstalls, 1);
+});
+
+test("failed preparation leaves the invite unused when no requested daemon is ready", async (t) => {
+  const homes = fixture(t);
+  const summary = await joinMachines(invite, ["vm"], { local: true }, async () => "yes", {
+    ...homes, log: () => {}, consent: async () => consent,
+    relayKey: async () => { throw new Error("NIP-11 missing self"); },
+    identity: () => { throw new Error("must not create provider identity"); },
+    claim: async () => { throw new Error("must not claim"); },
+    runner: async () => { throw new Error("SSH authentication failed"); },
+  });
+  assert.deepEqual(summary, [
+    { machine: "My Mac daemon", status: "failed", reason: "NIP-11 missing self" },
+    { machine: "vm", status: "failed", reason: "SSH authentication failed" },
+  ]);
+  assert.equal(existsSync(homes.daemonHome), false);
+});
+
+test("daemon initialization preserves an existing key and rejects a conflicting config", (t) => {
+  const { daemonHome } = fixture(t);
+  writeKey(ownerKeyPath(daemonHome), owner.secret);
+  const config = { relayUrl: primary, externalRelayPubkey: relay.pubkey };
+  assert.equal(initializeDaemon(daemonHome, config).pubkey, owner.pubkey);
+  for (const conflict of [{ ...config, relayUrl: invite.relayUrl }, { ...config, externalRelayPubkey: remoteOwner.pubkey }]) {
+    assert.throws(() => initializeDaemon(daemonHome, conflict), /already has a primary relay/);
+  }
+  assert.deepEqual(loadConfig(daemonHome), { ...config, relays: undefined });
+  assert.equal(readKey(ownerKeyPath(daemonHome)), owner.secret);
+});
+
+test("daemon initialization does not replace a damaged identity", (t) => {
+  const { daemonHome } = fixture(t);
+  const path = ownerKeyPath(daemonHome);
+  writeKey(path, owner.secret);
+  writeFileSync(path, "invalid");
+  assert.throws(() => initializeDaemon(daemonHome, { relayUrl: primary, externalRelayPubkey: relay.pubkey }), /not a nostr secret/);
+  assert.throws(() => readKey(path), /not a nostr secret/);
+  assert.equal(existsSync(configPath(daemonHome)), false);
+});
+
 test("local and remembered SSH machines reuse consent, pair, update targets, restart after adding running relays", async (t) => {
   const homes = fixture(t);
   install(homes.daemonHome);
@@ -114,6 +240,7 @@ test("local and remembered SSH machines reuse consent, pair, update targets, res
   const runner: Runner = async (_file, args, stdin) => {
     commands.push({ args, stdin });
     const command = args.at(-1)!;
+    if (command.includes("yewholt:installed")) return "yewholt:installed";
     if (command.includes("admin")) return `owner ${remoteOwner.pubkey}\nsecret /private/path (mode 0600)\n`;
     if (command.includes("list")) return JSON.stringify([{ relayUrl: primary }]);
     if (command.includes("status")) return "daemon: running (42)\n";
@@ -130,7 +257,7 @@ test("local and remembered SSH machines reuse consent, pair, update targets, res
   assert.deepEqual(claims, [provider.secret, owner.secret]);
   assert.deepEqual(summary.map(({ status }) => status), ["joined", "joined", "already_member"]);
   assert.equal(joinExitCode(summary), 0);
-  assert.match(log[0], /needs 3 uses/);
+  assert.match(log[0], /up to 3 invite uses/);
   assert.ok(log.includes("owner@vm: already member"));
   for (const id of ["my-mac", "my-vm"]) assert.deepEqual(loadTarget(id, homes.targetsHome).relays, [invite.relayUrl]);
   assert.equal(loadTarget("my-vm", homes.targetsHome).ssh, "owner@vm");
@@ -141,7 +268,7 @@ test("local and remembered SSH machines reuse consent, pair, update targets, res
   const remote = commands.filter(({ args }) => args[0] === "-o");
   assert.ok(remote.some(({ args }) => args.at(-1)!.includes("stop")));
   assert.ok(remote.some(({ args }) => args.at(-1)!.includes("start")));
-  const remoteJoin = remote.find(({ args }) => args.at(-1)!.includes("join"))!;
+  const remoteJoin = remote.find(({ stdin }) => stdin)!;
   assert.equal(remoteJoin.stdin, `${invite.origin}/invite/${invite.code}\n`);
   assert.ok(!remoteJoin.args.join(" ").includes(invite.code));
   assert.match(remoteJoin.args.at(-1)!, /--accept-policy/);
@@ -166,6 +293,7 @@ test("successful local and SSH joins update every alias of the daemon without ch
         configure: (home, url, secret) => configureJoinedRelay(home, url, secret, undefined, async () => relay.pubkey),
         runner: async (_file, args) => {
           const command = args.at(-1)!;
+          if (command.includes("yewholt:installed")) return "yewholt:installed";
           if (command.includes("admin")) return `owner ${daemon}`;
           if (command.includes("list")) return JSON.stringify([{ relayUrl: primary }]);
           if (command.includes("join")) return status === "joined" ? "Joined" : "Already a member of";
@@ -242,6 +370,7 @@ test("exhausted invitations and SSH failures are per-machine failures and don't 
       const host = args[2], command = args[3];
       hosts.push(host);
       if (host === "bad-vm") throw Error("SSH authentication failed");
+      if (command.includes("yewholt:installed")) return "yewholt:installed";
       if (command.includes("admin")) return `owner ${remoteOwner.pubkey}`;
       if (command.includes("list")) return JSON.stringify([{ relayUrl: invite.relayUrl }]);
       assert.ok(!command.includes("--accept-policy") || stdin?.includes(invite.code));
@@ -299,6 +428,7 @@ test("local and SSH restarts require a running daemon and either new admission o
               }
               const command = args.at(-1)!;
               remoteCommands.push(command);
+              if (command.includes("yewholt:installed")) return "yewholt:installed";
               if (command.includes("admin")) return `owner ${remoteOwner.pubkey}`;
               if (command.includes("list")) return JSON.stringify([{ relayUrl: added ? primary : invite.relayUrl }]);
               if (command.includes("join")) return `${status === "already_member" ? "Already a member of" : "Joined"} ${invite.relayUrl}`;
@@ -328,6 +458,7 @@ test("failed local and SSH claims do not restart daemons", async (t) => {
     runner: async (_file, args) => {
       const command = args.at(-1)!;
       commands.push(command);
+      if (command.includes("yewholt:installed")) return "yewholt:installed";
       if (command.includes("admin")) return `owner ${remoteOwner.pubkey}`;
       if (command.includes("list")) return JSON.stringify([{ relayUrl: invite.relayUrl }]);
       if (command.includes("join")) throw Error("invite_exhausted");
@@ -348,6 +479,7 @@ test("SSH does not receive consent flags not given locally, and a stopped VM is 
     runner: async (_file, args) => {
       const command = args[3];
       commands.push(command);
+      if (command.includes("yewholt:installed")) return "yewholt:installed";
       if (command.includes("admin")) return `owner ${remoteOwner.pubkey}`;
       if (command.includes("list")) return JSON.stringify([{ relayUrl: primary }]);
       if (command.includes("status")) return "daemon: stopped\n";

@@ -8,7 +8,7 @@ description: Install the yh coding CLI and Buzz bridge on a Mac, and connect nat
 Run this from a stable Yewholt checkout on the user's Mac. Confirm which
 machines to use (including whether the Mac should host agents), and reuse
 existing SSH aliases and daemon configuration. Prefer one Buzz invite for
-the community; ask for relay details only when a new daemon needs them.
+the community; ask for relay details only if the invite cannot supply them.
 Do not provision VMs, install a relay, or change existing installations
 without permission. An existing relay, including one on InstaBox, is managed
 separately from Yewholt.
@@ -26,34 +26,35 @@ separately from Yewholt.
    installed in Buzz, use **Update** for the plugin. For the coding CLI alone,
    stop here after step 1.
 
-## Daemon initialization
+## Manual daemon initialization (fallback)
 
-For each new daemon, `yh install --relay "$RELAY_URL" --relay-pubkey "$RELAY_PUBKEY"`
+If no invite is available or the relay does not publish its NIP-11 signing key,
+`yh install --relay "$RELAY_URL" --relay-pubkey "$RELAY_PUBKEY"`
 needs the relay's WebSocket URL and public signing key (64 lowercase hex
 characters). Use the existing relay configuration or the relay's NIP-11
 `self` field where available; otherwise ask the relay admin. Never ask for
-the relay's private key. The invite joins **initialized** daemons; it does
-not replace this step.
+the relay's private key.
 
 ## Join from the Mac
 
-After initializing the requested daemons, use `yh join` on the Mac, adding an
-`--ssh <alias>` for each new VM. Check that `ssh -o BatchMode=yes <alias>`
-can run `yh` from a login Bash shell first. The CLI remembers successful SSH
+Use `yh join` on the Mac, adding `--local` if the user wants to initialize a
+fresh Mac daemon and `--ssh <alias>` for each new VM. Install the CLI on each VM
+first. The command checks SSH and the login PATH and initializes missing daemon
+homes from the invite before claiming it. The CLI remembers successful SSH
 targets on later joins. Have the user paste the invite at the prompt and
 review and accept any community policy themselves. Allow one invite use per
 new identity: the Mac provider plus each daemon, including the Mac daemon
-if installed. No manual key copy, pairing, or target creation is needed.
+if selected or already installed. No manual key copy, pairing, or target creation is needed.
 
 `yh join` can stop and start a running daemon. If a daemon is managed by a
 service supervisor, coordinate with its operator before joining; use the manual
 admission and pairing steps below if it must be restarted by that supervisor.
-Existing stopped daemons stay stopped. If joining an additional relay does
+New and stopped daemons stay stopped. If joining an additional relay does
 not discover its key, or no invite is available, see [manual relay setup](../../README.md#join-forge-z-or-another-shared-buzz-community).
 
 ## Optional Mac-local daemon (no Docker)
 
-Initialize as the normal daemon login user. For shell and file tools, have
+Run `yh join --local` as the normal daemon login user. For shell and file tools, have
 the owner approve and run
 `sudo env PATH="$PATH" scripts/setup-bot-user-macos.sh`. For custom state,
 also pass `YEWHOLT_HOME="/absolute/state"` through `sudo env`.
@@ -89,8 +90,8 @@ VM's `YEWHOLT_LOCAL_PORT` setting to the Mac.
    `npm link`. If the VM can't read the repository, transfer a source archive
    of that revision over the approved SSH connection; do not copy credentials
    or forward the SSH agent. Use user-owned Node/npm paths.
-3. Initialize a new daemon as above. When using direct admission instead
-   of an invite, have the relay administrator admit the daemon and Mac provider
+3. For an invite, use `yh join --ssh <alias>` from the Mac. For direct admission,
+   initialize the daemon manually and have the relay administrator admit the daemon and Mac provider
    pubkeys printed by their installers. Neither is the relay signing key.
    On the VM, authorize this Mac:
 

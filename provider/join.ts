@@ -6,13 +6,13 @@ import { configuredRelays, loadConfig } from "../src/config.js";
 import { isPubkey } from "../src/control-protocol.js";
 import { writePrivateJson } from "../src/control-files.js";
 import { readPid } from "../src/daemon.js";
-import { configureJoinedRelay } from "../src/daemon-join.js";
+import { configureJoinedRelay, initializeDaemon } from "../src/daemon-join.js";
 import { readKey } from "../src/keys.js";
 import { pubkeyOf } from "../src/nostr.js";
 import { addPairing } from "../src/pairing.js";
 import { configPath, ownerKeyPath, yewholtHome } from "../src/paths.js";
 import { discoverRelayPubkey, readRelayMembers } from "../src/relay-discovery.js";
-import { claimInvite, consentToPolicy, withInviteInput, type Invite, type JoinOptions } from "../src/relay-join.js";
+import { claimInvite, consentToPolicy, inviteRelayPubkey, withInviteInput, type Invite, type JoinOptions } from "../src/relay-join.js";
 import { normalizeRelay, sameRelay } from "../src/relay-url.js";
 import { targetIds } from "./install.js";
 import { ProviderSecrets } from "./secrets.js";
@@ -38,9 +38,31 @@ export const runCommand: Runner = (file, args, stdin = "") => new Promise((resol
 
 const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
 
-export function remoteYh(host: string, args: string[], stdin = "", runner: Runner = runCommand): Promise<string> {
+function remoteShell(host: string, command: string, stdin: string, runner: Runner): Promise<string> {
   if (!validSshHost(host)) throw new Error("Invalid SSH host");
-  return runner("ssh", ["-o", "BatchMode=yes", host, "bash -lc " + quote("yh " + args.map(quote).join(" "))], stdin);
+  return runner("ssh", ["-o", "BatchMode=yes", host, "bash -lc " + quote(command)], stdin);
+}
+
+export function remoteYh(host: string, args: string[], stdin = "", runner: Runner = runCommand): Promise<string> {
+  return remoteShell(host, "yh " + args.map(quote).join(" "), stdin, runner);
+}
+
+async function remoteInstallState(host: string, runner: Runner): Promise<"installed" | "fresh"> {
+  const inspect = `
+    const [major, minor] = process.versions.node.split(".").map(Number);
+    if (major < 22 || (major === 22 && minor < 19)) throw Error("Yewholt requires Node.js 22.19 or newer");
+    const home = process.env.YEWHOLT_HOME ?? require("node:os").homedir() + "/.yewholt";
+    const config = require("node:fs").lstatSync(require("node:path").join(home, "config.json"), { throwIfNoEntry: false });
+    console.log(config ? "yewholt:installed" : "yewholt:fresh");
+  `;
+  const result = await remoteShell(host,
+    'command -v yh >/dev/null || { echo "yh not on the SSH login PATH; install it first" >&2; exit 1; }; ' +
+    'command -v node >/dev/null || { echo "node not on the SSH login PATH; install Node.js 22.19+" >&2; exit 1; }; ' +
+    "node --input-type=commonjs -e " + quote(inspect) + " && yh help >/dev/null", "", runner);
+  const state = result.trim().split("\n").at(-1);
+  if (state === "yewholt:installed") return "installed";
+  if (state === "yewholt:fresh") return "fresh";
+  throw new Error("Could not read SSH daemon installation state");
 }
 
 type StoredTarget = { id: string; target: Target };
@@ -83,9 +105,12 @@ export type JoinSummary = { machine: string; status: "joined" | "already_member"
 type Dependencies = {
   daemonHome: string; targetsHome: string; identity: () => string; runner: Runner;
   consent: typeof consentToPolicy; claim: typeof claimInvite; configure: typeof configureJoinedRelay;
+  relayKey: typeof inviteRelayPubkey;
   running: typeof readPid; log: (line: string) => void;
   members: (relay: string, secret: string) => Promise<ReadonlySet<string>>;
 };
+
+type MachineOptions = JoinOptions & { local?: boolean };
 
 function hostId(host: string): string {
   return host.replace(/^.*@/, "").toLowerCase().replace(/[^a-z0-9_-]+/g, "-")
@@ -102,11 +127,11 @@ function remoteRelays(raw: string): string[] {
   });
 }
 
-export async function joinMachines(invite: Invite, hosts: string[], options: JoinOptions,
+export async function joinMachines(invite: Invite, hosts: string[], options: MachineOptions,
   ask: (question: string) => Promise<string>, overrides: Partial<Dependencies> = {}): Promise<JoinSummary[]> {
   const deps: Dependencies = {
     daemonHome: yewholtHome(), targetsHome: providerHome(), identity: () => new ProviderSecrets().identity(),
-    runner: runCommand, consent: consentToPolicy, claim: claimInvite, configure: configureJoinedRelay,
+    runner: runCommand, consent: consentToPolicy, claim: claimInvite, configure: configureJoinedRelay, relayKey: inviteRelayPubkey,
     members: async (relay, secret) => readRelayMembers(relay, secret, await discoverRelayPubkey(relay, secret)),
     running: readPid, log: console.log, ...overrides,
   };
@@ -114,8 +139,11 @@ export async function joinMachines(invite: Invite, hosts: string[], options: Joi
   const sshHosts = [...new Set([...hosts, ...targets.flatMap(({ target }) => target.ssh ? [target.ssh] : [])])];
   if (!sshHosts.every(validSshHost)) throw new Error("Invalid SSH host");
   const installed = existsSync(configPath(deps.daemonHome));
-  deps.log(`This invite needs ${1 + Number(installed) + sshHosts.length} uses (one per identity, including this Mac's provider).`);
-  if (!installed) deps.log("Local daemon not installed; skipping. Install it first with yh install --relay <url> --relay-pubkey <pubkey>.");
+  const local = installed || options.local === true;
+  const localName = "My Mac daemon";
+  const uses = 1 + Number(local) + sshHosts.length;
+  deps.log(`Allow up to ${uses} invite uses (one per identity not yet admitted, including this Mac's provider).`);
+  if (!local) deps.log("Local daemon not installed; skipping. Use yh join --local to initialize it.");
   const consent = await deps.consent(invite, options, ask);
   const summary: JoinSummary[] = [];
   const updatedTargets = new Set<string>();
@@ -123,18 +151,67 @@ export async function joinMachines(invite: Invite, hosts: string[], options: Joi
   const handled = new Set<string>();
   const reasonOf = (error: unknown) => (error instanceof Error ? error.message : "Join failed")
     .replaceAll(invite.code, "[redacted]").replace(/[\x00-\x1f\x7f-\x9f]/g, " ").slice(0, 400);
+  const failed = new Map<string, string>();
+  const prepare = async <T>(machine: string, operation: () => T | Promise<T>): Promise<T | undefined> => {
+    try {
+      return await operation();
+    } catch (error) {
+      failed.set(machine, reasonOf(error));
+      return undefined;
+    }
+  };
   const attempt = async (machine: string, operation: () => Promise<"joined" | "already_member">) => {
+    const reason = failed.get(machine);
+    if (reason !== undefined) {
+      summary.push({ machine, status: "failed", reason });
+      return;
+    }
     try {
       summary.push({ machine, status: await operation() });
     } catch (error) {
       summary.push({ machine, status: "failed", reason: reasonOf(error) });
     }
   };
+  const report = () => {
+    for (const result of summary) deps.log(`${result.machine}: ${result.status === "already_member" ? "already member" : result.status}${result.reason ? ": " + result.reason : ""}`);
+    for (const id of updatedTargets) deps.log(`Target ${id}: updated for ${invite.relayUrl}`);
+    return summary;
+  };
+  let keyLookup: Promise<string> | undefined;
+  const relayKey = () => keyLookup ??= deps.relayKey(invite);
+  const localOwner = local ? await prepare(localName, async () => {
+    if (!installed) {
+      initializeDaemon(deps.daemonHome, { relayUrl: invite.relayUrl, externalRelayPubkey: await relayKey() });
+    }
+    loadConfig(deps.daemonHome);
+    return readKey(ownerKeyPath(deps.daemonHome));
+  }) : undefined;
+  const prepareVm = (host: string) => prepare(host, async () => {
+    const remote = (args: string[], stdin?: string) => remoteYh(host, args, stdin, deps.runner);
+    const fresh = await remoteInstallState(host, deps.runner) === "fresh";
+    const registered = targets.filter(({ target }) => target.ssh === host);
+    if (fresh && registered.length) throw new Error("Registered SSH target has no daemon config; restore its existing home first");
+    if (fresh) await remote(["install", "--relay", invite.relayUrl, "--relay-pubkey", await relayKey()]);
+    const relays = remoteRelays(await remote(["relay", "list"]));
+    const keys = await remote(["admin", "keys"]);
+    const daemon = /^owner ([a-f0-9]{64})\s*$/m.exec(keys)?.[1];
+    if (!isPubkey(daemon)) throw new Error("Could not read remote daemon public key (yh admin keys)");
+    if (registered.length && !registered.some(({ target }) => target.daemonPubkey === daemon)) {
+      throw new Error("SSH daemon identity changed; restore its existing home first");
+    }
+    return { remote, relays, daemon };
+  });
+  const vms: Awaited<ReturnType<typeof prepareVm>>[] = [];
+  for (const host of sshHosts) vms.push(await prepareVm(host));
+  if (failed.size > 0 && failed.size === uses - 1) {
+    for (const [machine, reason] of failed) summary.push({ machine, status: "failed", reason });
+    return report();
+  }
   const secret = deps.identity();
   const provider = pubkeyOf(secret);
   await attempt("Mac provider", () => deps.claim(invite, consent, secret));
-  if (installed) await attempt("My Mac daemon", async () => {
-    const owner = readKey(ownerKeyPath(deps.daemonHome));
+  if (local) await attempt(localName, async () => {
+    const owner = localOwner!;
     const status = await deps.claim(invite, consent, owner);
     const added = await deps.configure(deps.daemonHome, invite.relayUrl, owner);
     const relays = configuredRelays(loadConfig(deps.daemonHome)).map(({ relayUrl }) => relayUrl);
@@ -148,12 +225,8 @@ export async function joinMachines(invite: Invite, hosts: string[], options: Joi
     }
     return status;
   });
-  for (const host of sshHosts) await attempt(host, async () => {
-    const remote = (args: string[], stdin?: string) => remoteYh(host, args, stdin, deps.runner);
-    const keys = await remote(["admin", "keys"]);
-    const daemon = /^owner ([a-f0-9]{64})\s*$/m.exec(keys)?.[1];
-    if (!isPubkey(daemon)) throw new Error("Could not read remote daemon public key (yh admin keys)");
-    const relays = remoteRelays(await remote(["relay", "list"]));
+  for (const [i, host] of sshHosts.entries()) await attempt(host, async () => {
+    const { remote, daemon, relays } = vms[i]!;
     const added = !relays.some((relay) => sameRelay(relay, invite.relayUrl));
     const flags = [...(consent.acceptPolicy ? ["--accept-policy"] : []), ...(consent.confirmAge ? ["--confirm-age"] : [])];
     const joined = await remote(["relay", "join", ...flags], `${invite.origin}/invite/${invite.code}\n`);
@@ -183,9 +256,7 @@ export async function joinMachines(invite: Invite, hosts: string[], options: Joi
       summary.push({ machine: "Registered target membership check", status: "failed", reason: reasonOf(error) });
     }
   }
-  for (const result of summary) deps.log(`${result.machine}: ${result.status === "already_member" ? "already member" : result.status}${result.reason ? ": " + result.reason : ""}`);
-  for (const id of updatedTargets) deps.log(`Target ${id}: updated for ${invite.relayUrl}`);
-  return summary;
+  return report();
 }
 
 export function joinExitCode(summary: JoinSummary[]): 0 | 1 {
@@ -193,17 +264,18 @@ export function joinExitCode(summary: JoinSummary[]): 0 | 1 {
 }
 
 export async function joinCommunity(args: string[]): Promise<void> {
-  const usage = "Usage: yh join [<invite-url>] [--ssh <host> ...] [--accept-policy] [--confirm-age]";
+  const usage = "Usage: yh join [<invite-url>] [--local] [--ssh <host> ...] [--accept-policy] [--confirm-age]";
   let parsed;
   try {
     parsed = parseArgs({ args, allowPositionals: true, options: {
-      ssh: { type: "string", multiple: true }, "accept-policy": { type: "boolean" }, "confirm-age": { type: "boolean" },
+      local: { type: "boolean" }, ssh: { type: "string", multiple: true },
+      "accept-policy": { type: "boolean" }, "confirm-age": { type: "boolean" },
     } });
   } catch { throw new Error(usage); }
   if (parsed.positionals.length > 1) throw new Error(usage);
   await withInviteInput(parsed.positionals[0], async (invite, ask) => {
     const summary = await joinMachines(invite, parsed.values.ssh ?? [], {
-      acceptPolicy: parsed.values["accept-policy"], confirmAge: parsed.values["confirm-age"],
+      local: parsed.values.local, acceptPolicy: parsed.values["accept-policy"], confirmAge: parsed.values["confirm-age"],
     }, ask);
     process.exitCode = joinExitCode(summary);
   });
