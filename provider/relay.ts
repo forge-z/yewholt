@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { record } from "../src/control-files.js";
 import { CONTROL_KIND, controlEvent, decryptControl, verifiedEnvelope, type ControlType } from "../src/control-protocol.js";
@@ -9,6 +10,9 @@ import { publishServiceProfile, readLatestProfiles, serviceProfileEvent, service
 import type { Target, Wake } from "./target.js";
 
 const WINDOW_MS = 120_000;
+const READ_WINDOW_MS = 15_000;
+const BEFORE_WAKE_MS = 5_000;
+const AFTER_WAKE_MS = 30_000;
 
 export async function publishProviderProfile(relay: string, secret: string): Promise<void> {
   const client = new RelayClient(relay, secret, undefined, false);
@@ -138,15 +142,18 @@ export const waitForConfirmation: RelayWait = async (target, secret, event, requ
   return "timeout";
 };
 
-/** Sends a control request, waits one window, wakes the target once on timeout, then waits again with the same event. */
+/** Wakes once on timeout. Writes retry the same event; reads start fresh after waking. */
 export async function sendControl(target: Extract<Target, { transport: "relay" }>, secret: string,
   op: Exclude<ControlType, "confirmation">, requestId: string, agentPubkey: string, body: unknown,
-  services: { wait: RelayWait; wake: (config: Wake, requestId: string, timeoutMs: number) => Promise<void> }, event?: NostrEvent) {
-  event ??= controlEvent(secret, target.daemonPubkey, op, { requestId, agentPubkey }, body);
-  const wait = () => services.wait(target, secret, event!, requestId, agentPubkey, WINDOW_MS);
-  let result = await wait();
+  services: { wait: RelayWait; wake: (config: Wake, requestId: string, timeoutMs: number) => Promise<void>;
+    onConfirmation?: Parameters<RelayWait>[6] }, mode: "read" | "write" = "write") {
+  const makeEvent = (id: string) => controlEvent(secret, target.daemonPubkey, op, { requestId: id, agentPubkey }, body);
+  let event = makeEvent(requestId);
+  const wait = (timeoutMs: number) => services.wait(target, secret, event, requestId, agentPubkey, timeoutMs, services.onConfirmation);
+  const firstWindow = mode === "write" ? WINDOW_MS : (target.wake ? BEFORE_WAKE_MS : READ_WINDOW_MS);
+  let result = await wait(firstWindow);
   let wakeFailed = false;
-  if (result === "timeout") {
+  if (result === "timeout" && (target.wake || mode === "write")) {
     if (target.wake) {
       try {
         await services.wake(target.wake, requestId, WINDOW_MS);
@@ -154,7 +161,11 @@ export async function sendControl(target: Extract<Target, { transport: "relay" }
         wakeFailed = true;
       }
     }
-    result = await wait();
+    if (mode === "read") {
+      requestId = randomUUID();
+      event = makeEvent(requestId);
+    }
+    result = await wait(mode === "read" ? AFTER_WAKE_MS : WINDOW_MS);
   }
   return { result, wakeFailed };
 }

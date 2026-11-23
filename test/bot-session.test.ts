@@ -46,6 +46,8 @@ test("SDK sessions load global skills, MCP and package extensions, never workspa
     name: "fixture", type: "module", pi: { extensions: ["./extension.mjs"] },
   }));
   file(join(agentDir, "packages", "fixture", "extension.mjs"), `
+import { fauxAssistantMessage, fauxProvider } from ${JSON.stringify(import.meta.resolve("@earendil-works/pi-ai/providers/faux"))};
+
 export default (pi) => {
   pi.registerTool({ name: "fixture_tool", label: "Fixture", description: "A trusted tool",
     parameters: { type: "object", properties: {} },
@@ -55,12 +57,19 @@ export default (pi) => {
     models: [{ id: "fixture-model", name: "Fixture", reasoning: false, input: ["text"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 8192, maxTokens: 1024 }]
   });
+  const native = fauxProvider({ provider: "fixture-native", models: [{ id: "fixture-model" }] });
+  native.setResponses([fauxAssistantMessage("Reply from the Pi package provider")]);
+  pi.registerProvider(native.provider);
 };
 `);
   file(join(agentDir, "settings.json"), JSON.stringify({ packages: ["./packages/fixture"] }));
   const storage = new MemoryStorage();
   const session = await openSession(storage, home, agentDir);
   try {
+    assert.ok(session.availableModelReferences().includes("fixture-provider/fixture-model"));
+    assert.ok(session.availableModelReferences().includes("fixture-native/fixture-model"));
+    const packageModel = { provider: "fixture-native", modelId: "fixture-model", label: "fixture-native/fixture-model" };
+    assert.equal(session.hasModel(packageModel), true);
     const coder = await createBot(session, "Coder", "post,read,code");
     const workspace = workspaceDir(testWorkspaces(home), coder.pubkey);
     const marker = join(root, "workspace-extension-ran");
@@ -102,6 +111,11 @@ export default () => {};`;
     assert.match(chatFrom(await session.snapshot(), plain.pubkey).at(-1) ?? "", /Say hello/);
     await session.handleHuman(human("private-read", `@Plain read: ${join(agentDir, "settings.json")}`));
     assert.match(chatFrom(await session.snapshot(), plain.pubkey).at(-1) ?? "", /only installed skill files/);
+    const provision = join(home, "agents", plain.pubkey + ".json");
+    file(provision, JSON.stringify({ ...JSON.parse(readFileSync(provision, "utf8")), model: packageModel }));
+    await reconcileHome(session);
+    await session.handleHuman(human("package-provider", "@Plain hello"));
+    assert.match(chatFrom(await session.snapshot(), plain.pubkey).at(-1) ?? "", /Reply from the Pi package provider/);
     const dir = join(agentDir, "sessions", "yewholt-" + workspaceId(coder.pubkey));
     assert.equal(readdirSync(dir).filter((name) => name.endsWith(".jsonl")).length, 1);
     const path = sdk.sessionManager.getSessionFile();

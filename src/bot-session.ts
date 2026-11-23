@@ -4,7 +4,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Credential, CredentialStore, Models } from "@earendil-works/pi-ai";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import {
-  createAgentSession, createBashToolDefinition, createCodemodeExtension, createMcpExtension,
+  createAgentSession, createAgentSessionServices, createBashToolDefinition, createCodemodeExtension, createMcpExtension,
   createToolSearchExtension, DefaultResourceLoader, getAgentDir, ModelRuntime,
   SessionManager, SettingsManager,
   type AgentSession, type ExtensionFactory, type LoadedMcpConfig, type ToolDefinition,
@@ -66,7 +66,11 @@ export async function botModelRuntime(agentDir: string, models?: Models): Promis
   });
   if (models) for (const provider of models.getProviders()) runtime.registerNativeProvider(provider);
   runtime.registerNativeProvider(anthropicApiKeyOnly(anthropicProvider()));
-  await runtime.refresh({ allowNetwork: false });
+  await createAgentSessionServices({
+    cwd: agentDir, agentDir, modelRuntime: runtime,
+    settingsManager: SettingsManager.create(agentDir, agentDir, { projectTrusted: false }),
+    resourceLoaderOptions: { noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true },
+  });
   return runtime;
 }
 
