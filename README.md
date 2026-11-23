@@ -13,9 +13,9 @@
 2. Use [`yh join`](#join-a-buzz-community) from the Mac
    and paste the community invite when prompted. Use `--local` to set up
    a fresh Mac daemon or `--ssh <alias>` for each VM. A VM the Mac can't reach
-   over SSH runs [`yh join --daemon`](#join-from-the-vm-itself) itself with the
-   same invite. The invite provides the relay details; `join` sets up, admits and
-   pairs the daemons without copying keys.
+   over SSH runs [`yh join --daemon`](#join-from-the-vm-itself) itself; the
+   invite is used once, on the VM. The invite provides the relay details; `join`
+   sets up, admits and pairs the daemons without copying keys.
    If the community doesn't use invites, the skill covers direct admission.
 3. In Buzz, add and approve the [Yewholt plugin](#buzz-106-yewholt-remote-agents).
    In the matching community, open **Harness → Remote → Yewholt**, select a
@@ -309,15 +309,25 @@ yh join --daemon
 
 It creates the daemon home from the invite if needed, admits the daemon with
 one invite use, starts or restarts it, and opens a pairing offer for 24 hours.
-Then run `yh join` on the Mac with the same invite. The Mac finds daemons whose
-offer matches the invite, pairs with each over Buzz and adds its target. No SSH,
-key copy or `yh pair add` is needed. The VM must be awake when the Mac joins.
+Rerunning it on an admitted daemon reopens the offer without using the invite
+again. No SSH, key copy or `yh pair add` is needed; the VM must stay awake until
+it pairs.
 
-The offer is a tag on the daemon's public profile: an HMAC of the daemon key
-keyed by the invite. It doesn't reveal the invite code. The daemon only accepts
-a pairing request that proves knowledge of the invite and was sent after the
-offer opened, then closes the offer, so only one provider pairs through it.
-Anyone holding the same invite could pair, so treat the invite as a secret.
+When the relay publishes its operator's pubkey in NIP-11 and the operator's
+Mac is the one to pair, nothing else is needed on the Mac. When the operator
+opens the Yewholt create form in Buzz, the VM shows up as a target. The first
+agent created on it pairs that Mac's provider: the daemon accepts it only if
+the activation carries the operator's NIP-OA signature for an agent whose
+secret the provider holds.
+
+Otherwise run `yh join` on the Mac with the same invite. A Mac provider that
+is already a member doesn't use the invite again. The Mac finds daemons whose
+offer matches the invite, pairs with each over Buzz and adds its target.
+
+The offer is a set of tags on the daemon's public profile: an HMAC of the daemon
+key keyed by the invite, and the operator's pubkey. It doesn't reveal the invite
+code. Either path closes the offer once one provider pairs. Anyone holding the
+same invite could pair through `yh join`, so treat the invite as a secret.
 
 ### Chat
 

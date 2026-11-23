@@ -3,13 +3,14 @@ import { rmSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { readJson, record, writePrivateJson } from "./control-files.js";
-import { signEvent, type NostrEvent } from "./nostr.js";
+import { pubkeyOf, signEvent, verifyAuthSignature, type NostrEvent } from "./nostr.js";
 import { normalizeRelay } from "./relay-url.js";
 
 /** A daemon joined from its own machine waits for the provider that holds the same invite. */
-export type PairingOffer = { key: string; relayUrl: string; label: string; createdAt: number; expiresAt: number };
+export type PairingOffer = { key: string; relayUrl: string; label: string; createdAt: number; expiresAt: number; owner?: string };
 export const OFFER_TTL_MS = 24 * 60 * 60 * 1000;
 export const OFFER_TAG = "yewholt-pairing";
+export const OWNER_TAG = "yewholt-owner";
 const offerPath = (home: string) => join(home, "state", "pairing-offer.json");
 const hmac = (key: string, data: string) => createHmac("sha256", Buffer.from(key, "hex")).update(data).digest("hex");
 
@@ -36,8 +37,10 @@ export function machineLabel(name = hostname()): string {
   return name.replace(/[\p{Cc}\p{Cf}]/gu, "").trim().slice(0, 120) || "Yewholt VM";
 }
 
-export function writePairingOffer(home: string, code: string, relayUrl: string, label = machineLabel(), now = Date.now()): PairingOffer {
-  const offer = { key: offerKey(code, relayUrl), relayUrl, label, createdAt: now, expiresAt: now + OFFER_TTL_MS };
+export function writePairingOffer(home: string, code: string, relayUrl: string, label = machineLabel(), now = Date.now(),
+  owner?: string): PairingOffer {
+  const offer: PairingOffer = { key: offerKey(code, relayUrl), relayUrl, label, createdAt: now, expiresAt: now + OFFER_TTL_MS,
+    ...(owner ? { owner } : {}) };
   writePrivateJson(offerPath(home), offer);
   return offer;
 }
@@ -46,7 +49,8 @@ export function readPairingOffer(home: string, now = Date.now()): PairingOffer |
   const value = readJson(offerPath(home));
   if (!record(value) || typeof value.key !== "string" || !/^[a-f0-9]{64}$/.test(value.key) ||
       typeof value.relayUrl !== "string" || typeof value.label !== "string" || !value.label ||
-      !Number.isSafeInteger(value.createdAt) || !Number.isSafeInteger(value.expiresAt)) return undefined;
+      !Number.isSafeInteger(value.createdAt) || !Number.isSafeInteger(value.expiresAt) ||
+      (value.owner !== undefined && (typeof value.owner !== "string" || !/^[a-f0-9]{64}$/.test(value.owner)))) return undefined;
   const offer = value as PairingOffer;
   return offer.expiresAt > now ? offer : undefined;
 }
@@ -58,5 +62,22 @@ export function removePairingOffer(home: string): void {
 /** The daemon's kind 0 profile, tagged while a pairing offer is open. */
 export function daemonProfileEvent(secret: string, daemon: string, name: string, offer?: PairingOffer, createdAt?: number): NostrEvent {
   return signEvent(secret, 0, JSON.stringify({ name, display_name: name, about: "Yewholt daemon" }),
-    offer ? [[OFFER_TAG, offerTag(offer.key, daemon)]] : [], createdAt);
+    offer ? [[OFFER_TAG, offerTag(offer.key, daemon)], ...(offer.owner ? [[OWNER_TAG, offer.owner]] : [])] : [], createdAt);
+}
+
+/**
+ * An activation the offer's owner signed for an agent whose secret the provider holds. The owner's NIP-OA tag alone is
+ * public once the agent posts; holding the agent secret shows this provider created the agent the owner authorized.
+ */
+export function ownerActivation(offer: PairingOffer, body: unknown, agentPubkey: string): boolean {
+  if (!offer.owner || !record(body) || !record(body.agent)) return false;
+  const { authTag } = body;
+  const { nsec } = body.agent;
+  if (!Array.isArray(authTag) || !authTag.every((item) => typeof item === "string") || authTag[1] !== offer.owner ||
+      verifyAuthSignature(authTag, agentPubkey) !== offer.owner || typeof nsec !== "string") return false;
+  try {
+    return pubkeyOf(nsec) === agentPubkey;
+  } catch {
+    return false;
+  }
 }
