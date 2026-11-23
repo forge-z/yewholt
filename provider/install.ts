@@ -2,8 +2,9 @@ import { lstatSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { writeAtomic } from "../src/control-files.js";
-import { providerHome, validId } from "./target.js";
+import { writeAtomic, writePrivateJson } from "../src/control-files.js";
+import { sameRelay } from "../src/relay-url.js";
+import { loadTarget, providerHome, targetFile, targetRelays, validId } from "./target.js";
 
 const marker = "#!/bin/sh\n# Managed by yewholt\n";
 const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
@@ -24,6 +25,32 @@ export function targetIds(home = providerHome()): string[] {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw error;
   }
+}
+
+/** Drop a relay from every target; a target left without relays is removed. Returns one line per change. */
+export function removeRelayFromTargets(relay: string, home = providerHome()): string[] {
+  const changes: string[] = [];
+  for (const id of targetIds(home)) {
+    let target;
+    try {
+      target = loadTarget(id, home);
+    } catch {
+      continue;
+    }
+    const relays = targetRelays(target);
+    const kept = relays.filter((url) => !sameRelay(url, relay));
+    if (kept.length === relays.length) continue;
+    if (!kept.length) {
+      unlinkSync(targetFile(id, home));
+      changes.push(`Removed target ${id}; it had no other relay.`);
+      continue;
+    }
+    const [first, ...additional] = kept;
+    const { relays: _old, ...rest } = target;
+    writePrivateJson(targetFile(id, home), { id, ...rest, relay: first, ...(additional.length && { relays: additional }) });
+    changes.push(`Removed ${relay} from target ${id}.`);
+  }
+  return changes;
 }
 
 function managed(path: string): boolean {

@@ -140,7 +140,7 @@ async function serve(
   let readers: DelegatedReaders | undefined;
   const drain = (phase: OutboxPhase) => publishOutbox(session, ownerSecret, owner, links, connectBot, phase, onRelay, primary);
   const cursor = (state: Awaited<ReturnType<Yewholt["snapshot"]>>) =>
-    primary ? state.highWater : state.highWaterByRelay?.[relayUrl];
+    primary ? Math.max(state.highWater, state.highWaterByRelay?.[relayUrl] ?? 0) : state.highWaterByRelay?.[relayUrl];
   try {
     await owner.connect(5000);
     const name = daemonName();

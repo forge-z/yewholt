@@ -241,6 +241,8 @@ test("agents do not answer or shut down on another relay with the same channel I
     assert.equal(state.outbox[0]?.pubkey, f.agent.pubkey);
     assert.equal(state.highWater, 0);
     assert.equal(state.highWaterByRelay?.[secondary.url], chat.createdAt);
+    await session.handleHuman({ ...chat, relay: { url: secondary.url, primary: true } });
+    assert.equal((await session.snapshot()).outbox.length, state.outbox.length);
   });
 });
 

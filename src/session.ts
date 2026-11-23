@@ -371,7 +371,7 @@ export class Yewholt {
 
   async handleHuman(message: HumanMessage): Promise<void> {
     const state = await this.snapshot();
-    if (state.processed.includes(processedKey(message))) return;
+    if (wasProcessed(state, message)) return;
     const localBots = state.bots.filter((bot) => receivesOnRelay(bot, message));
     if (message.text.trim() === "!shutdown" && localBots.some((bot) => bot.external && this.inScope(bot, message))) {
       await this.handleShutdown(message);
@@ -432,7 +432,7 @@ export class Yewholt {
     const previous = this.queues.get(bot.pubkey) ?? Promise.resolve();
     const run = previous.catch(() => undefined).then(async () => {
       const state = await this.snapshot();
-      if (state.processed.includes(processedKey(message))) return;
+      if (wasProcessed(state, message)) return;
       const fresh = state.bots.find((item) => item.pubkey === bot.pubkey);
       if (this.closing || !fresh || fresh.status !== "active") return;
       if (!(await this.canSpend(fresh, this.options.turnTokens))) {
@@ -787,6 +787,12 @@ function receivesOnRelay(bot: BotRecord, message: HumanMessage): boolean {
 
 function processedKey(message: HumanMessage): string {
   return message.relay && !message.relay.primary ? `${message.relay.url}:${message.eventId}` : message.eventId;
+}
+
+/** A primary relay may have been an additional relay before `yh relay remove` promoted it. */
+function wasProcessed(reg: RegistryState, message: HumanMessage): boolean {
+  return reg.processed.includes(processedKey(message)) ||
+    (message.relay?.primary === true && reg.processed.includes(`${message.relay.url}:${message.eventId}`));
 }
 
 function remember(reg: RegistryState, message: HumanMessage): void {
