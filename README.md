@@ -628,8 +628,10 @@ Buzz's community **Members** panel, look for `Yewholt · provider do Mac
 (hostname)` or `Yewholt · daemon (hostname)`. On other platforms the provider
 label uses `provider`. The profile says not to remove the service key: removing
 it from the roster cuts off that service's relay access. Existing profile names
-are preserved unless you explicitly set the daemon's `YEWHOLT_NAME`. Set that
-variable to a distinct name on a dedicated watcher, such as `Yewholt watcher`.
+are preserved unless you explicitly set the daemon's `YEWHOLT_NAME`. An old
+Yewholt-generated daemon profile that still uses the bare hostname is upgraded
+to `Yewholt · daemon (hostname)` on reconnect. Set `YEWHOLT_NAME` to a distinct
+name on a dedicated watcher, such as `Yewholt watcher`.
 
 After updating Yewholt, restart each daemon or watcher using its usual service
 manager (for a daemon started with `yh start`, run `yh stop && yh start`).

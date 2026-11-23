@@ -6,7 +6,7 @@ import test from "node:test";
 import { WebSocketServer } from "ws";
 import { namedRelayMembers, publishProviderProfile } from "../provider/relay.js";
 import { generateKeyPair, signEvent, verifyEvent, type NostrEvent } from "../src/nostr.js";
-import { daemonProfileEvent, OFFER_TAG, OWNER_TAG } from "../src/pairing-offer.js";
+import { daemonProfileEvent, machineLabel, OFFER_TAG, OWNER_TAG } from "../src/pairing-offer.js";
 
 test("daemon profiles identify the machine by default and preserve a customized profile when closing a pairing offer", () => {
   const { secret, pubkey } = generateKeyPair();
@@ -30,6 +30,27 @@ test("daemon profiles identify the machine by default and preserve a customized 
     name: "my-builder", display_name: "My Builder",
     about: "Private build queue\n\nYewholt service key. Do not remove.", picture: "https://example.org/avatar.png",
   });
+});
+
+test("daemon replaces legacy self-join hostname profiles, even if an earlier update added the notice", () => {
+  const { secret, pubkey } = generateKeyPair();
+  const host = machineLabel();
+  const name = JSON.parse(daemonProfileEvent(secret, pubkey).content).display_name;
+  const notice = "Yewholt service key. Do not remove.";
+  for (const about of ["Yewholt daemon", notice]) {
+    const current = signEvent(secret, 0, JSON.stringify({ name: host, display_name: host, about }), [["x", "extra"]], 100);
+    const migrated = daemonProfileEvent(secret, pubkey, undefined, undefined, 100, current)!;
+    assert.deepEqual(JSON.parse(migrated.content), { name, display_name: name, about: notice });
+    assert.deepEqual(migrated.tags, current.tags);
+    assert.equal(migrated.created_at, 101);
+    assert.ok(verifyEvent(migrated));
+    assert.equal(daemonProfileEvent(secret, pubkey, undefined, undefined, 102, migrated), undefined);
+    assert.equal(JSON.parse(daemonProfileEvent(secret, pubkey, "My watcher", undefined, 101, current)!.content).display_name,
+      "My watcher");
+  }
+  const custom = signEvent(secret, 0, JSON.stringify({ name: host, display_name: host, about: "Build queue" }), [], 100);
+  const kept = daemonProfileEvent(secret, pubkey, undefined, undefined, 101, custom)!;
+  assert.equal(JSON.parse(kept.content).display_name, host);
 });
 
 test("provider publishes kind 0 once, and a read-only roster resolves profile names like the Buzz member panel", async (t) => {
