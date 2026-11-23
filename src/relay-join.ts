@@ -4,6 +4,7 @@ import { parseArgs } from "node:util";
 import { gunzipSync } from "node:zlib";
 import { isPubkey } from "./control-protocol.js";
 import { pubkeyOf, signEvent } from "./nostr.js";
+import { readRelayOwner } from "./relay-discovery.js";
 import { normalizeRelay } from "./relay-url.js";
 
 export type Invite = { relayUrl: string; origin: string; code: string };
@@ -96,12 +97,14 @@ export async function inviteRelayPubkey(invite: Invite): Promise<string> {
   return self;
 }
 
-/** The relay operator's pubkey from NIP-11, when published. A VM joined by its operator pairs with the operator's provider. */
-export async function relayOperator(origin: string): Promise<string | undefined> {
+/** Prefer NIP-11's operator; otherwise identify the owner from the roster signed by NIP-11's self key. */
+export async function relayOperator(origin: string, secret: string): Promise<string | undefined> {
   try {
     const response = await request(origin, "/", undefined, undefined, "application/nostr+json");
-    const { pubkey } = await responseObject(response, "Could not read relay information (NIP-11)", []);
-    return isPubkey(pubkey) ? pubkey : undefined;
+    const { pubkey, self } = await responseObject(response, "Could not read relay information (NIP-11)", []);
+    if (isPubkey(pubkey)) return pubkey;
+    const relay = normalizeRelay(origin);
+    if (relay && isPubkey(self)) return await readRelayOwner(relay, secret, self);
   } catch {
     return undefined;
   }

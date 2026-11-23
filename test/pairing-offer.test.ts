@@ -149,8 +149,10 @@ test("VM join run by the relay operator needs no Mac step, and a rerun spends no
   const { daemonHome, targetsHome } = homes(t), log: string[] = [];
   let claims = 0, consents = 0, member = false;
   const run = () => joinDaemon(invite, {}, async () => "yes", {
-    daemonHome, targetsHome, relayKey: async () => relay.pubkey, operator: async (origin) => {
+    daemonHome, targetsHome, relayKey: async () => relay.pubkey, operator: async (origin, secret) => {
       assert.equal(origin, invite.origin);
+      assert.equal(secret, readKey(ownerKeyPath(daemonHome)));
+      assert.ok(claims > 0);
       return operator.pubkey;
     },
     consent: async () => { consents++; return consent; }, claim: async () => { claims++; return "joined"; },
@@ -194,7 +196,11 @@ test("the Mac lists VMs offering to the relay operator as targets", async (t) =>
   const events = [daemonProfileEvent(vm.secret, vm.pubkey, "build-vm", { ...offer, owner: operator.pubkey }),
     daemonProfileEvent(other.secret, other.pubkey, "other-vm", { ...offer, owner: other.pubkey }),
     daemonProfileEvent(closed.secret, closed.pubkey, "closed-vm")];
-  const deps = { operator: async () => operator.pubkey, members: async () => new Set([vm.pubkey, other.pubkey, closed.pubkey]),
+  const deps = { operator: async (origin: string, secret: string) => {
+    assert.equal(origin, invite.origin);
+    assert.equal(secret, provider.secret);
+    return operator.pubkey;
+  }, members: async () => new Set([vm.pubkey, other.pubkey, closed.pubkey]),
     profiles: async () => events };
   assert.deepEqual(await addOwnerOfferTargets(invite.relayUrl, provider.secret, targetsHome, deps), ["build-vm"]);
   assert.deepEqual([loadTarget("build-vm", targetsHome).daemonPubkey, loadTarget("build-vm", targetsHome).relay], [vm.pubkey, invite.relayUrl]);

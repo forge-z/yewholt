@@ -202,7 +202,7 @@ export async function addOwnerOfferTargets(community: string, secret: string, ho
   };
   const relay = normalizeRelay(community);
   if (!relay) return [];
-  const owner = await deps.operator(relay.replace(/^wss:/, "https:").replace(/\/$/, ""));
+  const owner = await deps.operator(relay.replace(/^ws/, "http").replace(/\/$/, ""), secret);
   if (!owner) return [];
   const members = await deps.members(relay, secret);
   const offers = ownerOffers(await deps.profiles(relay, secret, members), members, owner);
@@ -476,7 +476,7 @@ export async function joinDaemon(invite: Invite, options: JoinOptions, ask: (que
     const member = installed && await deps.members(invite.relayUrl, owner).then((set) => set.has(pubkeyOf(owner)), () => false);
     const status = member ? "already_member" : await deps.claim(invite, await deps.consent(invite, options, ask), owner);
     await deps.configure(deps.daemonHome, invite.relayUrl, owner);
-    const operator = await deps.operator(invite.origin);
+    const operator = await deps.operator(invite.origin, owner);
     writePairingOffer(deps.daemonHome, invite.code, invite.relayUrl, undefined, undefined, operator);
     const cli = fileURLToPath(new URL("../src/cli.js", import.meta.url));
     await activateDaemon(true, true, () => Boolean(deps.running(deps.daemonHome)),
