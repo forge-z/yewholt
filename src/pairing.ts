@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstatSync, readdirSync, unlinkSync } from "node:fs";
+import { lstatSync, readdirSync, renameSync, rmSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { isPubkey } from "./control-protocol.js";
 import { readJson, record, syncDirectory, writePrivateJson } from "./control-files.js";
@@ -52,4 +52,13 @@ export function listPairings(home: string, relay?: string): Pairing[] {
     const pairing = file.endsWith(".json") && readPairing(home, file.slice(0, -5), relay);
     return pairing ? [pairing] : [];
   });
+}
+
+/** Forget every pairing of an additional relay, or make them the primary relay's pairings. */
+export function dropRelayPairings(home: string, relay: string, promote = false): void {
+  const primary = pairingDir(home);
+  if (promote) rmSync(primary, { recursive: true, force: true });
+  const dir = pairingDir(home, relay);
+  if (promote && lstatSync(dir, { throwIfNoEntry: false })?.isDirectory()) renameSync(dir, primary);
+  else rmSync(dir, { recursive: true, force: true });
 }

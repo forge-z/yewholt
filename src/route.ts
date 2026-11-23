@@ -55,6 +55,8 @@ Usage:
   yewholt relay add <url> --relay-pubkey <pubkey> [--home dir]
   yewholt relay join [<invite-url>] [--relay-pubkey <pubkey>] [--accept-policy] [--confirm-age] [--home dir]
   yewholt relay list [--home dir]
+  yewholt relay remove <url> [--home dir]
+                                 Remove a relay from the daemon and provider targets
   yewholt start [--home dir]
   yewholt update [--home dir] [--archive <tar file>]
                                  Update this checkout, bridge, and running daemon (not the relay)

@@ -257,7 +257,9 @@ Low-level commands remain available: `yh provider join` admits only the Mac
 provider; `yh relay join` admits only that daemon and adds the relay (restart
 it yourself). `--relay-pubkey` is optional and, if supplied, must match discovery.
 `yh relay list`, `yh pair add ... --relay <url>`, and `yh targets add ...` allow
-manual configuration. Omitting `--relay` from pairing commands selects the
+manual configuration; `yh relay remove <url>` drops a relay from the daemon
+(the next relay becomes primary, keeping its pairings) and from every provider
+target, then restarts a running daemon. Agents assigned to that relay stop. Omitting `--relay` from pairing commands selects the
 primary relay. Pairing changes are read live.
 
 All join commands accept an HTTPS invite page or a `buzz://join` link.

@@ -6,13 +6,13 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { AgentStatus } from "./agents.js";
-import { configuredRelays, loadConfig, saveConfig } from "./config.js";
+import { configuredRelays, loadConfig, saveConfig, type YewholtConfig } from "./config.js";
 import { isPubkey } from "./control-protocol.js";
 import { loadEnvFile } from "./env-file.js";
 import { readPid, runDaemon } from "./daemon.js";
 import { launchAgent } from "./launch-agent.js";
 import { pubkeyOf } from "./nostr.js";
-import { addPairing, listPairings, removePairing } from "./pairing.js";
+import { addPairing, dropRelayPairings, listPairings, removePairing } from "./pairing.js";
 import { readKey } from "./keys.js";
 import { logPath, ownerKeyPath, pidPath, sqlitePath, statusPath, yewholtHome } from "./paths.js";
 import { joinRelay } from "./relay-join.js";
@@ -22,6 +22,7 @@ import { Yewholt } from "./session.js";
 import { runHarness } from "./harness.js";
 import { route, usageText, withDefaultModel } from "./route.js";
 import { checkoutRoot, update, UpdateError } from "./update.js";
+import { removeRelayFromTargets } from "../provider/install.js";
 
 const args = process.argv.slice(2);
 
@@ -109,6 +110,7 @@ function pair(home: string, rest: string[]): void {
 }
 
 async function relayCommand(home: string, rest: string[]): Promise<void> {
+  if (rest[0] === "remove" && rest.length === 2) return removeRelay(home, rest[1]);
   const config = loadConfig(home);
   const routes = configuredRelays(config);
   const [command, value, flag, externalRelayPubkey] = rest;
@@ -133,9 +135,40 @@ async function relayCommand(home: string, rest: string[]): Promise<void> {
   }
   const relayUrl = normalizeRelay(value);
   if (command !== "add" || rest.length !== 4 || flag !== "--relay-pubkey" || !relayUrl || !isPubkey(externalRelayPubkey)) {
-    throw new Error("Usage: yh relay list | relay add <url> --relay-pubkey <pubkey> | relay join [<invite-url>]");
+    throw new Error("Usage: yh relay list | relay add <url> --relay-pubkey <pubkey> | relay join [<invite-url>] | relay remove <url>");
   }
   addRelay(home, relayUrl, externalRelayPubkey);
+}
+
+/** Remove a relay from the daemon and from every provider target, then restart a running daemon. */
+async function removeRelay(home: string, value: string): Promise<void> {
+  const relayUrl = normalizeRelay(value);
+  if (!relayUrl) throw new Error("Usage: yh relay remove <url>");
+  let config: YewholtConfig | undefined;
+  try {
+    config = loadConfig(home);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const routes = config ? configuredRelays(config) : [];
+  const route = routes.find((entry) => sameRelay(entry.relayUrl, relayUrl));
+  const kept = routes.filter((entry) => entry !== route);
+  if (route && !kept.length) throw new Error("This is the daemon's only relay; add or join another relay before removing it");
+  const changes = removeRelayFromTargets(relayUrl);
+  if (route) {
+    const [primary, ...additional] = kept;
+    const promoted = route === routes[0];
+    dropRelayPairings(home, promoted ? primary.relayUrl : route.relayUrl, promoted);
+    saveConfig(home, { relayUrl: primary.relayUrl, externalRelayPubkey: primary.externalRelayPubkey,
+      ...(additional.length && { relays: additional }) });
+    changes.unshift(`Removed ${route.relayUrl} from the daemon` + (promoted ? `; ${primary.relayUrl} is now its primary relay.` : "."));
+  }
+  if (!changes.length) throw new Error("Relay is not configured on this machine");
+  for (const line of changes) console.log(line);
+  if (route && readPid(home)) {
+    await stop(home);
+    await start(home);
+  }
 }
 
 function addRelay(home: string, relayUrl: string, externalRelayPubkey: string): void {

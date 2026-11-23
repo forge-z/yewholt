@@ -179,6 +179,39 @@ test("additional daemon relays keep legacy pairings separate and local targets a
   assert.deepEqual(JSON.parse(readFileSync(target("instabox"), "utf8")).relays, [secondary]);
 });
 
+test("relay remove promotes the next daemon relay with its pairings and prunes provider targets", (t) => {
+  const { home, run, target } = fixture(t);
+  const old = "wss://old.example";
+  const current = "wss://current.example";
+  const retired = "wss://retired.example";
+  assert.equal(run("install", "--relay", old, "--relay-pubkey", daemon.pubkey).status, 0);
+  assert.equal(run("relay", "add", current, "--relay-pubkey", agent.pubkey).status, 0);
+  assert.equal(run("targets", "add", "mac", "--local", "--label", "Mac").status, 0);
+  assert.equal(run("pair", "remove", JSON.parse(run("pair", "list").stdout)[0].pubkey).status, 0);
+  const paired = JSON.parse(run("pair", "list", "--relay", current).stdout);
+  assert.equal(paired.length, 1);
+  assert.equal(run("targets", "add", "vm", "--relay", retired, "--relay", old, "--relay", current, "--daemon", daemon.pubkey).status, 0);
+  assert.equal(run("targets", "add", "gone", "--relay", retired, "--daemon", daemon.pubkey).status, 0);
+  assert.equal(run("relay", "remove", "wss://unknown.example").status, 1);
+  const removed = run("relay", "remove", old + "/");
+  assert.equal(removed.status, 0, removed.stderr);
+  assert.match(removed.stdout, /wss:\/\/current\.example is now its primary relay/);
+  assert.deepEqual(JSON.parse(run("relay", "list").stdout), [{ relayUrl: current, externalRelayPubkey: agent.pubkey }]);
+  assert.deepEqual(JSON.parse(readFileSync(join(home, "config.json"), "utf8")), { relayUrl: current, externalRelayPubkey: agent.pubkey });
+  assert.deepEqual(JSON.parse(run("pair", "list").stdout), paired);
+  const mac = JSON.parse(readFileSync(target("mac"), "utf8"));
+  assert.equal(mac.relay, current);
+  assert.equal(mac.relays, undefined);
+  assert.equal(mac.label, "Mac");
+  const vm = JSON.parse(readFileSync(target("vm"), "utf8"));
+  assert.deepEqual([vm.relay, vm.relays, vm.daemonPubkey], [retired, [current], daemon.pubkey]);
+  assert.equal(run("relay", "remove", retired).status, 0);
+  assert.equal(existsSync(target("gone")), false);
+  assert.deepEqual([JSON.parse(readFileSync(target("vm"), "utf8")).relay, JSON.parse(readFileSync(target("vm"), "utf8")).relays], [current, undefined]);
+  assert.equal(run("relay", "remove", current).status, 1);
+  assert.equal(existsSync(target("mac")), true);
+});
+
 test("targets doctor checks the live relay, daemon, pairing and model catalog without printing refusals", async (t) => {
   const { home, run, env } = fixture(t);
   assert.equal(run("provider", "install").status, 0);
