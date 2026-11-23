@@ -127,6 +127,18 @@ function remoteRelays(raw: string): string[] {
   });
 }
 
+async function activateDaemon(startStopped: boolean, reconnect: boolean, running: () => boolean | Promise<boolean>,
+  run: (command: "start" | "stop") => Promise<string>): Promise<void> {
+  if (!startStopped && !reconnect) return;
+  if (await running()) {
+    if (!reconnect) return;
+    await run("stop");
+  } else if (!startStopped) {
+    return;
+  }
+  await run("start");
+}
+
 export async function joinMachines(invite: Invite, hosts: string[], options: MachineOptions,
   ask: (question: string) => Promise<string>, overrides: Partial<Dependencies> = {}): Promise<JoinSummary[]> {
   const deps: Dependencies = {
@@ -136,7 +148,8 @@ export async function joinMachines(invite: Invite, hosts: string[], options: Mac
     running: readPid, log: console.log, ...overrides,
   };
   const targets = targetIds(deps.targetsHome).map((id) => ({ id, target: loadTarget(id, deps.targetsHome) }));
-  const sshHosts = [...new Set([...hosts, ...targets.flatMap(({ target }) => target.ssh ? [target.ssh] : [])])];
+  const selectedHosts = new Set(hosts);
+  const sshHosts = [...new Set([...selectedHosts, ...targets.flatMap(({ target }) => target.ssh ? [target.ssh] : [])])];
   if (!sshHosts.every(validSshHost)) throw new Error("Invalid SSH host");
   const installed = existsSync(configPath(deps.daemonHome));
   const local = installed || options.local === true;
@@ -212,17 +225,19 @@ export async function joinMachines(invite: Invite, hosts: string[], options: Mac
   await attempt("Mac provider", () => deps.claim(invite, consent, secret));
   if (local) await attempt(localName, async () => {
     const owner = localOwner!;
+    const daemon = pubkeyOf(owner);
     const status = await deps.claim(invite, consent, owner);
     const added = await deps.configure(deps.daemonHome, invite.relayUrl, owner);
     const relays = configuredRelays(loadConfig(deps.daemonHome)).map(({ relayUrl }) => relayUrl);
-    const { target } = updateJoinTarget(deps.targetsHome, targets, pubkeyOf(owner), [...relays, invite.relayUrl], "mac", "My Mac", undefined, onUpdated);
-    handled.add(pubkeyOf(owner));
-    addPairing(deps.daemonHome, provider, target.label);
-    for (const relay of relays.slice(1)) addPairing(deps.daemonHome, provider, target.label, undefined, relay);
-    if ((status !== "already_member" || added) && deps.running(deps.daemonHome)) {
-      const cli = fileURLToPath(new URL("../src/cli.js", import.meta.url));
-      for (const command of ["stop", "start"]) await deps.runner(process.execPath, [cli, command, "--home", deps.daemonHome]);
-    }
+    const label = targets.find(({ target }) => target.daemonPubkey === daemon)?.target.label ?? "My Mac";
+    addPairing(deps.daemonHome, provider, label);
+    for (const relay of relays.slice(1)) addPairing(deps.daemonHome, provider, label, undefined, relay);
+    const cli = fileURLToPath(new URL("../src/cli.js", import.meta.url));
+    await activateDaemon(options.local === true, status !== "already_member" || added,
+      () => Boolean(deps.running(deps.daemonHome)),
+      (command) => deps.runner(process.execPath, [cli, command, "--home", deps.daemonHome]));
+    updateJoinTarget(deps.targetsHome, targets, daemon, [...relays, invite.relayUrl], "mac", label, undefined, onUpdated);
+    handled.add(daemon);
     return status;
   });
   for (const [i, host] of sshHosts.entries()) await attempt(host, async () => {
@@ -234,10 +249,8 @@ export async function joinMachines(invite: Invite, hosts: string[], options: Mac
     const existing = targets.find(({ target }) => target.daemonPubkey === daemon);
     const label = existing?.target.label ?? host.slice(0, 120);
     await remote(["pair", "add", provider, "--label", label, "--relay", invite.relayUrl]);
-    if ((status !== "already_member" || added) && /^daemon: running\b/m.test(await remote(["status"]))) {
-      await remote(["stop"]);
-      await remote(["start"]);
-    }
+    await activateDaemon(selectedHosts.has(host), status !== "already_member" || added,
+      async () => /^daemon: running\b/m.test(await remote(["status"])), (command) => remote([command]));
     updateJoinTarget(deps.targetsHome, targets, daemon, [...relays, invite.relayUrl], hostId(host), label, host, onUpdated);
     handled.add(daemon);
     return status;
