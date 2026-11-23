@@ -18,6 +18,7 @@ export type ControlEnvelope = ControlContext & {
 export type ModelPage = { models: string[]; next?: number };
 export type Confirmation = {
   job: string; ok: boolean; agentPubkey: string; error?: string; catalog?: ModelPage; model?: string | null;
+  piLoginMissing?: boolean;
 };
 
 export function isModelReference(value: unknown): value is string {

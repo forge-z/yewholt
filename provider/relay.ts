@@ -22,8 +22,46 @@ function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   });
 }
 
-export const waitForConfirmation: RelayWait = async (target, secret, event, requestId, agentPubkey, timeoutMs, onConfirmation) => {
+function subscribeConfirmation(client: RelayClient, daemon: string, secret: string, requestId: string,
+  agentPubkey: string, onConfirmation: (body: Record<string, unknown>) => void, onClosed: () => void): void {
   const recipient = pubkeyOf(secret);
+  client.subscribe("deploy-confirmation", [{ kinds: [CONTROL_KIND], authors: [daemon], "#p": [recipient] }], (incoming) => {
+    if (incoming.pubkey !== daemon) return;
+    const envelope = verifiedEnvelope(incoming, recipient, "confirmation");
+    if (!envelope || envelope.requestId !== requestId || envelope.agentPubkey !== agentPubkey) return;
+    try {
+      const body = decryptControl(envelope, secret, daemon);
+      if (record(body) && body.job === requestId && body.agentPubkey === agentPubkey && typeof body.ok === "boolean") {
+        onConfirmation(body);
+      }
+    } catch {
+      // Unreadable confirmations cannot acknowledge a request.
+    }
+  }, onClosed);
+}
+
+export async function probeModelCatalog(client: RelayClient, target: Target, secret: string, requestId: string, timeoutMs: number) {
+  const daemon = target.daemonPubkey;
+  const event = controlEvent(secret, daemon, "hosted-models", { requestId, agentPubkey: daemon },
+    { offset: 0, relay: target.relay, doctor: true });
+  let acknowledged = false;
+  let timer: NodeJS.Timeout | undefined;
+  type Result = Record<string, unknown> | "relay" | "daemon";
+  try {
+    return await new Promise<Result>((resolve, reject) => {
+      timer = setTimeout(() => resolve(acknowledged && client.isOpen() ? "daemon" : "relay"), timeoutMs);
+      subscribeConfirmation(client, daemon, secret, requestId, daemon, resolve, () => resolve("relay"));
+      client.publish(event).then(({ ok }) => {
+        acknowledged = ok;
+        if (!ok) resolve("relay");
+      }, reject);
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export const waitForConfirmation: RelayWait = async (target, secret, event, requestId, agentPubkey, timeoutMs, onConfirmation) => {
   const deadline = AbortSignal.timeout(timeoutMs);
   while (!deadline.aborted) {
     const client = new RelayClient(target.relay, secret, undefined, false);
@@ -31,21 +69,9 @@ export const waitForConfirmation: RelayWait = async (target, secret, event, requ
     try {
       await untilAborted(client.connect(), deadline);
       const confirmation = new Promise<"confirmed" | "refused">((resolve) => {
-        client.subscribe("deploy-confirmation", [{
-          kinds: [CONTROL_KIND], authors: [target.daemonPubkey], "#p": [recipient],
-        }], (incoming) => {
-          if (incoming.pubkey !== target.daemonPubkey) return;
-          const envelope = verifiedEnvelope(incoming, recipient, "confirmation");
-          if (!envelope || envelope.requestId !== requestId || envelope.agentPubkey !== agentPubkey) return;
-          try {
-            const body = decryptControl(envelope, secret, target.daemonPubkey);
-            if (record(body) && body.job === requestId && body.agentPubkey === agentPubkey && typeof body.ok === "boolean") {
-              onConfirmation?.(body);
-              resolve(body.ok ? "confirmed" : "refused");
-            }
-          } catch {
-            // Unreadable confirmations cannot acknowledge a deploy.
-          }
+        subscribeConfirmation(client, target.daemonPubkey, secret, requestId, agentPubkey, (body) => {
+          onConfirmation?.(body);
+          resolve(body.ok ? "confirmed" : "refused");
         }, () => resolve("refused"));
       });
       const disconnected = new Promise<never>((_, reject) => {

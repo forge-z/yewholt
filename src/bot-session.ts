@@ -23,6 +23,18 @@ export type BotSessionHost = {
   bashUser?: string;
 };
 
+export async function piLoginMissing(agentDir: string): Promise<boolean | undefined> {
+  const { ReadOnlyAuthStorage } = await import(new URL("./core/auth-storage.js",
+    import.meta.resolve("@earendil-works/pi-coding-agent")).href) as {
+      ReadOnlyAuthStorage: new (path: string) => CredentialStore;
+    };
+  try {
+    return !(await new ReadOnlyAuthStorage(join(agentDir, "auth.json")).list()).length;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function botModelRuntime(agentDir: string, models?: Models): Promise<ModelRuntime> {
   const { AuthStorage } = await import(new URL("./core/auth-storage.js",
     import.meta.resolve("@earendil-works/pi-coding-agent")).href) as {

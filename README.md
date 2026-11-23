@@ -478,13 +478,18 @@ on macOS, `YEWHOLT_PROVIDER_FILE_STORAGE=1` opts out of the real Keychain; set
 
 `targets list` reports the last recorded confirmation, deploy and failure,
 and counts distinct agent pubkeys successfully deployed **from this provider**.
-It is not a live count and does not decrease on shutdown or deletion. For relay targets,
-`doctor` tests the WebSocket connection and NIP-42 authentication, reports
-connect-plus-auth latency, and marks confirmations from the last ten minutes as
-recent pairing evidence. Control v1 has no ping or version query; an
-authenticated relay connection or a prior confirmation does not prove the daemon
-is online or still paired.
+It is not a live count and does not decrease on shutdown or deletion.
 Non-secret evidence is stored under the provider config directory's `status/`.
+
+`yh targets doctor [id]` checks each configured relay live without waking a
+sleeping target. It checks the relay connection and NIP-42 authentication,
+then asks the daemon for its model catalog over the signed, encrypted control
+channel. It reports the first failed link and how to fix it, and exits with
+status 1 if any route fails. A relay accepting the request without a signed
+daemon reply means the daemon did not respond on that relay, not necessarily
+that the process is stopped. If the catalog is empty, an updated daemon can
+report whether its Pi credential store has no saved login. A nonempty catalog
+from environment credentials also passes; doctor does not make a model request.
 
 `yewholt targets remove my-vm` removes only that target file; it
 does not stop agents. Keep the original target until their removal is confirmed.
