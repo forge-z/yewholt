@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { AgentFiles, PRESENCE, agentStatuses, type AgentDiagnostics, type AgentScan } from "./agents.js";
+import { AgentFiles, PRESENCE, agentStatuses, daemonName, daemonProfile, type AgentDiagnostics, type AgentScan } from "./agents.js";
 import { configuredRelays, loadConfig, type RelayConfig, type YewholtConfig } from "./config.js";
 import { CONTROL_KIND } from "./control-protocol.js";
 import { DeployControl, lastDeploys } from "./deploy-control.js";
@@ -140,6 +140,10 @@ async function serve(
     primary ? state.highWater : state.highWaterByRelay?.[relayUrl];
   try {
     await owner.connect(5000);
+    const name = daemonName();
+    if (name) void agentRelayDeadline(owner.publish(daemonProfile(ownerSecret, name))).then((result) => {
+      if (!accepted(result)) console.error(`relay ${relayUrl}: daemon profile rejected`);
+    }, () => console.error(`relay ${relayUrl}: daemon profile not acknowledged`));
     let highWater = cursor(await session.snapshot());
     const botLinks = new BotLinks<BotRecord>({
       relayPubkey: externalRelayPubkey,
