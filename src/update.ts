@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { providerBin } from "../provider/install.js";
 import { readPid } from "./daemon.js";
+import { launchAgent } from "./launch-agent.js";
 
 export class UpdateError extends Error {
   constructor(message: string, readonly exitCode: number) {
@@ -33,6 +34,7 @@ export function update(options: { checkout: string; home: string; archive?: stri
   run?: Runner;
   bridgePath?: string;
   readPid?: typeof readPid;
+  supervised?: (home: string) => boolean;
   log?: (message: string) => void;
 } = {}): void {
   const { checkout, home, archive } = options;
@@ -43,7 +45,8 @@ export function update(options: { checkout: string; home: string; archive?: stri
     if (code !== 0) throw new UpdateError(`Update stopped: ${command} ${args.join(" ")} exited with ${code}`, code);
   };
   const bridgeInstalled = existsSync(dependencies.bridgePath ?? join(providerBin(), "yewholt-buzz-bridge"));
-  const daemonRunning = (dependencies.readPid ?? readPid)(home) !== null;
+  const supervised = dependencies.supervised?.(home) ?? launchAgent(home)?.installed();
+  const restartDaemon = supervised || (dependencies.readPid ?? readPid)(home) !== null;
   if (archive) {
     step("tar", ["-xf", resolve(archive), "-C", checkout]);
   } else if (existsSync(join(checkout, ".git"))) {
@@ -56,9 +59,9 @@ export function update(options: { checkout: string; home: string; archive?: stri
   step("npm", ["run", "build"]);
   const cli = join(checkout, "dist", "src", "cli.js");
   if (bridgeInstalled) step(process.execPath, [cli, "provider", "install"]);
-  if (daemonRunning) {
+  if (restartDaemon) {
     step(process.execPath, [cli, "stop", "--home", home]);
     step(process.execPath, [cli, "start", "--home", home]);
   }
-  log(`Updated: ${archive ? "archive extracted" : "git pulled"}; built; bridge ${bridgeInstalled ? "refreshed" : "not installed"}; daemon ${daemonRunning ? "restarted" : "not running (left stopped)"}.`);
+  log(`Updated: ${archive ? "archive extracted" : "git pulled"}; built; bridge ${bridgeInstalled ? "refreshed" : "not installed"}; daemon ${restartDaemon ? "restarted" : "not running (left stopped)"}.`);
 }
