@@ -365,7 +365,6 @@ test("join discovers existing member daemons without SSH and adds the community 
       lookups++;
       assert.equal(url, invite.relayUrl);
       assert.equal(secret, provider.secret);
-      assert.equal(claims, lookups);
       return new Set([remoteOwner.pubkey]);
     },
   });

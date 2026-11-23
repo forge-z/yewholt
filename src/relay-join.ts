@@ -96,6 +96,17 @@ export async function inviteRelayPubkey(invite: Invite): Promise<string> {
   return self;
 }
 
+/** The relay operator's pubkey from NIP-11, when published. A VM joined by its operator pairs with the operator's provider. */
+export async function relayOperator(origin: string): Promise<string | undefined> {
+  try {
+    const response = await request(origin, "/", undefined, undefined, "application/nostr+json");
+    const { pubkey } = await responseObject(response, "Could not read relay information (NIP-11)", []);
+    return isPubkey(pubkey) ? pubkey : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export type Consent = { receipt?: string; acceptPolicy: boolean; confirmAge: boolean };
 
 export async function consentToPolicy(invite: Invite, options: JoinOptions,

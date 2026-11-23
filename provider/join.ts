@@ -15,9 +15,9 @@ import { configPath, ownerKeyPath, yewholtHome } from "../src/paths.js";
 import { discoverRelayPubkey, readRelayMembers } from "../src/relay-discovery.js";
 import { RelayClient } from "../src/nostr-client.js";
 import { pubkeyOf, verifyEvent, type NostrEvent } from "../src/nostr.js";
-import { OFFER_TAG, offerKey, offerTag, pairingProof, writePairingOffer } from "../src/pairing-offer.js";
+import { OFFER_TAG, OWNER_TAG, offerKey, offerTag, pairingProof, writePairingOffer } from "../src/pairing-offer.js";
 import { waitForConfirmation } from "./relay.js";
-import { claimInvite, consentToPolicy, inviteRelayPubkey, withInviteInput, type Invite, type JoinOptions } from "../src/relay-join.js";
+import { claimInvite, consentToPolicy, inviteRelayPubkey, relayOperator, withInviteInput, type Invite, type JoinOptions } from "../src/relay-join.js";
 import { normalizeRelay, sameRelay } from "../src/relay-url.js";
 import { targetIds } from "./install.js";
 import { ProviderSecrets } from "./secrets.js";
@@ -111,7 +111,7 @@ export type JoinSummary = { machine: string; status: "joined" | "already_member"
 type Dependencies = {
   daemonHome: string; targetsHome: string; identity: () => string; runner: Runner;
   consent: typeof consentToPolicy; claim: typeof claimInvite; configure: typeof configureJoinedRelay;
-  relayKey: typeof inviteRelayPubkey;
+  relayKey: typeof inviteRelayPubkey; operator: typeof relayOperator;
   running: typeof readPid; log: (line: string) => void;
   members: (relay: string, secret: string) => Promise<ReadonlySet<string>>;
   checkModels: typeof checkTargetModels;
@@ -124,6 +124,17 @@ export type PairingOfferFound = { daemon: string; label: string };
 
 /** Newest kind 0 profile per member that carries a pairing tag only a holder of the invite could compute. */
 export function matchingOffers(events: Iterable<NostrEvent>, members: ReadonlySet<string>, key: string): PairingOfferFound[] {
+  return offeringProfiles(events, members, (event) => event.tags.some((tag) => tag[0] === OFFER_TAG && tag[1] === offerTag(key, event.pubkey)));
+}
+
+/** Newest kind 0 profile per member whose open offer names this owner. */
+export function ownerOffers(events: Iterable<NostrEvent>, members: ReadonlySet<string>, owner: string): PairingOfferFound[] {
+  return offeringProfiles(events, members, (event) => event.tags.some((tag) => tag[0] === OFFER_TAG) &&
+    event.tags.some((tag) => tag[0] === OWNER_TAG && tag[1] === owner));
+}
+
+function offeringProfiles(events: Iterable<NostrEvent>, members: ReadonlySet<string>,
+  offers: (event: NostrEvent) => boolean): PairingOfferFound[] {
   const newest = new Map<string, NostrEvent>();
   for (const event of events) {
     try {
@@ -135,7 +146,7 @@ export function matchingOffers(events: Iterable<NostrEvent>, members: ReadonlySe
     if (!old || event.created_at > old.created_at) newest.set(event.pubkey, event);
   }
   return [...newest.values()].flatMap((event) => {
-    if (!event.tags.some((tag) => tag[0] === OFFER_TAG && tag[1] === offerTag(key, event.pubkey))) return [];
+    if (!offers(event)) return [];
     let label = "";
     try {
       const profile: unknown = JSON.parse(event.content);
@@ -149,6 +160,10 @@ export function matchingOffers(events: Iterable<NostrEvent>, members: ReadonlySe
 async function readOffers(relay: string, secret: string, key: string,
   roster: () => Promise<ReadonlySet<string>>): Promise<PairingOfferFound[]> {
   const members = await roster();
+  return matchingOffers(await readProfiles(relay, secret, members), members, key);
+}
+
+async function readProfiles(relay: string, secret: string, members: ReadonlySet<string>): Promise<NostrEvent[]> {
   const authors = [...members].filter((member) => member !== pubkeyOf(secret));
   if (!authors.length) return [];
   const client = new RelayClient(relay, secret, undefined, false);
@@ -166,7 +181,38 @@ async function readOffers(relay: string, secret: string, key: string,
     client.unsubscribe("join-offers");
     await client.close();
   }
-  return matchingOffers(events, members, key);
+  return events;
+}
+
+type OwnerDiscovery = {
+  operator: typeof relayOperator;
+  members: (relay: string, secret: string) => Promise<ReadonlySet<string>>;
+  profiles: (relay: string, secret: string, members: ReadonlySet<string>) => Promise<NostrEvent[]>;
+};
+
+/**
+ * Adds a target for each VM in this community whose open offer names the relay operator. The VM pairs only when the
+ * operator's Buzz signs the first agent created on it, so listing it here grants nothing by itself.
+ */
+export async function addOwnerOfferTargets(community: string, secret: string, home = providerHome(),
+  overrides: Partial<OwnerDiscovery> = {}): Promise<string[]> {
+  const deps: OwnerDiscovery = {
+    operator: relayOperator, members: async (relay, key) => readRelayMembers(relay, key, await discoverRelayPubkey(relay, key)),
+    profiles: readProfiles, ...overrides,
+  };
+  const relay = normalizeRelay(community);
+  if (!relay) return [];
+  const owner = await deps.operator(relay.replace(/^wss:/, "https:").replace(/\/$/, ""));
+  if (!owner) return [];
+  const members = await deps.members(relay, secret);
+  const offers = ownerOffers(await deps.profiles(relay, secret, members), members, owner);
+  const targets = targetIds(home).map((id) => ({ id, target: loadTarget(id, home) }));
+  const added: string[] = [];
+  for (const { daemon, label } of offers) {
+    if (targets.some(({ target }) => target.daemonPubkey === daemon && targetRelays(target).some((url) => sameRelay(url, relay)))) continue;
+    added.push(updateJoinTarget(home, targets, daemon, [relay], hostId(label), label).id);
+  }
+  return added;
 }
 
 async function requestPairing(relay: string, daemon: string, secret: string, event: NostrEvent, requestId: string) {
@@ -233,7 +279,7 @@ export async function joinMachines(invite: Invite, hosts: string[], options: Mac
   ask: (question: string) => Promise<string>, overrides: Partial<Dependencies> = {}): Promise<JoinSummary[]> {
   const deps: Dependencies = {
     daemonHome: yewholtHome(), targetsHome: providerHome(), identity: () => new ProviderSecrets().identity(),
-    runner: runCommand, consent: consentToPolicy, claim: claimInvite, configure: configureJoinedRelay, relayKey: inviteRelayPubkey,
+    runner: runCommand, consent: consentToPolicy, claim: claimInvite, configure: configureJoinedRelay, relayKey: inviteRelayPubkey, operator: relayOperator,
     members: async (relay, secret) => readRelayMembers(relay, secret, await discoverRelayPubkey(relay, secret)),
     running: readPid, log: console.log, checkModels: checkTargetModels, offers: readOffers, pair: requestPairing,
     ...overrides,
@@ -246,9 +292,20 @@ export async function joinMachines(invite: Invite, hosts: string[], options: Mac
   const local = installed || options.local === true;
   const localName = "My Mac daemon";
   const uses = 1 + Number(local) + sshHosts.length;
-  deps.log(`Allow up to ${uses} invite uses (one per identity not yet admitted, including this Mac's provider).`);
+  // The provider key is created only once nothing earlier can fail; a Mac-only join needs it for the membership check.
+  let secret = !local && !sshHosts.length ? deps.identity() : "";
+  let roster: Promise<ReadonlySet<string>> | undefined;
+  const members = () => roster ??= deps.members(invite.relayUrl, secret).catch((error: unknown) => {
+    roster = undefined;
+    throw error;
+  });
+  // Pairing an already-admitted Mac with a VM must not spend another use of a single-use invite.
+  const providerMember = !local && !sshHosts.length && await members().then((set) => set.has(pubkeyOf(secret)), () => false);
+  if (!providerMember) {
+    deps.log(`Allow up to ${uses} invite uses (one per identity not yet admitted, including this Mac's provider).`);
+  }
   if (!local) deps.log("Local daemon not installed; skipping. Use yh join --local to initialize it.");
-  const consent = await deps.consent(invite, options, ask);
+  const consent = providerMember ? { acceptPolicy: false, confirmAge: false } : await deps.consent(invite, options, ask);
   const summary: JoinSummary[] = [];
   const updatedTargets = new Set<string>();
   const onUpdated = ({ id }: StoredTarget) => { updatedTargets.add(id); };
@@ -312,9 +369,9 @@ export async function joinMachines(invite: Invite, hosts: string[], options: Mac
     for (const [machine, reason] of failed) summary.push({ machine, status: "failed", reason });
     return report();
   }
-  const secret = deps.identity();
+  secret ||= deps.identity();
   const provider = pubkeyOf(secret);
-  await attempt("Mac provider", () => deps.claim(invite, consent, secret));
+  await attempt("Mac provider", async () => providerMember ? "already_member" : deps.claim(invite, consent, secret));
   if (local) await attempt(localName, async () => {
     const owner = localOwner!;
     const daemon = pubkeyOf(owner);
@@ -349,8 +406,6 @@ export async function joinMachines(invite: Invite, hosts: string[], options: Mac
     handled.add(daemon);
     return status;
   });
-  let roster: Promise<ReadonlySet<string>> | undefined;
-  const members = () => roster ??= deps.members(invite.relayUrl, secret);
   if (summary[0].status !== "failed") {
     const key = offerKey(invite.code, invite.relayUrl);
     let offers: PairingOfferFound[] = [];
@@ -404,25 +459,33 @@ export async function joinDaemon(invite: Invite, options: JoinOptions, ask: (que
   overrides: Partial<Dependencies> = {}): Promise<JoinSummary[]> {
   const deps: Dependencies = {
     daemonHome: yewholtHome(), targetsHome: providerHome(), identity: () => new ProviderSecrets().identity(),
-    runner: runCommand, consent: consentToPolicy, claim: claimInvite, configure: configureJoinedRelay, relayKey: inviteRelayPubkey,
-    members: async () => new Set(), running: readPid, log: console.log, checkModels: checkTargetModels,
+    runner: runCommand, consent: consentToPolicy, claim: claimInvite, configure: configureJoinedRelay, relayKey: inviteRelayPubkey, operator: relayOperator,
+    members: async (relay, secret) => readRelayMembers(relay, secret, await discoverRelayPubkey(relay, secret)),
+    running: readPid, log: console.log, checkModels: checkTargetModels,
     offers: readOffers, pair: requestPairing, ...overrides,
   };
   const machine = "This daemon";
   try {
-    if (!existsSync(configPath(deps.daemonHome))) {
+    const installed = existsSync(configPath(deps.daemonHome));
+    if (!installed) {
       initializeDaemon(deps.daemonHome, { relayUrl: invite.relayUrl, externalRelayPubkey: await deps.relayKey(invite) });
     }
     loadConfig(deps.daemonHome);
     const owner = readKey(ownerKeyPath(deps.daemonHome));
-    const consent = await deps.consent(invite, options, ask);
-    const status = await deps.claim(invite, consent, owner);
+    // A rerun (say, after the offer expired) must not spend a single-use invite again.
+    const member = installed && await deps.members(invite.relayUrl, owner).then((set) => set.has(pubkeyOf(owner)), () => false);
+    const status = member ? "already_member" : await deps.claim(invite, await deps.consent(invite, options, ask), owner);
     await deps.configure(deps.daemonHome, invite.relayUrl, owner);
-    writePairingOffer(deps.daemonHome, invite.code, invite.relayUrl);
+    const operator = await deps.operator(invite.origin);
+    writePairingOffer(deps.daemonHome, invite.code, invite.relayUrl, undefined, undefined, operator);
     const cli = fileURLToPath(new URL("../src/cli.js", import.meta.url));
     await activateDaemon(true, true, () => Boolean(deps.running(deps.daemonHome)),
       (command) => deps.runner(process.execPath, [cli, command, "--home", deps.daemonHome]));
-    deps.log("Next, on the Mac: run yh join and paste the same invite within 24 hours. The Mac pairs with this daemon over Buzz.");
+    deps.log(operator
+      ? "Next, in Buzz on the relay operator's Mac: create a Yewholt agent and pick this machine as its target within 24 hours. " +
+        "That first agent pairs the Mac's provider with this daemon; no invite is needed there."
+      : "Next, on the Mac: run yh join and paste the same invite within 24 hours. The Mac pairs with this daemon over Buzz " +
+        "without spending another invite use when its provider is already a member.");
     deps.log("Models: run yh here and enter /login, then restart the daemon (yh stop && yh start).");
     return [{ machine, status }];
   } catch (error) {

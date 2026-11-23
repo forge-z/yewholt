@@ -88,12 +88,27 @@ VM's `YEWHOLT_LOCAL_PORT` setting to the Mac.
 
 If you run on the VM itself (for example through a remote executor) or the Mac
 can't reach the VM over SSH, ask the user for a Buzz community invite, never a
-relay URL or public key. Install the CLI as above, then have the user paste the
-invite into `yh join --daemon` on the VM. After it prints the next step, have
-the user run `yh join` on the Mac with the same invite within 24 hours, while
-the VM is awake. The Mac pairs with the VM over Buzz and adds its target; there
-is no key to copy and no `yh pair add`. Run `yh` and `/login` on the VM for its
-models.
+relay URL or public key. Invites may be single-use: the user gives it to you
+once and you finish the setup; never ask them to paste it anywhere else.
+
+1. Install the CLI as above.
+2. Write the invite to a private file (`umask 077`, not in a command argument or
+   shell history), run `yh join --daemon < <file>` yourself, then delete the
+   file.
+3. If the command stops because the community policy needs consent, show the
+   user the policy it printed. Rerun with `--accept-policy` (and `--confirm-age`
+   when asked) only after they accept. Nothing is claimed before consent.
+4. Report the next step `yh join --daemon` printed:
+   - If it names the relay operator, the user doesn't run anything on the Mac.
+     In Buzz, they create a Yewholt agent and pick this VM as its target within
+     24 hours. That first agent pairs the Mac's provider.
+   - Otherwise the user runs `yh join` on the Mac with the same invite. When the
+     Mac's provider is already a member, it doesn't use the invite again.
+5. Keep the VM awake until it pairs. Rerunning `yh join --daemon` reopens an
+   expired offer without using the invite again. Run `yh` and `/login` on the
+   VM for its models.
+
+There is no key to copy and no `yh pair add`.
 
 ## Each approved VM: daemon only
 

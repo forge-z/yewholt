@@ -4,13 +4,13 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { joinDaemon, joinExitCode, joinMachines, matchingOffers } from "../provider/join.js";
+import { addOwnerOfferTargets, joinDaemon, joinExitCode, joinMachines, matchingOffers } from "../provider/join.js";
 import { loadTarget } from "../provider/target.js";
 import { loadConfig } from "../src/config.js";
 import { controlEvent, decryptControl, verifiedEnvelope } from "../src/control-protocol.js";
 import { DeployControl } from "../src/deploy-control.js";
 import { readKey } from "../src/keys.js";
-import { generateKeyPair, pubkeyOf } from "../src/nostr.js";
+import { generateKeyPair, ownerAuthTag, pubkeyOf } from "../src/nostr.js";
 import { listPairings, readPairing } from "../src/pairing.js";
 import {
   OFFER_TAG, daemonProfileEvent, offerKey, pairingProof, readPairingOffer, writePairingOffer,
@@ -50,7 +50,7 @@ test("VM join initializes a fresh daemon from the invite alone and leaves a pair
     daemonHome, targetsHome, identity: () => { throw Error("must not need a provider key"); },
     relayKey: async () => relay.pubkey, consent: async () => consent,
     claim: async (_invite, _consent, secret) => { claimedBy = pubkeyOf(secret); return "joined"; },
-    configure: async () => false, running: () => null, log: (line) => log.push(line),
+    configure: async () => false, running: () => null, log: (line) => log.push(line), operator: async () => undefined,
     runner: async (_command, args) => { runs.push(args.slice(1)); return ""; },
   });
   assert.equal(joinExitCode(summary), 0);
@@ -134,4 +134,85 @@ test("Mac join pairs every VM that offered the invite and adds its target withou
   const target = loadTarget("build-vm", paths.targetsHome);
   assert.deepEqual([target.label, target.relay, target.daemonPubkey, target.ssh], ["build-vm", invite.relayUrl, daemon.pubkey, undefined]);
   assert.ok(!existsSync(join(paths.targetsHome, "targets", "sleepy.json")));
+});
+
+const operator = generateKeyPair();
+
+function activation(daemon: string, agent: ReturnType<typeof generateKeyPair>, signer = provider,
+  { owner = operator, nsec = agent.secret, issuedAt = Date.now() } = {}) {
+  const authTag = ownerAuthTag(owner.secret, agent.pubkey);
+  return controlEvent(signer.secret, daemon, "hosted-activate", { requestId: randomUUID(), agentPubkey: agent.pubkey },
+    { community: invite.relayUrl, owner: owner.pubkey, authTag, agent: { name: "agent", nsec, authTag } }, issuedAt);
+}
+
+test("VM join run by the relay operator needs no Mac step, and a rerun spends no invite use", async (t) => {
+  const { daemonHome, targetsHome } = homes(t), log: string[] = [];
+  let claims = 0, consents = 0, member = false;
+  const run = () => joinDaemon(invite, {}, async () => "yes", {
+    daemonHome, targetsHome, relayKey: async () => relay.pubkey, operator: async (origin) => {
+      assert.equal(origin, invite.origin);
+      return operator.pubkey;
+    },
+    consent: async () => { consents++; return consent; }, claim: async () => { claims++; return "joined"; },
+    members: async (_relay, secret) => new Set(member ? [pubkeyOf(secret)] : []),
+    configure: async () => false, running: () => null, log: (line) => log.push(line), runner: async () => "",
+  });
+  assert.equal(joinExitCode(await run()), 0);
+  assert.equal(readPairingOffer(daemonHome)?.owner, operator.pubkey);
+  assert.ok(log.some((line) => line.includes("create a Yewholt agent")));
+  assert.ok(!log.some((line) => line.includes("yh join")));
+  member = true;
+  assert.deepEqual(await run(), [{ machine: "This daemon", status: "already_member" }]);
+  assert.deepEqual([claims, consents], [1, 1]);
+});
+
+test("the first agent the relay operator activates pairs its provider; replayed or foreign signatures do not", async (t) => {
+  const { daemonHome } = homes(t);
+  const daemon = generateKeyPair(), stranger = generateKeyPair(), agent = generateKeyPair();
+  const control = new DeployControl(daemonHome, daemon.secret, { relayUrl: invite.relayUrl, model: { provider: "test", modelId: "offline", label: "test/offline" } });
+  const send = (event: ReturnType<typeof activation>, signer = provider, paired?: () => Promise<void>) =>
+    reply(control, event as ReturnType<typeof pairRequest>, signer, paired);
+  assert.equal((await send(activation(daemon.pubkey, agent))).error, "provider not paired");
+  writePairingOffer(daemonHome, invite.code, invite.relayUrl, "vm", Date.now() - 1000, operator.pubkey);
+  assert.equal((await send(activation(daemon.pubkey, agent, stranger, { owner: stranger }), stranger)).error, "provider not paired");
+  assert.equal((await send(activation(daemon.pubkey, agent, stranger, { nsec: stranger.secret }), stranger)).error, "provider not paired");
+  assert.equal((await send(activation(daemon.pubkey, agent, provider, { issuedAt: Date.now() - 60_000 }))).error, "provider not paired");
+  assert.equal(listPairings(daemonHome).length, 0);
+  let notified = 0;
+  await send(activation(daemon.pubkey, agent), provider, async () => { notified++; });
+  assert.equal(notified, 1);
+  assert.ok(readPairing(daemonHome, provider.pubkey));
+  assert.equal(readPairingOffer(daemonHome), undefined);
+  assert.equal((await send(activation(daemon.pubkey, generateKeyPair(), stranger), stranger)).error, "provider not paired");
+  assert.equal(listPairings(daemonHome).length, 1);
+});
+
+test("the Mac lists VMs offering to the relay operator as targets", async (t) => {
+  const { targetsHome } = homes(t);
+  const vm = generateKeyPair(), other = generateKeyPair(), closed = generateKeyPair();
+  const offer = { key: offerKey("x", invite.relayUrl), relayUrl: invite.relayUrl, label: "vm", createdAt: 0, expiresAt: Date.now() + 1000 };
+  const events = [daemonProfileEvent(vm.secret, vm.pubkey, "build-vm", { ...offer, owner: operator.pubkey }),
+    daemonProfileEvent(other.secret, other.pubkey, "other-vm", { ...offer, owner: other.pubkey }),
+    daemonProfileEvent(closed.secret, closed.pubkey, "closed-vm")];
+  const deps = { operator: async () => operator.pubkey, members: async () => new Set([vm.pubkey, other.pubkey, closed.pubkey]),
+    profiles: async () => events };
+  assert.deepEqual(await addOwnerOfferTargets(invite.relayUrl, provider.secret, targetsHome, deps), ["build-vm"]);
+  assert.deepEqual([loadTarget("build-vm", targetsHome).daemonPubkey, loadTarget("build-vm", targetsHome).relay], [vm.pubkey, invite.relayUrl]);
+  assert.deepEqual(await addOwnerOfferTargets(invite.relayUrl, provider.secret, targetsHome, deps), []);
+  assert.deepEqual(await addOwnerOfferTargets(invite.relayUrl, provider.secret, targetsHome, { ...deps, operator: async () => undefined }), []);
+});
+
+test("a Mac provider already in the community pairs with the VM without spending the invite", async (t) => {
+  const paths = homes(t), daemon = generateKeyPair();
+  let claims = 0, consents = 0;
+  const summary = await joinMachines(invite, [], {}, async () => "yes", {
+    ...paths, identity: () => provider.secret, log: () => {},
+    consent: async () => { consents++; return consent; }, claim: async () => { claims++; return "joined"; },
+    members: async () => new Set([provider.pubkey, daemon.pubkey]),
+    offers: async () => [{ daemon: daemon.pubkey, label: "build-vm" }],
+    pair: async () => ({ result: "confirmed" }),
+    checkModels: async () => ({ ok: true, message: "Models available." }),
+  });
+  assert.deepEqual(summary.map(({ machine, status }) => [machine, status]), [["Mac provider", "already_member"], ["build-vm", "joined"]]);
+  assert.deepEqual([claims, consents], [0, 0]);
 });

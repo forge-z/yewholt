@@ -9,6 +9,7 @@ import { parseModelLabel } from "../src/models.js";
 import { generateKeyPair, verifyAuthSignature } from "../src/nostr.js";
 import { sameRelay } from "../src/relay-url.js";
 import { targetIds } from "./install.js";
+import { addOwnerOfferTargets } from "./join.js";
 import { sendControl, waitForConfirmation, type RelayWait } from "./relay.js";
 import { ProviderSecrets } from "./secrets.js";
 import { recordOutcome } from "./status.js";
@@ -106,10 +107,21 @@ async function modelCatalog(target: Extract<Target, { transport: "relay" }>, sec
   return fail("Could not load models from the daemon. Check that it is updated, online and paired, then retry.");
 }
 
+/** A VM its operator joined from the VM itself shows up as a target; discovery never blocks the list for long. */
+async function discoverOwnerTargets(community: string): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([
+    addOwnerOfferTargets(community, new ProviderSecrets().identity()).catch(() => []),
+    new Promise((resolve) => { timer = setTimeout(resolve, 8_000); }),
+  ]);
+  clearTimeout(timer);
+}
+
 export async function bridge(input: unknown, wait: RelayWait = waitForConfirmation) {
   try {
     if (!record(input)) return fail("Invalid Yewholt request");
     if (input.op === "targets") {
+      if (relayUrl(input.community)) await discoverOwnerTargets(input.community);
       const relays = Object.fromEntries(targetIds().flatMap((id) => {
         const target = loadTarget(id);
         return target.transport === "relay" ? [[id, target.relays ? targetRelays(target) : target.relay] as const] : [];

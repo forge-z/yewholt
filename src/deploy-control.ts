@@ -7,7 +7,7 @@ import { controlEvent, decryptControl, verifiedEnvelope, type Confirmation, type
 import { HostedControl, hostedLastDeploy, type HostedEffects } from "./hosted-control.js";
 import { pubkeyOf, type NostrEvent } from "./nostr.js";
 import { addPairing, readPairing } from "./pairing.js";
-import { pairingProof, readPairingOffer, removePairingOffer, sameProof } from "./pairing-offer.js";
+import { ownerActivation, pairingProof, readPairingOffer, removePairingOffer, sameProof } from "./pairing-offer.js";
 import { agentsDir } from "./paths.js";
 import { sameRelay } from "./relay-url.js";
 
@@ -118,6 +118,9 @@ export class DeployControl {
       return controlEvent(this.secret, event.pubkey, "confirmation", envelope, confirmation, this.now());
     }
     try {
+      if (envelope.type === "hosted-activate" && !readPairing(this.home, event.pubkey, pairingRelay)) {
+        await this.pairOwner(event, envelope, now, pairingRelay, effects);
+      }
       const pairing = readPairing(this.home, event.pubkey, pairingRelay);
       if (!pairing) confirmation.error = "provider not paired";
       else if (envelope.issuedAt < pairing.pairedAt || envelope.issuedAt > now + 60_000) {
@@ -170,6 +173,26 @@ export class DeployControl {
     }
     confirmation.ok = confirmation.error === undefined;
     return controlEvent(this.secret, event.pubkey, "confirmation", envelope, confirmation, this.now());
+  }
+
+  /** Pairs the first provider that activates an agent the offer's owner signed for, while the offer is open. */
+  private async pairOwner(event: NostrEvent, envelope: ControlEnvelope, now: number, pairingRelay: string | undefined,
+    effects?: HostedEffects): Promise<void> {
+    const offer = readPairingOffer(this.home, now);
+    if (!offer?.owner || !sameRelay(offer.relayUrl, this.defaults.relayUrl) ||
+        envelope.issuedAt < offer.createdAt || envelope.issuedAt > now + 60_000) return;
+    let body: unknown;
+    try {
+      body = decryptControl(envelope, this.secret, event.pubkey);
+    } catch {
+      return;
+    }
+    if (!ownerActivation(offer, body, envelope.agentPubkey)) return;
+    addPairing(this.home, event.pubkey, "Buzz provider", Math.min(envelope.issuedAt, now), pairingRelay);
+    removePairingOffer(this.home);
+    try {
+      await effects?.paired?.();
+    } catch { /* The stale profile tag only advertises an offer that no longer exists. */ }
   }
 
   /** Pairs the first provider that proves it holds the invite this daemon joined with. */

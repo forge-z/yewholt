@@ -61,7 +61,7 @@ export function apply(ctx) {
     const [retry, setRetry] = useState(0);
     useEffect(() => {
       const controller = new AbortController();
-      request({ op: "targets", details: true }, controller.signal).then(({ targets, relays }) => {
+      request({ op: "targets", details: true, ...(community && { community }) }, controller.signal).then(({ targets, relays }) => {
         if (!controller.signal.aborted) {
           setTargets(targets);
           setRelays(relays);
@@ -70,7 +70,7 @@ export function apply(ctx) {
         if (!controller.signal.aborted) setError(error.message);
       });
       return () => controller.abort();
-    }, []);
+    }, [community]);
     const target = targets?.includes(config?.target) ? config.target : "";
     const code = config?.code === true;
     const model = config?.model ?? "";
