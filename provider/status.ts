@@ -3,8 +3,9 @@ import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { record, writePrivateJson } from "../src/control-files.js";
 import { isModelReference } from "../src/control-protocol.js";
-import { pubkeyOf } from "../src/nostr.js";
+import { pubkeyOf, verifyEvent, type NostrEvent } from "../src/nostr.js";
 import { RelayClient } from "../src/nostr-client.js";
+import { httpUrl, RUNTIME_PROFILE_KIND } from "../src/wake.js";
 import { targetIds } from "./install.js";
 import { probeModelCatalog } from "./relay.js";
 import { InvalidTargetRelay, loadTarget, privateJson, providerHome, targetRelays, type Target } from "./target.js";
@@ -96,6 +97,35 @@ export function listTargets(): void {
 
 const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
 
+async function advertisesWake(client: RelayClient, daemon: string): Promise<boolean> {
+  const id = "doctor-runtime-profile";
+  let timer: NodeJS.Timeout | undefined;
+  let newest: NostrEvent | undefined;
+  try {
+    const profile = await new Promise<NostrEvent | undefined>((resolve) => {
+      timer = setTimeout(() => resolve(undefined), 1_000);
+      client.subscribe(id, [{ kinds: [RUNTIME_PROFILE_KIND], authors: [daemon], limit: 1 }], (event) => {
+        try {
+          if (event.kind !== RUNTIME_PROFILE_KIND || event.pubkey !== daemon ||
+              !Number.isSafeInteger(event.created_at) || !verifyEvent(event)) return;
+          if (!newest || event.created_at > newest.created_at ||
+              (event.created_at === newest.created_at && event.id < newest.id)) newest = event;
+        } catch {
+          // Ignore malformed events.
+        }
+      }, () => resolve(undefined), () => resolve(newest));
+    });
+    if (!profile || typeof profile.content !== "string") return false;
+    const content: unknown = JSON.parse(profile.content);
+    return record(content) && httpUrl(content.wake_url);
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+    client.unsubscribe(id);
+  }
+}
+
 export async function checkTargetModels(id: string, target: Target, secret: string | undefined):
   Promise<{ ok: boolean; message: string; needsLogin?: boolean }> {
   const fail = (message: string) => ({ ok: false, message });
@@ -115,7 +145,12 @@ export async function checkTargetModels(id: string, target: Target, secret: stri
     const latency = Math.round(performance.now() - start);
     const result = await probeModelCatalog(client, target, secret, randomUUID(), 4_000);
     if (result === "relay") return fail(`Relay control request not acknowledged; ${admit} and check that the relay allows kind 1059 traffic.`);
-    if (result === "daemon") return fail(`Daemon offline or not responding; on the ${host}, run yh start as the daemon user (or start its configured service). If already running, run yh status and verify this relay and daemon pubkey.`);
+    if (result === "daemon") {
+      if (await advertisesWake(client, target.daemonPubkey)) {
+        return fail("VM appears to be sleeping; send a message to one of its agents to wake it.");
+      }
+      return fail(`Daemon offline or not responding; on the ${host}, run yh start as the daemon user (or start its configured service). If already running, run yh status and verify this relay and daemon pubkey.`);
+    }
     if (!result.ok && result.error === "provider not paired") {
       return fail(`Provider not paired; on the ${host}, run yh pair add ${pubkeyOf(secret)} --label ${id} --relay ${quote(new URL(target.relay).href)} as the daemon user.`);
     }

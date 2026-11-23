@@ -517,9 +517,14 @@ then asks the daemon for its model catalog over the signed, encrypted control
 channel. It reports the first failed link and how to fix it, and exits with
 status 1 if any route fails. A relay accepting the request without a signed
 daemon reply means the daemon did not respond on that relay, not necessarily
-that the process is stopped. If the catalog is empty, an updated daemon can
-report whether its Pi credential store has no saved login. A nonempty catalog
-from environment credentials also passes; doctor does not make a model request.
+that the process is stopped. If the daemon's signed runtime profile advertises
+a wake URL, doctor says the VM appears to be sleeping and suggests messaging
+one of its agents. This is a hint, not proof that the VM is paused, and the
+check still exits with status 1 without contacting the wake URL. Update and
+start the daemon once so it can publish this profile. If the catalog is empty,
+an updated daemon can report whether its Pi credential store has no saved
+login. A nonempty catalog from environment credentials also passes; doctor
+does not make a model request.
 
 `yewholt targets remove my-vm` removes only that target file; it
 does not stop agents. Keep the original target until their removal is confirmed.

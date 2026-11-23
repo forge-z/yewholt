@@ -10,8 +10,9 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { WebSocketServer } from "ws";
 import { CONTROL_KIND, controlEvent } from "../src/control-protocol.js";
-import { generateKeyPair, ownerAuthTag, type NostrEvent } from "../src/nostr.js";
+import { generateKeyPair, ownerAuthTag, signEvent, type NostrEvent } from "../src/nostr.js";
 import { readPairing } from "../src/pairing.js";
+import { RUNTIME_PROFILE_KIND } from "../src/wake.js";
 
 const cli = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 const exec = promisify(execFile);
@@ -244,6 +245,8 @@ test("targets doctor checks the live relay, daemon, pairing and model catalog wi
     const relay = "ws://127.0.0.1:" + addr.port;
     assert.equal(run("install", "--relay", relay, "--relay-pubkey", agent.pubkey).status, 0);
     const owner = run("admin", "keys").stdout.match(/^owner ([a-f0-9]{64})$/m)![1];
+    const wakeUrl = "https://vm.example/wake";
+    let profile = signEvent(agent.secret, RUNTIME_PROFILE_KIND, JSON.stringify({ wake_url: wakeUrl }), []);
     let allow = true;
     let acceptRequest = true;
     server.on("connection", (ws) => {
@@ -257,12 +260,17 @@ test("targets doctor checks the live relay, daemon, pairing and model catalog wi
           ws.send(JSON.stringify(["OK", item.id, allow, hidden + agent.secret]));
         } else if (type === "REQ") {
           if (filter.kinds?.includes(CONTROL_KIND)) subscriptions.set(item, pubkey);
+          if (filter.kinds?.includes(RUNTIME_PROFILE_KIND) && item === "doctor-runtime-profile") {
+            assert.deepEqual(filter.authors, [owner]);
+            ws.send(JSON.stringify(["EVENT", item, profile]));
+          }
           ws.send(JSON.stringify(["EOSE", item]));
           if (item === "deploy-control" && pubkey === owner) server.emit("daemon-ready");
         } else if (type === "EVENT") {
           const event: NostrEvent = item;
           const accepted = event.kind !== CONTROL_KIND || acceptRequest;
           ws.send(JSON.stringify(["OK", event.id, accepted, accepted ? "" : hidden]));
+          if (event.kind === RUNTIME_PROFILE_KIND && event.pubkey === owner) profile = event;
           if (!accepted || event.kind !== CONTROL_KIND) return;
           if (!started && subscriptions.has("deploy-confirmation")) {
             const { requestId, agentPubkey } = JSON.parse(event.content);
@@ -297,7 +305,7 @@ test("targets doctor checks the live relay, daemon, pairing and model catalog wi
     assert.ok(!blocked.stdout.includes(hidden));
     acceptRequest = true;
 
-    const start = async (settings: typeof daemonEnv & { DEEPSEEK_API_KEY?: string }) => {
+    const start = async (settings: typeof daemonEnv & NodeJS.ProcessEnv) => {
       started = true;
       await Promise.all([once(server, "daemon-ready", { signal: AbortSignal.timeout(20_000) }), invoke(["start"], settings)]);
     };
@@ -315,13 +323,17 @@ test("targets doctor checks the live relay, daemon, pairing and model catalog wi
     assert.ok(!empty.stdout.includes(hidden));
     await invoke(["stop"], daemonEnv);
     rmSync(join(piDir, "auth.json"));
-    await start({ ...daemonEnv, DEEPSEEK_API_KEY: hidden });
+    await start({ ...daemonEnv, DEEPSEEK_API_KEY: hidden, YEWHOLT_WAKE_URL: wakeUrl, YEWHOLT_WAKE_PORT: "8787" });
+    assert.equal(profile.pubkey, owner);
+    assert.equal(JSON.parse(profile.content).wake_url, wakeUrl);
     const accepted = await doctor("vm");
     assert.match(accepted.stdout, /reachable, NIP-42 authenticated; connect \+ AUTH latency \d+ ms/);
     assert.match(accepted.stdout, /daemon online, provider paired, models available/);
   } finally {
     if (started) await invoke(["stop"], daemonEnv);
   }
+  const sleeping = await failure("vm");
+  assert.equal(sleeping.stdout, "vm: VM appears to be sleeping; send a message to one of its agents to wake it.\n");
   for (const ws of server.clients) ws.terminate();
   await closeServer();
   const unreachable = await failure("vm");
