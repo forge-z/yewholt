@@ -4,7 +4,7 @@ import { runtimeProfile } from "../src/agents.js";
 import { MEMBER_LIST_KIND } from "../src/membership.js";
 import { generateKeyPair, signEvent } from "../src/nostr.js";
 import type { BotRecord } from "../src/registry.js";
-import { Doze, PRESENCE_KIND, requestWake, RUNTIME_PROFILE_KIND, WakeWatch, wakeSettings } from "../src/wake.js";
+import { ChannelFeed, Doze, PRESENCE_KIND, requestWake, RUNTIME_PROFILE_KIND, WakeWatch, wakeSettings } from "../src/wake.js";
 
 const relay = generateKeyPair();
 const human = generateKeyPair();
@@ -22,7 +22,8 @@ function watcher(now: () => number, local = new Set<string>()) {
   return { watch, poked };
 }
 
-const message = (tags: string[][] = [["h", "room"]], author = human) => signEvent(author.secret, 9, "oi", tags);
+let sent = 0;
+const message = (tags: string[][] = [["h", "room"]], author = human) => signEvent(author.secret, 9, `oi ${sent++}`, tags);
 
 test("wakeSettings reads the wake URL, port and idle minutes", () => {
   assert.deepEqual(wakeSettings({}), { url: undefined, port: undefined, idleMs: 600_000 });
@@ -31,6 +32,9 @@ test("wakeSettings reads the wake URL, port and idle minutes", () => {
   assert.throws(() => wakeSettings({ YEWHOLT_WAKE_URL: "ftp://vm" }));
   assert.throws(() => wakeSettings({ YEWHOLT_WAKE_PORT: "99999" }));
   assert.throws(() => wakeSettings({ YEWHOLT_IDLE_MINUTES: "0" }));
+  assert.deepEqual(wakeSettings({ YEWHOLT_WATCHER_PUBKEY: ` ${agent.pubkey.toUpperCase()} ` }),
+    { url: undefined, port: undefined, idleMs: 600_000, watcher: agent.pubkey });
+  assert.throws(() => wakeSettings({ YEWHOLT_WATCHER_PUBKEY: "abc" }));
 });
 
 test("Doze closes only a wakeable, quiet daemon and reopens on a wake request", async () => {
@@ -174,4 +178,77 @@ test("provider url wake GETs the URL and fails when it never answers", async () 
   assert.deepEqual(seen, [url]);
   const down = (async () => { throw new Error("down"); }) as unknown as typeof fetch;
   await assert.rejects(runWake({ kind: "url", url }, "req", 50, () => "", down), /did not answer/);
+});
+
+test("WakeWatch wakes once for a message seen on two feeds", () => {
+  let now = 1_000_000;
+  const { watch, poked } = watcher(() => now);
+  watch.accept(profile({ wake_url: url, respond_to: "anyone" }));
+  const event = message();
+  watch.accept(event);
+  now += 61_000;
+  watch.accept(event);
+  assert.deepEqual(poked, [url]);
+});
+
+type Sub = { filters: readonly Record<string, unknown>[]; onEvent: (event: ReturnType<typeof signEvent>) => void;
+  onClosed?: (id: string, reason: string) => void; onEose?: () => void };
+
+function fakeClient() {
+  const subs = new Map<string, Sub>();
+  return {
+    subs,
+    subscribe(id: string, filters: readonly Record<string, unknown>[], onEvent: Sub["onEvent"], onClosed?: Sub["onClosed"], onEose?: () => void) {
+      subs.set(id, { filters, onEvent, onClosed, onEose });
+    },
+    unsubscribe(id: string) { subs.delete(id); },
+  };
+}
+
+test("ChannelFeed follows readable channels by #h, as Buzz routes live messages", () => {
+  const client = fakeClient();
+  const seen: string[] = [];
+  let stale = 0;
+  const feed = new ChannelFeed(client, (event) => seen.push(event.id), relay.pubkey, agent.pubkey, () => stale++, () => 2_000_000);
+  feed.refresh();
+  assert.deepEqual(client.subs.get("wake-lists")?.filters, [{ kinds: [MEMBER_LIST_KIND], authors: [relay.pubkey], "#p": [agent.pubkey] }]);
+  const list = (channel: string, author = relay) => signEvent(author.secret, MEMBER_LIST_KIND, "", [["d", channel], ["p", agent.pubkey]]);
+  const dm = list("dm");
+  client.subs.get("wake-lists")!.onEvent(dm);
+  client.subs.get("wake-lists")!.onEvent(list("room"));
+  client.subs.get("wake-lists")!.onEvent(list("forged", human));
+  client.subs.get("wake-lists")!.onEose!();
+  assert.equal(client.subs.has("wake-lists"), false);
+  assert.deepEqual(client.subs.get("wake-messages")?.filters, [{ kinds: [9], "#h": ["dm", "room"], since: 1995 }]);
+  assert.ok(seen.includes(dm.id), "member lists reach the watch");
+
+  const before = client.subs.get("wake-messages");
+  feed.refresh();
+  client.subs.get("wake-lists")!.onEvent(list("room"));
+  client.subs.get("wake-lists")!.onEvent(list("dm"));
+  client.subs.get("wake-lists")!.onEose!();
+  assert.equal(client.subs.get("wake-messages"), before, "same channels keep the subscription");
+
+  feed.refresh();
+  client.subs.get("wake-lists")!.onEose!();
+  assert.equal(client.subs.has("wake-messages"), false);
+  feed.stop();
+  assert.equal(stale, 0);
+});
+
+test("ChannelFeed reports a connection whose list read never ends", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  const client = fakeClient();
+  let stale = 0;
+  const feed = new ChannelFeed(client, () => undefined, relay.pubkey, undefined, () => stale++);
+  feed.start();
+  assert.deepEqual(client.subs.get("wake-lists")?.filters, [{ kinds: [MEMBER_LIST_KIND], authors: [relay.pubkey] }]);
+  t.mock.timers.tick(30_000);
+  assert.equal(stale, 1);
+  client.subs.get("wake-lists")!.onEose!();
+  t.mock.timers.tick(60_000);
+  client.subs.get("wake-lists")!.onEose!();
+  t.mock.timers.tick(30_000);
+  assert.equal(stale, 1);
+  feed.stop();
 });

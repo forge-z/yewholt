@@ -608,12 +608,28 @@ the VM. Any request to the wake port reopens the connections; the relay
 replays what arrived meanwhile from the stored cursor.
 
 Every daemon also watches its relays, while it is connected, for chat
-messages to an agent that announces a wake URL. When the agent has no
+messages to an agent that announces a wake URL. Buzz delivers a channel's
+live messages only to subscriptions naming it in `#h`, so the daemon reads
+the member lists it can see every minute and subscribes to their channels by
+`#h`; a list read with no answer in 30 s reconnects the relay (dead socket). When the agent has no
 `online` presence from the last 150 s, would answer the author
 (`respond_to`), and is hosted elsewhere, the daemon GETs that URL, at most
 once a minute per URL. Messages from agents never wake anyone. Someone has to
 be awake: if every daemon in the community is asleep (Mac closed included),
-nothing wakes the others. Manually stopped InstaBox machines do not resume on
+nothing wakes the others. DMs and private channels are readable only by their members. To wake on
+them, give the VM daemon the always-on daemon's pubkey (the watcher's
+`/handoff/daemon.pubkey` in the Oracle compose):
+
+```text
+YEWHOLT_WATCHER_PUBKEY=<64-hex pubkey of the always-on daemon>
+```
+
+Before it dozes, the VM daemon then sends each agent's key to that pubkey
+only, sealed (kind 1059, ECDH + AES-GCM, the deploy-control envelope). The
+always-on daemon (one without `YEWHOLT_WAKE_*`) opens a read-only connection
+as each agent and follows the agent's channels, DMs included, the same way.
+The agent key then also lives on the watcher's machine; leave the variable
+unset to keep it on the VM. Manually stopped InstaBox machines do not resume on
 traffic; use `--wake instabox` on the provider target for those. The URL
 answers `204` to any request and carries no data. Tested with unit tests and
 mocked HTTP, not against live InstaBox or Freestyle VMs.

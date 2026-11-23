@@ -1,4 +1,5 @@
 import { createServer, type Server } from "node:http";
+import { isPubkey } from "./control-protocol.js";
 import { MEMBER_LIST_KIND } from "./membership.js";
 import type { NostrEvent } from "./nostr.js";
 
@@ -9,6 +10,13 @@ export const PRESENCE_KIND = 20001;
 const PRESENCE_FRESH_MS = 150_000;
 /** At most one wake request per URL in this window. */
 const POKE_INTERVAL_MS = 60_000;
+/** How often a channel feed re-reads its member lists to follow new channels. */
+const FEED_REFRESH_MS = 60_000;
+/** A member-list read with no EOSE by then means the connection is dead. */
+const FEED_STALE_MS = 30_000;
+/** Buzz's cap on channel ids one filter may name. */
+const MAX_FEED_CHANNELS = 2048;
+const SEEN_MESSAGES = 1024;
 
 export type WakeSettings = {
   /** Public URL announced in each agent's runtime profile; a GET to it wakes this VM. */
@@ -17,6 +25,8 @@ export type WakeSettings = {
   port?: number;
   /** Quiet time before a wakeable daemon closes its relay connections. */
   idleMs: number;
+  /** Always-on daemon that gets this daemon's agent keys before it dozes, to read their DMs. */
+  watcher?: string;
 };
 
 export function wakeSettings(env: NodeJS.ProcessEnv = process.env): WakeSettings {
@@ -30,7 +40,9 @@ export function wakeSettings(env: NodeJS.ProcessEnv = process.env): WakeSettings
   const rawIdle = env.YEWHOLT_IDLE_MINUTES?.trim();
   const minutes = rawIdle ? Number(rawIdle) : 10;
   if (!Number.isFinite(minutes) || minutes <= 0) throw new Error("YEWHOLT_IDLE_MINUTES must be a positive number");
-  return { url, port, idleMs: minutes * 60_000 };
+  const watcher = env.YEWHOLT_WATCHER_PUBKEY?.trim().toLowerCase() || undefined;
+  if (watcher && !isPubkey(watcher)) throw new Error("YEWHOLT_WATCHER_PUBKEY must be a 64-character hex pubkey");
+  return { url, port, idleMs: minutes * 60_000, ...(watcher && { watcher }) };
 }
 
 export function httpUrl(value: unknown): value is string {
@@ -124,6 +136,8 @@ export class WakeWatch {
   private readonly presence = new Map<string, { online: boolean; at: number }>();
   private readonly members = new Map<string, { at: number; id: string; pubkeys: Set<string> }>();
   private readonly poked = new Map<string, number>();
+  /** The same message can arrive on the watcher's feed and on an agent's. */
+  private readonly seen = new Set<string>();
 
   constructor(
     private readonly relayPubkey: string,
@@ -132,11 +146,11 @@ export class WakeWatch {
     private readonly now: () => number = Date.now,
   ) {}
 
+  /** Profiles and presence. Channel messages come from a `ChannelFeed`: Buzz routes them live only by `#h`. */
   filters(since: number): Record<string, unknown>[] {
     return [
       { kinds: [RUNTIME_PROFILE_KIND] },
-      { kinds: [MEMBER_LIST_KIND], authors: [this.relayPubkey] },
-      { kinds: [PRESENCE_KIND, 9], since },
+      { kinds: [PRESENCE_KIND], since },
     ];
   }
 
@@ -182,7 +196,9 @@ export class WakeWatch {
   }
 
   private onMessage(event: NostrEvent): void {
-    if (this.profiled.has(event.pubkey)) return;
+    if (this.profiled.has(event.pubkey) || this.seen.has(event.id)) return;
+    this.seen.add(event.id);
+    if (this.seen.size > SEEN_MESSAGES) this.seen.delete(this.seen.values().next().value as string);
     const local = this.local();
     if (local.has(event.pubkey)) return;
     const channel = event.tags.find((tag) => tag[0] === "h" && tag[1])?.[1];
@@ -220,6 +236,87 @@ function answers(agent: Agent, author: string): boolean {
  * the request or answer 503 with Retry-After while resuming. Any other answer,
  * even an error page, means the VM is running.
  */
+type FeedClient = {
+  subscribe(id: string, filters: readonly Record<string, unknown>[], onEvent: (event: NostrEvent) => void,
+    onClosed?: (id: string, reason: string) => void, onEose?: () => void): void;
+  unsubscribe(id: string): void;
+};
+
+/**
+ * Live chat messages for a `WakeWatch`. Buzz delivers a channel's live events
+ * only to filters naming it in `#h`, so the feed reads the member lists this
+ * connection can see (all readable channels, or `member`'s own, DMs included)
+ * and subscribes to kind 9 by `#h`, re-reading every minute to follow new
+ * channels. A read that never ends means a dead socket: `onStale` fires.
+ */
+export class ChannelFeed {
+  private channels: string | undefined;
+  private timer: ReturnType<typeof setInterval> | undefined;
+  private pending: ReturnType<typeof setTimeout> | undefined;
+  private stopped = false;
+
+  constructor(
+    private readonly client: FeedClient,
+    private readonly accept: (event: NostrEvent) => void,
+    private readonly relayPubkey: string,
+    private readonly member: string | undefined,
+    private readonly onStale: () => void,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  start(): void {
+    this.refresh();
+    this.timer = setInterval(() => this.refresh(), FEED_REFRESH_MS);
+    this.timer.unref?.();
+  }
+
+  refresh(): void {
+    if (this.stopped || this.pending) return;
+    const ids = new Set<string>();
+    this.pending = setTimeout(() => {
+      this.pending = undefined;
+      if (!this.stopped) this.onStale();
+    }, FEED_STALE_MS);
+    this.pending.unref?.();
+    const done = () => {
+      clearTimeout(this.pending);
+      this.pending = undefined;
+    };
+    const filter = { kinds: [MEMBER_LIST_KIND], authors: [this.relayPubkey], ...(this.member && { "#p": [this.member] }) };
+    this.client.subscribe("wake-lists", [filter], (event) => {
+      this.accept(event);
+      const channel = event.tags.find((tag) => tag[0] === "d" && tag[1])?.[1];
+      if (event.pubkey === this.relayPubkey && channel) ids.add(channel);
+    }, done, () => {
+      done();
+      this.client.unsubscribe("wake-lists");
+      if (!this.stopped) this.follow([...ids].sort().slice(0, MAX_FEED_CHANNELS));
+    });
+  }
+
+  stop(): void {
+    this.stopped = true;
+    clearInterval(this.timer);
+    clearTimeout(this.pending);
+    this.pending = undefined;
+  }
+
+  private follow(channels: string[]): void {
+    const key = channels.join(",");
+    if (key === this.channels) return;
+    this.channels = key;
+    if (channels.length === 0) {
+      this.client.unsubscribe("wake-messages");
+      return;
+    }
+    // A little overlap so nothing falls between two subscriptions; WakeWatch drops repeats.
+    const since = Math.floor(this.now() / 1000) - 5;
+    this.client.subscribe("wake-messages", [{ kinds: [9], "#h": channels, since }], this.accept, () => {
+      this.channels = undefined;
+    });
+  }
+}
+
 export async function requestWake(url: string, fetchApi: typeof fetch = fetch, timeoutMs = 120_000,
   delay: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms))): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
