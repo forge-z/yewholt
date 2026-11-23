@@ -12,8 +12,8 @@ import { gzipSync } from "node:zlib";
 import { loadTarget } from "../provider/target.js";
 import { saveConfig, loadConfig } from "../src/config.js";
 import { writeKey } from "../src/keys.js";
-import { generateKeyPair, signEvent, verifyEvent, type NostrEvent } from "../src/nostr.js";
-import { ownerKeyPath } from "../src/paths.js";
+import { generateKeyPair, pubkeyOf, signEvent, verifyEvent, type NostrEvent } from "../src/nostr.js";
+import { envFilePath, ownerKeyPath } from "../src/paths.js";
 
 const cli = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 const origin = "https://buzz.example";
@@ -138,13 +138,31 @@ test("unified join prompts once, admits both Mac identities, and registers the l
     ["Paste Buzz invite URL", invite], ["Accept the policy?", "yes"], ["minimum age?", "yes"],
   ]);
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /This invite needs 2 uses/);
+  assert.match(result.stdout, /up to 2 invite uses/);
   assert.match(result.stdout, /Mac provider: joined/);
   assert.match(result.stdout, /My Mac daemon: joined/);
   assert.deepEqual(calls.map(({ path }) => path), [policyPath, acceptPath, claimPath, claimPath]);
   verifyClaim(calls[3], owner.pubkey, "policy-receipt");
   assert.equal(loadTarget("mac", join(home, "xdg", "yewholt")).daemonPubkey, owner.pubkey);
   assert.ok(!result.stdout.includes(code));
+});
+
+test("yh join --local creates and admits a daemon in an uninitialized home", async (t) => {
+  const { home, calls, responses, run } = await fixture(t);
+  const daemonHome = join(home, "new daemon");
+  responses.set("/", { status: 200, type: "application/nostr+json", body: JSON.stringify({ self: relayKey }) });
+  const result = await run(["join", "--local", "--accept-policy", "--confirm-age"], invite + "\n", [],
+    { YEWHOLT_HOME: daemonHome });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.deepEqual(calls.map(({ path }) => path), [policyPath, acceptPath, "/", claimPath, claimPath]);
+  assert.equal(loadConfig(daemonHome).relayUrl, relay);
+  assert.equal(loadConfig(daemonHome).externalRelayPubkey, relayKey);
+  const secret = readFileSync(ownerKeyPath(daemonHome), "utf8").trim();
+  const daemon = pubkeyOf(secret);
+  verifyClaim(calls[4], daemon, "policy-receipt");
+  assert.equal(loadTarget("mac", join(home, "xdg", "yewholt")).daemonPubkey, daemon);
+  assert.ok(readFileSync(envFilePath(daemonHome), "utf8").includes("Yewholt provider keys"));
+  assert.ok(!(result.stdout + result.stderr).includes(secret));
 });
 
 test("unified join continues after exhausted uses and exits nonzero with per-machine reasons", async (t) => {

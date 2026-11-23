@@ -1,22 +1,21 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { chmodSync, mkdirSync, openSync, readFileSync } from "node:fs";
+import { openSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { AgentStatus } from "./agents.js";
-import { configuredRelays, loadConfig, readConfig, saveConfig } from "./config.js";
+import { configuredRelays, loadConfig, saveConfig } from "./config.js";
 import { isPubkey } from "./control-protocol.js";
-import { ensureEnvFile, loadEnvFile } from "./env-file.js";
+import { loadEnvFile } from "./env-file.js";
 import { readPid, runDaemon } from "./daemon.js";
-import { ensureOwnerKey } from "./session.js";
 import { pubkeyOf } from "./nostr.js";
 import { addPairing, listPairings, removePairing } from "./pairing.js";
 import { readKey } from "./keys.js";
-import { logPath, ownerKeyPath, pidPath, secretsDir, sqlitePath, statusPath, yewholtHome } from "./paths.js";
+import { logPath, ownerKeyPath, pidPath, sqlitePath, statusPath, yewholtHome } from "./paths.js";
 import { joinRelay } from "./relay-join.js";
-import { configureJoinedRelay } from "./daemon-join.js";
+import { configureJoinedRelay, initializeDaemon } from "./daemon-join.js";
 import { normalizeRelay, sameRelay } from "./relay-url.js";
 import { Yewholt } from "./session.js";
 import { runHarness } from "./harness.js";
@@ -166,27 +165,12 @@ async function install(rest: string[]): Promise<void> {
   const usage = "Usage: yh install --relay <url> --relay-pubkey <64 lowercase hex> [--home dir]";
   const home = yewholtHome(values.home);
   const relay = values.relay === undefined ? undefined : normalizeRelay(values.relay);
-  if (!relay) throw new Error(usage);
-  let existing;
-  try {
-    existing = readConfig(home);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
   const relayPubkey = values["relay-pubkey"];
-  if (!isPubkey(relayPubkey)) throw new Error(usage);
-  if (existing && (existing.relayUrl !== relay || existing.externalRelayPubkey !== relayPubkey)) {
-    throw new Error("This home already has a primary relay; use yh relay add to configure additional relays");
-  }
-  mkdirSync(home, { recursive: true, mode: 0o700 });
-  chmodSync(home, 0o700);
-  mkdirSync(secretsDir(home), { recursive: true, mode: 0o700 });
-  const daemonPubkey = ensureOwnerKey(home);
-  if (!existing) saveConfig(home, { relayUrl: relay, externalRelayPubkey: relayPubkey });
+  if (!relay || !isPubkey(relayPubkey)) throw new Error(usage);
+  const { pubkey: daemonPubkey, envFile } = initializeDaemon(home, { relayUrl: relay, externalRelayPubkey: relayPubkey });
   console.log(`Installed Yewholt in ${home}`);
   console.log(`Daemon pubkey: ${daemonPubkey}`);
   console.log(`Relay: ${relay}. Admit the daemon pubkey to this relay.`);
-  const envFile = ensureEnvFile(home);
   console.log("Back up secrets/. Buzz has no key rotation; a lost secret is a lost identity.");
   console.log(`Provider keys: /login in yh as the daemon user, or ${envFile} (mode 0600). Restart after changes.`);
   console.log("Next: yewholt start");
