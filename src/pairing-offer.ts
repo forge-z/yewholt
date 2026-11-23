@@ -68,7 +68,7 @@ export function daemonProfileEvent(secret: string, daemon: string, name?: string
   current?: NostrEvent): NostrEvent | undefined {
   const tags = offer ? [[OFFER_TAG, offerTag(offer.key, daemon), name ?? offer.label], ...(offer.owner ? [[OWNER_TAG, offer.owner]] : [])] : [];
   return serviceProfileEvent(secret, serviceProfileName("daemon"), current,
-    { name, tags, managedTags: [OFFER_TAG, OWNER_TAG], createdAt });
+    { name, legacyDaemonName: machineLabel(), tags, managedTags: [OFFER_TAG, OWNER_TAG], createdAt });
 }
 
 /**
