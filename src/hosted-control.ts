@@ -23,6 +23,7 @@ export type HostedEffects = {
   models?: () => string[];
   piLoginMissing?: () => Promise<boolean | undefined>;
   hasModel?: (choice: AgentProvisioning["model"]) => boolean;
+  paired?: () => Promise<void>;
 };
 
 const statePath = (home: string, pubkey: string) => join(home, "state", "hosted-agents", pubkey + ".json");

@@ -18,7 +18,9 @@ without permission. Manage the existing relay separately from Yewholt.
    manager or ask before installing one. In a checkout kept at a stable path,
    run `npm ci`, `npm run build`, and `npm link`. Verify `yh help` and
    `yh code --version`. If the npm prefix or PATH is wrong, fix it with the
-   user's Node manager; don't use sudo for npm.
+   user's Node manager; don't use sudo for npm. If the global prefix isn't
+   writable, run `npm_config_prefix="$HOME/.local" npm link` and make sure
+   `$HOME/.local/bin` is on the login PATH.
 2. For Buzz, run `yh provider install`. In Buzz desktop, open
    **Settings → Plugins → Manage plugins → Add → Browse**, select the printed
    plugin folder, and let the user approve `yewholt-buzz-bridge`. If already
@@ -82,6 +84,17 @@ instead, follow the [manual Mac-local target steps](../../README.md#mac-local-da
 Keep the Mac awake. Connect directly to the public WSS endpoint; don't copy a
 VM's `YEWHOLT_LOCAL_PORT` setting to the Mac.
 
+## Join from inside a VM
+
+If you run on the VM itself (for example through a remote executor) or the Mac
+can't reach the VM over SSH, ask the user for a Buzz community invite, never a
+relay URL or public key. Install the CLI as above, then have the user paste the
+invite into `yh join --daemon` on the VM. After it prints the next step, have
+the user run `yh join` on the Mac with the same invite within 24 hours, while
+the VM is awake. The Mac pairs with the VM over Buzz and adds its target; there
+is no key to copy and no `yh pair add`. Run `yh` and `/login` on the VM for its
+models.
+
 ## Each approved VM: daemon only
 
 1. Resolve the approved alias with `ssh -G <alias>`; its `identityfile` entries
@@ -98,7 +111,8 @@ VM's `YEWHOLT_LOCAL_PORT` setting to the Mac.
    `npm link`. If the VM can't read the repository, transfer a source archive
    of that revision over the approved SSH connection; do not copy credentials
    or forward the SSH agent. Use user-owned Node/npm paths.
-3. For an invite, use `yh join --ssh <alias>` from the Mac. For direct admission,
+3. For an invite, use `yh join --ssh <alias>` from the Mac, or
+   [join from inside the VM](#join-from-inside-a-vm). For direct admission,
    initialize the daemon manually and have the relay administrator admit the daemon and Mac provider
    pubkeys printed by their installers. Neither is the relay signing key.
    On the VM, authorize this Mac:

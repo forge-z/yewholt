@@ -1,18 +1,22 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { userInfo } from "node:os";
+import { randomUUID } from "node:crypto";
+import { hostname, userInfo } from "node:os";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { configuredRelays, loadConfig } from "../src/config.js";
-import { isPubkey } from "../src/control-protocol.js";
+import { controlEvent, isPubkey } from "../src/control-protocol.js";
 import { writePrivateJson } from "../src/control-files.js";
 import { readPid } from "../src/daemon.js";
 import { configureJoinedRelay, initializeDaemon } from "../src/daemon-join.js";
 import { readKey } from "../src/keys.js";
-import { pubkeyOf } from "../src/nostr.js";
 import { addPairing } from "../src/pairing.js";
 import { configPath, ownerKeyPath, yewholtHome } from "../src/paths.js";
 import { discoverRelayPubkey, readRelayMembers } from "../src/relay-discovery.js";
+import { RelayClient } from "../src/nostr-client.js";
+import { pubkeyOf, verifyEvent, type NostrEvent } from "../src/nostr.js";
+import { OFFER_TAG, offerKey, offerTag, pairingProof, writePairingOffer } from "../src/pairing-offer.js";
+import { waitForConfirmation } from "./relay.js";
 import { claimInvite, consentToPolicy, inviteRelayPubkey, withInviteInput, type Invite, type JoinOptions } from "../src/relay-join.js";
 import { normalizeRelay, sameRelay } from "../src/relay-url.js";
 import { targetIds } from "./install.js";
@@ -111,7 +115,66 @@ type Dependencies = {
   running: typeof readPid; log: (line: string) => void;
   members: (relay: string, secret: string) => Promise<ReadonlySet<string>>;
   checkModels: typeof checkTargetModels;
+  offers: (relay: string, secret: string, key: string, members: () => Promise<ReadonlySet<string>>) => Promise<PairingOfferFound[]>;
+  pair: (relay: string, daemon: string, secret: string, event: NostrEvent, requestId: string) =>
+    Promise<{ result: "confirmed" | "refused" | "timeout"; error?: string }>;
 };
+
+export type PairingOfferFound = { daemon: string; label: string };
+
+/** Newest kind 0 profile per member that carries a pairing tag only a holder of the invite could compute. */
+export function matchingOffers(events: Iterable<NostrEvent>, members: ReadonlySet<string>, key: string): PairingOfferFound[] {
+  const newest = new Map<string, NostrEvent>();
+  for (const event of events) {
+    try {
+      if (event.kind !== 0 || !members.has(event.pubkey) || !verifyEvent(event)) continue;
+    } catch {
+      continue;
+    }
+    const old = newest.get(event.pubkey);
+    if (!old || event.created_at > old.created_at) newest.set(event.pubkey, event);
+  }
+  return [...newest.values()].flatMap((event) => {
+    if (!event.tags.some((tag) => tag[0] === OFFER_TAG && tag[1] === offerTag(key, event.pubkey))) return [];
+    let label = "";
+    try {
+      const profile: unknown = JSON.parse(event.content);
+      const name = profile && typeof profile === "object" ? (profile as Record<string, unknown>).name : undefined;
+      if (typeof name === "string") label = name.replace(/[\p{Cc}\p{Cf}]/gu, "").trim().slice(0, 120);
+    } catch { /* Unnamed daemons get a generic label. */ }
+    return [{ daemon: event.pubkey, label: label || "Yewholt VM" }];
+  });
+}
+
+async function readOffers(relay: string, secret: string, key: string,
+  roster: () => Promise<ReadonlySet<string>>): Promise<PairingOfferFound[]> {
+  const members = await roster();
+  const authors = [...members].filter((member) => member !== pubkeyOf(secret));
+  if (!authors.length) return [];
+  const client = new RelayClient(relay, secret, undefined, false);
+  const events: NostrEvent[] = [];
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await client.connect(15_000);
+    await new Promise<void>((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`Pairing offer lookup timed out for ${relay}`)), 15_000);
+      client.subscribe("join-offers", [{ kinds: [0], authors }], (event) => { events.push(event); },
+        (_id, reason) => reject(new Error(`Pairing offer lookup rejected: ${reason}`)), () => resolve());
+    });
+  } finally {
+    clearTimeout(timer);
+    client.unsubscribe("join-offers");
+    await client.close();
+  }
+  return matchingOffers(events, members, key);
+}
+
+async function requestPairing(relay: string, daemon: string, secret: string, event: NostrEvent, requestId: string) {
+  let error: string | undefined;
+  const result = await waitForConfirmation({ label: "pairing", transport: "relay", relay, daemonPubkey: daemon },
+    secret, event, requestId, daemon, 60_000, (body) => { if (typeof body.error === "string") error = body.error; });
+  return { result, error };
+}
 
 type MachineOptions = JoinOptions & { local?: boolean };
 
@@ -172,7 +235,8 @@ export async function joinMachines(invite: Invite, hosts: string[], options: Mac
     daemonHome: yewholtHome(), targetsHome: providerHome(), identity: () => new ProviderSecrets().identity(),
     runner: runCommand, consent: consentToPolicy, claim: claimInvite, configure: configureJoinedRelay, relayKey: inviteRelayPubkey,
     members: async (relay, secret) => readRelayMembers(relay, secret, await discoverRelayPubkey(relay, secret)),
-    running: readPid, log: console.log, checkModels: checkTargetModels, ...overrides,
+    running: readPid, log: console.log, checkModels: checkTargetModels, offers: readOffers, pair: requestPairing,
+    ...overrides,
   };
   const targets = targetIds(deps.targetsHome).map((id) => ({ id, target: loadTarget(id, deps.targetsHome) }));
   const selectedHosts = new Set(hosts);
@@ -285,13 +349,38 @@ export async function joinMachines(invite: Invite, hosts: string[], options: Mac
     handled.add(daemon);
     return status;
   });
+  let roster: Promise<ReadonlySet<string>> | undefined;
+  const members = () => roster ??= deps.members(invite.relayUrl, secret);
+  if (summary[0].status !== "failed") {
+    const key = offerKey(invite.code, invite.relayUrl);
+    let offers: PairingOfferFound[] = [];
+    try {
+      offers = (await deps.offers(invite.relayUrl, secret, key, members)).filter(({ daemon }) => !handled.has(daemon));
+    } catch (error) {
+      deps.log(`Could not look for VMs waiting to pair: ${reasonOf(error)}`);
+    }
+    for (const { daemon, label } of offers) await attempt(label, async () => {
+      const requestId = randomUUID();
+      const event = controlEvent(secret, daemon, "pair", { requestId, agentPubkey: daemon },
+        { proof: pairingProof(key, provider, daemon, requestId), label: hostname().slice(0, 120) || "My Mac" });
+      const { result, error } = await deps.pair(invite.relayUrl, daemon, secret, event, requestId);
+      if (result === "refused") throw new Error(`Pairing refused${error ? ": " + error : ""}`);
+      if (result === "timeout") throw new Error("The VM did not answer; start its daemon with yh start and run yh join again");
+      const existing = targets.find(({ target }) => target.daemonPubkey === daemon);
+      const target = updateJoinTarget(deps.targetsHome, targets, daemon, [invite.relayUrl], hostId(label), existing?.target.label ?? label,
+        undefined, onUpdated);
+      modelChecks.push({ machine: label, target });
+      handled.add(daemon);
+      return "joined";
+    });
+  }
   const pending = targets.filter(({ target }) => !handled.has(target.daemonPubkey) &&
     !targetRelays(target).some((relay) => sameRelay(relay, invite.relayUrl)));
   if (pending.length && summary[0].status !== "failed") {
     try {
-      const members = await deps.members(invite.relayUrl, secret);
+      const roster = await members();
       for (const { id, target } of pending) {
-        if (members.has(target.daemonPubkey)) {
+        if (roster.has(target.daemonPubkey)) {
           updateJoinTarget(deps.targetsHome, targets, target.daemonPubkey, [invite.relayUrl], id, target.label, undefined, onUpdated);
         }
       }
@@ -310,18 +399,52 @@ export function joinExitCode(summary: JoinSummary[]): 0 | 1 {
   return summary.some(({ status }) => status === "failed") ? 1 : 0;
 }
 
+/** Joins this machine's daemon from the machine itself and leaves an invite-bound pairing offer for the provider. */
+export async function joinDaemon(invite: Invite, options: JoinOptions, ask: (question: string) => Promise<string>,
+  overrides: Partial<Dependencies> = {}): Promise<JoinSummary[]> {
+  const deps: Dependencies = {
+    daemonHome: yewholtHome(), targetsHome: providerHome(), identity: () => new ProviderSecrets().identity(),
+    runner: runCommand, consent: consentToPolicy, claim: claimInvite, configure: configureJoinedRelay, relayKey: inviteRelayPubkey,
+    members: async () => new Set(), running: readPid, log: console.log, checkModels: checkTargetModels,
+    offers: readOffers, pair: requestPairing, ...overrides,
+  };
+  const machine = "This daemon";
+  try {
+    if (!existsSync(configPath(deps.daemonHome))) {
+      initializeDaemon(deps.daemonHome, { relayUrl: invite.relayUrl, externalRelayPubkey: await deps.relayKey(invite) });
+    }
+    loadConfig(deps.daemonHome);
+    const owner = readKey(ownerKeyPath(deps.daemonHome));
+    const consent = await deps.consent(invite, options, ask);
+    const status = await deps.claim(invite, consent, owner);
+    await deps.configure(deps.daemonHome, invite.relayUrl, owner);
+    writePairingOffer(deps.daemonHome, invite.code, invite.relayUrl);
+    const cli = fileURLToPath(new URL("../src/cli.js", import.meta.url));
+    await activateDaemon(true, true, () => Boolean(deps.running(deps.daemonHome)),
+      (command) => deps.runner(process.execPath, [cli, command, "--home", deps.daemonHome]));
+    deps.log("Next, on the Mac: run yh join and paste the same invite within 24 hours. The Mac pairs with this daemon over Buzz.");
+    deps.log("Models: run yh here and enter /login, then restart the daemon (yh stop && yh start).");
+    return [{ machine, status }];
+  } catch (error) {
+    return [{ machine, status: "failed", reason: error instanceof Error ? error.message : "Join failed" }];
+  }
+}
+
 export async function joinCommunity(args: string[]): Promise<void> {
-  const usage = "Usage: yh join [<invite-url>] [--local] [--ssh <host> ...] [--accept-policy] [--confirm-age]";
+  const usage = "Usage: yh join [<invite-url>] [--daemon | --local] [--ssh <host> ...] [--accept-policy] [--confirm-age]";
   let parsed;
   try {
     parsed = parseArgs({ args, allowPositionals: true, options: {
-      local: { type: "boolean" }, ssh: { type: "string", multiple: true },
+      daemon: { type: "boolean" }, local: { type: "boolean" }, ssh: { type: "string", multiple: true },
       "accept-policy": { type: "boolean" }, "confirm-age": { type: "boolean" },
     } });
   } catch { throw new Error(usage); }
   if (parsed.positionals.length > 1) throw new Error(usage);
+  if (parsed.values.daemon && (parsed.values.local || parsed.values.ssh?.length)) throw new Error(usage);
   await withInviteInput(parsed.positionals[0], async (invite, ask) => {
-    const summary = await joinMachines(invite, parsed.values.ssh ?? [], {
+    const summary = parsed.values.daemon ? await joinDaemon(invite, {
+      acceptPolicy: parsed.values["accept-policy"], confirmAge: parsed.values["confirm-age"],
+    }, ask) : await joinMachines(invite, parsed.values.ssh ?? [], {
       local: parsed.values.local, acceptPolicy: parsed.values["accept-policy"], confirmAge: parsed.values["confirm-age"],
     }, ask);
     process.exitCode = joinExitCode(summary);
