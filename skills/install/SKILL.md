@@ -45,12 +45,13 @@ review and accept any community policy themselves. Allow one invite use per
 new identity: the Mac provider plus each daemon, including the Mac daemon
 if selected or already installed. No manual key copy, pairing, or target creation is needed.
 
-`yh join` can stop and start a running daemon. If a daemon is managed by a
-service supervisor, coordinate with its operator before joining; use the manual
-admission and pairing steps below if it must be restarted by that supervisor.
-New and stopped daemons stay stopped. If `join` cannot discover the relay key
-or no invite is available, use [manual daemon initialization](#manual-daemon-initialization-fallback)
-and the direct admission and pairing steps below.
+`yh join` starts an explicitly selected daemon after admission and pairing.
+It can also restart a running daemon after admission or a relay change.
+Existing daemons included implicitly are not started when stopped. Use manual
+admission and pairing if a service supervisor manages the daemon's lifecycle.
+If `join` cannot discover the relay key or no invite is available, use
+[manual daemon initialization](#manual-daemon-initialization-fallback) and the
+direct admission and pairing steps below.
 
 ## Optional Mac-local daemon (no Docker)
 
@@ -68,7 +69,7 @@ groups; any other group besides `yewholt-ws` is rejected. Linux is unchanged.
 Keep code-bot executables outside the protected daemon HOME (Homebrew paths,
 not a private Node version-manager directory). Validate setup on the intended
 macOS version before claiming that native isolation works.
-Open a new login session for group membership before starting the daemon.
+Open a new login session for group membership before starting or restarting the daemon.
 `yh join` creates the local target as `mac`. If using direct admission
 instead, follow the [manual Mac-local target steps](../../README.md#mac-local-daemon-target-no-docker).
 Keep the Mac awake. Connect directly to the public WSS endpoint; don't copy a
@@ -118,8 +119,8 @@ VM's `YEWHOLT_LOCAL_PORT` setting to the Mac.
    Unix user, HOME and Pi agent directory; don't read or copy credentials.
    See [Provider keys on the host](../../README.md#provider-keys-on-the-host).
    Set `YEWHOLT_MODEL` only if using **Daemon default**.
-2. Run `yh start` and `yh status`, or use the existing approved supervisor
-   to run `yh daemon` in the foreground. `yh start` is not boot supervision.
+2. Run `yh status`. If the daemon is stopped, use `yh start` or the existing
+   approved supervisor. `yh start` is not boot supervision.
    If credentials changed while the daemon was running, restart the daemon
    through its existing launcher. Never restart the relay as part of setup.
 3. On the Mac, list targets with `yh targets list` and use `yh targets doctor`

@@ -147,22 +147,29 @@ test("unified join prompts once, admits both Mac identities, and registers the l
   assert.ok(!result.stdout.includes(code));
 });
 
-test("yh join --local creates and admits a daemon in an uninitialized home", async (t) => {
+test("yh join --local creates, admits and starts a daemon in an uninitialized home", async (t) => {
   const { home, calls, responses, run } = await fixture(t);
   const daemonHome = join(home, "new daemon");
   responses.set("/", { status: 200, type: "application/nostr+json", body: JSON.stringify({ self: relayKey }) });
-  const result = await run(["join", "--local", "--accept-policy", "--confirm-age"], invite + "\n", [],
-    { YEWHOLT_HOME: daemonHome });
-  assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.deepEqual(calls.map(({ path }) => path), [policyPath, acceptPath, "/", claimPath, claimPath]);
-  assert.equal(loadConfig(daemonHome).relayUrl, relay);
-  assert.equal(loadConfig(daemonHome).externalRelayPubkey, relayKey);
-  const secret = readFileSync(ownerKeyPath(daemonHome), "utf8").trim();
-  const daemon = pubkeyOf(secret);
-  verifyClaim(calls[4], daemon, "policy-receipt");
-  assert.equal(loadTarget("mac", join(home, "xdg", "yewholt")).daemonPubkey, daemon);
-  assert.ok(readFileSync(envFilePath(daemonHome), "utf8").includes("Yewholt provider keys"));
-  assert.ok(!(result.stdout + result.stderr).includes(secret));
+  try {
+    const result = await run(["join", "--local", "--accept-policy", "--confirm-age"], invite + "\n", [],
+      { YEWHOLT_HOME: daemonHome });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.deepEqual(calls.map(({ path }) => path), [policyPath, acceptPath, "/", claimPath, claimPath]);
+    assert.equal(loadConfig(daemonHome).relayUrl, relay);
+    assert.equal(loadConfig(daemonHome).externalRelayPubkey, relayKey);
+    const secret = readFileSync(ownerKeyPath(daemonHome), "utf8").trim();
+    const daemon = pubkeyOf(secret);
+    verifyClaim(calls[4], daemon, "policy-receipt");
+    assert.equal(loadTarget("mac", join(home, "xdg", "yewholt")).daemonPubkey, daemon);
+    assert.ok(readFileSync(envFilePath(daemonHome), "utf8").includes("Yewholt provider keys"));
+    assert.ok(!(result.stdout + result.stderr).includes(secret));
+    const status = await run(["status", "--home", daemonHome]);
+    assert.equal(status.status, 0, status.stderr);
+    assert.match(status.stdout, /^daemon: running \(\d+\)$/m);
+  } finally {
+    await run(["stop", "--home", daemonHome]);
+  }
 });
 
 test("unified join continues after exhausted uses and exits nonzero with per-machine reasons", async (t) => {

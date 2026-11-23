@@ -120,15 +120,16 @@ test("NIP-11 reads the relay signing key, not the operator key, without sending 
   }
 });
 
-test("join prepares fresh local and SSH daemons before claiming and reuses their identities on retry", async (t) => {
+test("join prepares both daemons before claiming, starts them after pairing, and does not restart on retry", async (t) => {
   const homes = fixture(t);
   const log: string[] = [], claims: string[] = [];
   const config = { relayUrl: invite.relayUrl, externalRelayPubkey: relay.pubkey };
   const remoteHome = join(homes.daemonHome, "..", "vm");
   let lookups = 0, remoteInstalls = 0, claimStatus: "joined" | "already_member" = "joined";
+  let localStarted = false, remoteStarted = false, remotePaired = false;
   const joinBoth = () => joinMachines(invite, ["vm"], { local: true }, async () => "yes", {
     ...homes, identity: () => provider.secret, consent: async () => consent,
-    log: (line) => log.push(line), running: () => null,
+    log: (line) => log.push(line), running: () => localStarted ? 42 : null,
     relayKey: async () => { lookups++; return relay.pubkey; },
     claim: async (_invite, _consent, secret) => {
       for (const home of [homes.daemonHome, remoteHome]) {
@@ -141,6 +142,14 @@ test("join prepares fresh local and SSH daemons before claiming and reuses their
     },
     configure: (home, url, secret) => configureJoinedRelay(home, url, secret, undefined, async () => relay.pubkey),
     runner: async (file, args, stdin) => {
+      if (file === process.execPath) {
+        assert.equal(args[1], "start");
+        assert.equal(localStarted, false);
+        assert.equal(claims.length, 2);
+        assert.ok(readPairing(homes.daemonHome, provider.pubkey));
+        localStarted = true;
+        return "";
+      }
       assert.equal(file, "ssh");
       const command = args.at(-1)!;
       assert.ok(!command.includes(invite.code));
@@ -163,12 +172,22 @@ test("join prepares fresh local and SSH daemons before claiming and reuses their
         assert.equal(stdin, `${invite.origin}/invite/${invite.code}\n`);
         return claimStatus === "joined" ? "Joined" : "Already a member of";
       }
-      if (command.includes("pair")) return "";
-      if (command.includes("status")) return "daemon: stopped";
+      if (command.includes("pair")) {
+        remotePaired = true;
+        return "";
+      }
+      if (command.includes("status")) return remoteStarted ? "daemon: running (43)" : "daemon: stopped";
+      if (command.includes("start")) {
+        assert.equal(remoteStarted, false);
+        assert.equal(remotePaired, true);
+        remoteStarted = true;
+        return "";
+      }
       throw new Error("Unexpected command");
     },
   });
   assert.deepEqual((await joinBoth()).map(({ status }) => status), ["joined", "joined", "joined"]);
+  assert.ok(localStarted && remoteStarted);
   const localKey = pubkeyOf(readKey(ownerKeyPath(homes.daemonHome)));
   const remoteKey = pubkeyOf(readKey(ownerKeyPath(remoteHome)));
   assert.deepEqual(claims, [provider.pubkey, localKey]);
@@ -408,7 +427,7 @@ test("existing local relays do not restart a running daemon and already-member i
   assert.equal(loadTarget("mac", homes.targetsHome).relay, invite.relayUrl);
 });
 
-test("local and SSH restarts require a running daemon and either new admission or an added relay", async (t) => {
+test("implicitly included daemons only restart if running with new admission or an added relay", async (t) => {
   for (const status of ["joined", "already_member"] as const) {
     for (const added of [false, true]) {
       for (const running of [false, true]) {
@@ -416,8 +435,9 @@ test("local and SSH restarts require a running daemon and either new admission o
           const homes = fixture(t);
           install(homes.daemonHome);
           if (!added) saveConfig(homes.daemonHome, { relayUrl: invite.relayUrl, externalRelayPubkey: relay.pubkey });
+          updateJoinTarget(homes.targetsHome, [], remoteOwner.pubkey, [primary], "vm", "VM", "vm");
           const localCommands: string[] = [], remoteCommands: string[] = [];
-          const summary = await joinMachines(invite, ["vm"], {}, async () => "yes", {
+          const summary = await joinMachines(invite, [], {}, async () => "yes", {
             ...homes, identity: () => provider.secret, log: () => {}, consent: async () => consent,
             claim: async () => status, running: () => running ? 42 : null,
             configure: (home, url, secret) => configureJoinedRelay(home, url, secret, undefined, async () => relay.pubkey),
@@ -447,11 +467,11 @@ test("local and SSH restarts require a running daemon and either new admission o
   }
 });
 
-test("failed local and SSH claims do not restart daemons", async (t) => {
+test("failed local and SSH claims do not start or restart daemons", async (t) => {
   const homes = fixture(t);
   install(homes.daemonHome);
   const commands: string[] = [];
-  const summary = await joinMachines(invite, ["vm"], {}, async () => "yes", {
+  const summary = await joinMachines(invite, ["vm"], { local: true }, async () => "yes", {
     ...homes, identity: () => provider.secret, log: () => {}, consent: async () => consent,
     claim: async () => { throw Error("invite_exhausted"); },
     running: () => { throw Error("must not check running after failed claim"); },
@@ -470,7 +490,7 @@ test("failed local and SSH claims do not restart daemons", async (t) => {
   assert.ok(commands.every((command) => !command.includes("stop") && !command.includes("start")));
 });
 
-test("SSH does not receive consent flags not given locally, and a stopped VM is not started", async (t) => {
+test("SSH does not receive consent flags not given locally, and an explicitly selected stopped VM starts", async (t) => {
   const commands: string[] = [];
   const homes = fixture(t);
   const summary = await joinMachines(invite, ["_vm.example"], {}, async () => "yes", {
@@ -488,7 +508,8 @@ test("SSH does not receive consent flags not given locally, and a stopped VM is 
   });
   assert.equal(joinExitCode(summary), 0);
   assert.ok(commands.every((command) => !/--accept-policy|--confirm-age/.test(command)));
-  assert.ok(commands.every((command) => !/stop'|start'/.test(command)));
+  assert.ok(commands.some((command) => command.includes("start")));
+  assert.ok(commands.every((command) => !command.includes("stop")));
   assert.equal(loadTarget("vm-example", homes.targetsHome).ssh, "_vm.example");
 });
 
