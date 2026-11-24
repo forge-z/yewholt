@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { openSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
@@ -204,7 +203,7 @@ async function install(rest: string[]): Promise<void> {
   console.log(`Daemon pubkey: ${daemonPubkey}`);
   console.log(`Relay: ${relay}. Admit the daemon pubkey to this relay.`);
   console.log("Back up secrets/. Buzz has no key rotation; a lost secret is a lost identity.");
-  console.log(`Provider keys: /login in yh as the daemon user, or ${envFile} (mode 0600). Restart after changes.`);
+  console.log(`Provider keys: /login in yh as the daemon user, or ${envFile} (mode 0600). No restart needed.`);
   console.log("Next: yewholt start");
 }
 

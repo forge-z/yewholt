@@ -83,6 +83,8 @@ test("usage lists the harness first, then the daemon commands", () => {
   const code = text.indexOf("yewholt code [");
   assert.ok(harness >= 0 && code >= 0, "harness lines");
   assert.match(text, /yewholt code --help/);
+  // install refuses to run without --relay-pubkey, so usage must not show it as optional.
+  assert.match(text, /^ {2}yewholt install --relay <url> --relay-pubkey <pubkey> \[--home dir\]$/m);
   for (const command of DAEMON_COMMANDS.filter((c) => c !== "daemon")) {
     const at = text.indexOf(`yewholt ${command}`);
     assert.ok(at > code && at > harness, command);
@@ -126,6 +128,9 @@ test("external install preserves the daemon identity without installing or stopp
   const first = runCli(install, home);
   assert.equal(first.status, 0, first.stderr);
   assert.match(first.stdout, /^Daemon pubkey: [a-f0-9]{64}$/m);
+  // The daemon reloads provider keys from .env and Pi logins live (README "Models").
+  assert.doesNotMatch(first.stdout, /Restart after changes/);
+  assert.match(first.stdout, /^Provider keys: .*No restart needed\.$/m);
   assert.equal(runCli(install, home).stdout, first.stdout);
   assert.equal(runCli(["install", "--relay", "https://buzz.example"], home).status, 1);
   assert.equal(runCli(["install", "--relay", "https://buzz.example", "--relay-pubkey", ""], home).status, 1);

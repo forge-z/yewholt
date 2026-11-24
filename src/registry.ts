@@ -74,7 +74,3 @@ export const RegistryDoc = defineDoc<RegistryState>({
   initial: () => ({ bots: [], processed: [], outbox: [], highWater: 0 }),
   checkpointWhen: () => true,
 });
-
-export function emptyRegistry(): RegistryState {
-  return { bots: [], processed: [], outbox: [], highWater: 0 };
-}

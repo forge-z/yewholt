@@ -37,7 +37,9 @@ test("targets refuse missing, non-private, secret-bearing, mismatched, local, an
   const valid = { ...relay, id };
   const refused = () => assert.throws(() => loadTarget(id, provider));
   refused();
-  writeTarget(valid, 0o644);
+  writeTarget(valid);
+  // writeFileSync's mode is masked by the process umask; set the non-private mode explicitly.
+  chmodSync(target, 0o644);
   refused();
   chmodSync(target, 0o600);
   assert.deepEqual(loadTarget(id, provider), { ...relay, wake: undefined });

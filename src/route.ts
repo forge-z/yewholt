@@ -50,7 +50,7 @@ Usage:
   yewholt code [args...]         Forward every argument to the harness unchanged
                                  (yewholt code --help shows the harness flags)
 
-  yewholt install --relay <url> [--relay-pubkey <pubkey>] [--home dir]
+  yewholt install --relay <url> --relay-pubkey <pubkey> [--home dir]
                                  Set up the daemon for an existing Buzz relay
   yewholt relay add <url> --relay-pubkey <pubkey> [--home dir]
   yewholt relay join [<invite-url>] [--relay-pubkey <pubkey>] [--accept-policy] [--confirm-age] [--home dir]
