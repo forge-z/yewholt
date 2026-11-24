@@ -79,11 +79,13 @@ Invite**). Node.js 22.19 or newer on every machine.
    then run `yh targets remove <id> --daemon <pubkey>`. The public key check
    prevents removing a replacement machine with the same hostname by mistake.
 
-   If operator discovery is unavailable (for example, the VM prints
-   `on the Mac: run yh join`), use `yh pair add` and `yh targets add` from
+   If operator discovery is unavailable (the VM prints
+   `operator discovery is unavailable, so pair manually`), use `yh pair add` and
+   `yh targets add` from
    [Manual setup without an invite](#manual-setup-without-an-invite) instead
    of pasting the VM's invite on the Mac. The VM is already joined, so skip
-   `yh install`; use `yh admin keys` only to read its public key.
+   `yh install`; the VM's output includes its daemon public key (also shown
+   by `yh admin keys`).
 
 To use only the coding CLI, step 1 up to `npm link` is enough; run `yh`.
 

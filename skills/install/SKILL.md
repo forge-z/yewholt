@@ -146,7 +146,8 @@ If the offer expired, run `yh join --daemon` again **on the VM** with the same
 link. This refreshes the offer without consuming another use if the daemon is
 still a member.
 
-If the join output instead says `on the Mac: run yh join`, operator discovery
+If the join output instead says
+`operator discovery is unavailable, so pair manually`, operator discovery
 isn't available for that join. See [Setup step 3](../../README.md#setup) for
 how to pair and add the target without the invite or reinstalling the VM.
 

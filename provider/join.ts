@@ -503,8 +503,9 @@ export async function joinDaemon(invite: Invite, options: JoinOptions, ask: (que
     deps.log(operator
       ? "Next, in Buzz on the relay operator's Mac: create a Yewholt agent and pick this machine as its target within 24 hours. " +
         "That first agent pairs the Mac's provider with this daemon; no invite is needed there."
-      : "Next, on the Mac: run yh join and paste the same invite within 24 hours. The Mac pairs with this daemon over Buzz " +
-        "without spending another invite use when its provider is already a member.");
+      : "Next, operator discovery is unavailable, so pair manually without this invite: on the Mac, run yh pair to show " +
+        `its provider key; here, run yh pair add <provider key> --label "My Mac" --relay ${quote(invite.relayUrl)}; ` +
+        `on the Mac, run yh targets add <id> --relay ${quote(invite.relayUrl)} --daemon ${pubkeyOf(owner)}.`);
     deps.log("Models: run yh here and enter /login, then reopen the model picker in Buzz.");
     return [{ machine, status }];
   } catch (error) {

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, statSync } from "node:fs";
+import { mkdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import type { Models } from "@earendil-works/pi-ai";
@@ -900,14 +900,5 @@ export function ensureOwnerKey(home: string): string {
   } catch {
     const keys = writeKey(path);
     return keys.pubkey;
-  }
-}
-
-export function chmodHome(home: string): void {
-  chmodSync(home, 0o700);
-  try {
-    chmodSync(dirname(ownerKeyPath(home)), 0o700);
-  } catch {
-    // installed later
   }
 }

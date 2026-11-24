@@ -62,7 +62,12 @@ test("VM join initializes a fresh daemon from the invite alone and leaves a pair
   const offer = readPairingOffer(daemonHome);
   assert.equal(offer?.key, offerKey(invite.code, invite.relayUrl));
   assert.ok(!JSON.stringify(offer).includes(invite.code));
-  assert.ok(log.some((line) => line.includes("run yh join")));
+  // Without operator discovery, guide to the documented manual pairing (README "Manual setup without an invite"),
+  // not to pasting the VM's invite on the Mac.
+  const next = log.find((line) => line.startsWith("Next"));
+  assert.ok(next);
+  assert.ok(next.includes("yh pair add") && next.includes("yh targets add") && next.includes(daemon) && next.includes(invite.relayUrl));
+  assert.ok(!/paste|run yh join/.test(next));
   assert.equal(readPairingOffer(daemonHome, Date.now() + 25 * 60 * 60 * 1000), undefined);
 });
 

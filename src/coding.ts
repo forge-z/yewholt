@@ -1,5 +1,3 @@
-import { sha256 } from "@noble/hashes/sha2.js";
-import { bytesToHex } from "@noble/hashes/utils.js";
 import { classifyBash } from "./danger.js";
 import { judgePath, type Roots } from "./workspace.js";
 
@@ -33,9 +31,4 @@ export function judgeCall(name: string, args: Record<string, unknown> | undefine
     return { kind: "approve", subject: path, reasons: [verdict.reason] };
   }
   return { kind: "allow" };
-}
-
-/** One key per tool and exact arguments: an approval binds to what the person saw. */
-export function approvalKey(name: string, args: unknown): string {
-  return `a${bytesToHex(sha256(new TextEncoder().encode(JSON.stringify([name, args ?? null])))).slice(0, 40)}`;
 }

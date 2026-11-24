@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { AgentFiles, PRESENCE, agentStatuses, daemonName, type AgentDiagnostics, type AgentScan } from "./agents.js";
 import { configuredRelays, loadConfig, type RelayConfig, type YewholtConfig } from "./config.js";
+import { writeAtomic } from "./control-files.js";
 import { CONTROL_KIND } from "./control-protocol.js";
 import { DeployControl, lastDeploys } from "./deploy-control.js";
 import { liveEnvFile } from "./env-file.js";
@@ -437,7 +438,7 @@ async function publishOutbox(
   await session.ackOutbox(acked);
 }
 
-async function writeStatus(home: string, session: Yewholt, config: YewholtConfig, target: string,
+export async function writeStatus(home: string, session: Yewholt, config: YewholtConfig, target: string,
   diagnostics: AgentDiagnostics | undefined, links: ReadonlyMap<string, BotLinks<BotRecord>>): Promise<void> {
   const state = await session.snapshot();
   const body = {
@@ -464,7 +465,8 @@ async function writeStatus(home: string, session: Yewholt, config: YewholtConfig
     approvals: (state.approvals ?? []).map((item) => ({ id: item.id, pubkey: item.pubkey, channelId: item.channelId, tool: item.tool, subject: item.subject })),
     outbox: state.outbox.length,
   };
-  writeFileSync(statusPath(home), `${JSON.stringify(body, null, 2)}\n`);
+  // The CLI reads this file while the daemon rewrites it every few seconds; publish whole files only.
+  writeAtomic(statusPath(home), `${JSON.stringify(body, null, 2)}\n`, 0o600);
 }
 
 function sleep(ms: number): Promise<void> {
