@@ -17,10 +17,10 @@
     "node": ">=22.19.0"
   },
   "dependencies": {
-    "@earendil-works/chord": "1.6.0",
-    "@earendil-works/pi-ai": "1.6.0",
-    "@earendil-works/pi-coding-agent": "1.6.0",
-    "@earendil-works/pi-durable": "1.6.0",
+    "@earendil-works/chord": "1.6.1",
+    "@earendil-works/pi-ai": "1.6.1",
+    "@earendil-works/pi-coding-agent": "1.6.1",
+    "@earendil-works/pi-durable": "1.6.1",
     "@noble/curves": "^2.4.0",
     "@noble/hashes": "^2.4.0",
     "ws": "^8.23.0"
