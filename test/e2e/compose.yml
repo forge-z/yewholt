@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:17-alpine
+    image: postgres:19-alpine
     environment:
       POSTGRES_DB: buzz
       POSTGRES_USER: buzz
@@ -11,7 +11,7 @@ services:
       timeout: 3s
       retries: 30
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
   relay:
     image: ghcr.io/block/buzz:0.3.0@sha256:84f34c5b801192665b1a05939518d746f25184babf4d6e927d0de7e12e9c5674
     depends_on:
