@@ -107,6 +107,9 @@ node --test test/e2e/onboarding.test.mjs
 ```
 
 The relay binds to loopback only. Set `YEWHOLT_E2E_PORT` if port 3443 is in use.
+The test creates its own Postgres and Redis containers and removes their data
+volumes when it exits. Pull requests changing the container build configuration
+or npm dependencies also build the daemon image without publishing it.
 
 ## Models
 
