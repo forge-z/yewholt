@@ -157,6 +157,10 @@ After this one-time migration, subsequent bridge and UI updates do not require
 
 ## Harness
 
+Yewholt ships with [Pi v1.6.1](https://github.com/earendil-works/pi/releases/tag/v1.6.1).
+Pi migrates the old `showCacheMissNotices` setting; the individual notice
+toggles are now under **Notices** in `/settings`.
+
 ```sh
 cd ~/src/some-project
 yh                            # Pi on this directory
